@@ -880,3 +880,103 @@ def test_error_result_and_structured_result_sanitize():
     dumped = json.dumps(resp, ensure_ascii=False)
     assert "leak" not in dumped
     assert "http://portal.example.com/srun" in resp["error"]
+
+
+# ── P1-2：_dispatch 主信封脱敏收口 ──
+
+
+def _dispatch_once(monkeypatch, capsys, method: str, handler) -> dict:
+    """注册临时 handler 跑一次 _dispatch_guarded，返回写出的唯一响应信封。"""
+
+    async def _run():
+        worker_main.COMMANDS[method] = handler
+        try:
+            await worker_main._dispatch_guarded({"id": 900, "method": method, "params": {}})
+        finally:
+            del worker_main.COMMANDS[method]
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1
+        return json.loads(lines[0])
+
+    return asyncio.run(_run())
+
+
+def test_dispatch_success_envelope_sanitizes_data_message(monkeypatch, capsys):
+    """P1-2 主信封收口：success 信封 data.message 的 token URL 写出前被剥掉。
+
+    run_steps 的 StructuredResult 以 success 信封返回，message 此前未经
+    _sanitize_error 直达 Rust parse_ipc_response 进登录历史。
+    """
+
+    async def handler(params):
+        return {
+            "outcome": "success",
+            "message": "执行成功 at http://portal.example.com/srun?token=leak1&x=1",
+            "duration_ms": 1,
+            "screenshots": [],
+        }
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_success", handler)
+    assert envelope["result"]["success"] is True
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak1" not in dumped and "token" not in dumped
+    message = envelope["result"]["data"]["message"]
+    assert "http://portal.example.com/srun" in message
+    assert message.startswith("执行成功")
+
+
+def test_dispatch_debug_response_sanitizes_nested_results(monkeypatch, capsys):
+    """debug 路径（同一 _dispatch）：data.results[*].message 嵌套字段同样被脱敏。"""
+
+    async def handler(params):
+        return {
+            "running": False,
+            "task_id": "t1",
+            "current_step": 1,
+            "total_steps": 1,
+            "steps": [],
+            "results": [
+                {
+                    "step_index": 0,
+                    "success": False,
+                    "message": "执行异常: Timeout at http://portal.example.com/?token=leak2",
+                    "running": False,
+                }
+            ],
+            "screenshot_url": None,
+        }
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_debug", handler)
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak2" not in dumped and "token" not in dumped
+    assert "http://portal.example.com/" in envelope["result"]["data"]["results"][0]["message"]
+
+
+def test_dispatch_error_envelope_still_sanitized(monkeypatch, capsys):
+    """error 信封（WorkerError）回归：既有脱敏行为不变。"""
+
+    async def handler(params):
+        raise WorkerError(
+            "network_error",
+            "导航失败: http://portal.example.com/srun?token=leak3#login",
+        )
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_error", handler)
+    assert envelope["result"]["success"] is False
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak3" not in dumped and "#login" not in dumped
+    assert envelope["result"]["error"] == envelope["result"]["data"]["message"]
+    assert "http://portal.example.com/srun" in envelope["result"]["error"]
+
+
+def test_dispatch_envelope_keeps_plain_message_untouched(monkeypatch, capsys):
+    """无敏感模式的合法普通中文文案不被误改。"""
+    plain = "执行成功；1 个非必须步骤失败: #2"
+
+    async def handler(params):
+        return {"outcome": "success", "message": plain, "duration_ms": 1, "screenshots": []}
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_plain_message", handler)
+    assert envelope["result"]["success"] is True
+    assert envelope["result"]["data"]["message"] == plain
+    assert envelope["result"]["error"] is None

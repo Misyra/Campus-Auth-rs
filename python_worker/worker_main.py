@@ -24,6 +24,7 @@ import re
 import sys
 import threading
 import time
+from typing import Callable
 
 # 标准库导入完成后，导入本 Worker 模块（其顶层导入 playwright 等重型依赖，
 # 放在此处延后加载，避免 import 阶段即因缺失依赖而崩溃）
@@ -295,14 +296,60 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
             logger.debug("入队退出哨兵失败（事件循环可能已关闭）: %r", exc)
 
 
+def _sanitize_message_fields(node: object) -> None:
+    """递归脱敏 dict / list 树中名为 message / error 的字符串字段（就地修改）。
+
+    debug 会话响应的 ``data.results[*].message`` 等嵌套结构与扁平字段统一覆盖；
+    ``_sanitize_error`` 对无 query/fragment 的文本原样返回（幂等），重复应用无害。
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("message", "error") and isinstance(value, str):
+                node[key] = _sanitize_error(value)
+            else:
+                _sanitize_message_fields(value)
+    elif isinstance(node, list):
+        for item in node:
+            _sanitize_message_fields(item)
+
+
+def _sanitize_response_result(result: object) -> object:
+    """响应信封统一脱敏：所有命令响应在落 stdout 前的最后闸口。
+
+    ``_error_result`` / ``_structured_result`` 各自分内已脱敏，但 handler 以
+    success 信封返回的 ``data``（run_steps 的 StructuredResult.message、debug
+    会话 results 等）此前不经脱敏直达 Rust ``parse_ipc_response`` 进登录历史
+    ——Playwright 异常文本携带门户 URL（含 token=）是真实场景。此处对信封
+    顶层 ``error`` 与 ``data`` 树内 message / error 字段统一过 ``_sanitize_error``，
+    一处收口覆盖全部裸拼点。
+    """
+    if not isinstance(result, dict):
+        return result
+    if isinstance(result.get("error"), str):
+        result["error"] = _sanitize_error(result["error"])
+    _sanitize_message_fields(result.get("data"))
+    return result
+
+
+def _sanitize_emitter(emit: Callable[[int | None, dict], None]) -> Callable[[int | None, dict], None]:
+    """给响应写出函数包一层信封脱敏（``_dispatch`` 写响应前的统一收口）。"""
+
+    def _emit_sanitized(msg_id: int | None, result: dict) -> None:
+        emit(msg_id, _sanitize_response_result(result))
+
+    return _emit_sanitized
+
+
 async def _dispatch(msg: dict, emit=None) -> None:
     """分发单条命令并写回响应。
 
     ``emit`` 为响应写出函数，缺省全局 ``emit_response``；``_dispatch_guarded``
     传入单次守卫包装——真实结果与超时错误竞争同一 id 时仅首个生效（BRG-4）。
+    所有响应信封在写出前统一过 ``_sanitize_response_result`` 脱敏（P1-2 收口）。
     """
     if emit is None:
         emit = emit_response
+    emit = _sanitize_emitter(emit)
     msg_id = msg.get("id")
     method = msg.get("method")
     params = msg.get("params") or {}
