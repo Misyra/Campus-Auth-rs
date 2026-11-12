@@ -245,26 +245,29 @@ impl ConfigService {
             tracing::debug!(path = %p.display(), error = %e, "创建密钥目录失败");
         }
 
-        // 清理上次崩溃残留的临时文件：原子写入（utils::io::atomic_write_bytes）
-        // 生成的前缀为 `.tmp_` 的随机名中间产物（后缀仍是 .json），历史实现按
-        // extension=="tmp" 匹配永远不命中；且 profiles 目录同样会产生残留，
-        // 一并覆盖（F8）
-        for dir in [&config_dir, &profiles_dir] {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with(crate::config::TMP_PREFIX)
-                        && let Err(e) = std::fs::remove_file(entry.path())
-                    {
-                        tracing::debug!(
-                            path = %entry.path().display(),
-                            error = %e,
-                            "清理崩溃残留的临时配置文件失败"
-                        );
-                    }
-                }
-            }
+        // 清理上次崩溃残留的临时文件（F8）：原子写入（utils::io::atomic_write_bytes
+        // / atomic_copy_file）生成的 `.tmp_` 前缀随机名中间产物会残留在目标目录。
+        // 覆盖面从 config/profiles 两桶扩展到任务域（tasks 根 + browser/scripts/http
+        // 三桶：保存任务与 `.order.json` 均为原子写）与环境目录（uv 下载残留
+        // uv-archive.tmp / uv.tmp，此前仅在下次下载前删除，装好 uv 后便无人清理）。
+        // ConfigService 是容器拓扑中最先构造的服务，启动清扫挂在此处一次完成。
+        let atomic_tmp = |name: &str| name.starts_with(crate::config::TMP_PREFIX);
+        for dir in [
+            &config_dir,
+            &profiles_dir,
+            &crate::utils::paths::tasks_dir(&base_path),
+            &crate::utils::paths::browser_tasks_dir(&base_path),
+            &crate::utils::paths::scripts_dir(&base_path),
+            &crate::utils::paths::http_tasks_dir(&base_path),
+        ] {
+            sweep_tmp_residue(dir, &atomic_tmp);
         }
+        // 环境目录：原子写残留之外另有 uv 下载/解压的固定名临时文件
+        sweep_tmp_residue(&crate::utils::paths::env_dir(&base_path), &|name: &str| {
+            name.starts_with(crate::config::TMP_PREFIX)
+                || name == "uv-archive.tmp"
+                || name == "uv.tmp"
+        });
 
         // 读取并（必要时）迁移 settings
         let settings = Self::load_or_init_settings(&settings_path, &config_dir)?;
@@ -1174,6 +1177,37 @@ fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
 }
 
+/// 清理单个目录内崩溃残留的临时文件，返回删除数量
+///
+/// `is_residue` 为文件名残留判定闭包，由调用方按桶口径给出：配置 / 任务域各桶
+/// 是原子写（`utils::io::atomic_write_bytes` / `atomic_copy_file`）的 `.tmp_`
+/// 前缀（含 `.tmp_copy_` 变体），环境目录另有 uv 下载/解压的固定名
+/// `uv-archive.tmp` / `uv.tmp`。只处理文件——子目录（`.trash`、`.venv` 等）
+/// 不进入判定；目录不存在时静默返回 0（未预建 / 被外部删除均属常态）。
+fn sweep_tmp_residue(dir: &Path, is_residue: &impl Fn(&str) -> bool) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !entry.path().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_residue(&name) {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::debug!(
+                    path = %entry.path().display(),
+                    error = %e,
+                    "清理崩溃残留的临时文件失败"
+                ),
+            }
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1233,6 +1267,80 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("10"));
         assert!(display.contains("6"));
+    }
+
+    // ============ 启动临时文件清扫（F8 扩展面） ============
+
+    /// 清扫按残留口径删文件：`.tmp_` 前缀（含 `.tmp_copy_` 变体）与 uv 固定名
+    /// 残留被清，正常文件与子目录不动；环境目录口径之外的 uv 固定名不清
+    #[test]
+    fn test_sweep_tmp_residue_removes_matched_files_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join(".tmp_ab12.json"), b"{}").unwrap();
+        std::fs::write(dir.join(".tmp_copy_xy.json"), b"{}").unwrap();
+        std::fs::write(dir.join("uv-archive.tmp"), b"{}").unwrap();
+        std::fs::write(dir.join("uv.tmp"), b"{}").unwrap();
+        std::fs::write(dir.join("uv"), b"real").unwrap();
+        std::fs::write(dir.join("settings.json"), b"{}").unwrap();
+        std::fs::create_dir(dir.join(".trash")).unwrap();
+
+        // 环境目录口径：`.tmp_` 前缀 + uv 下载/解压固定名
+        let env_residue = |name: &str| {
+            name.starts_with(crate::config::TMP_PREFIX)
+                || name == "uv-archive.tmp"
+                || name == "uv.tmp"
+        };
+        assert_eq!(sweep_tmp_residue(dir, &env_residue), 4);
+        assert!(!dir.join(".tmp_ab12.json").exists());
+        assert!(!dir.join(".tmp_copy_xy.json").exists());
+        assert!(!dir.join("uv-archive.tmp").exists());
+        assert!(!dir.join("uv.tmp").exists());
+        assert!(dir.join("uv").exists(), "真正的 uv 可执行文件不得误删");
+        assert!(dir.join("settings.json").exists());
+        assert!(dir.join(".trash").exists(), "子目录不进入清扫");
+
+        // 配置/任务桶口径：仅 `.tmp_` 前缀，uv 固定名不匹配
+        std::fs::write(dir.join("uv-archive.tmp"), b"{}").unwrap();
+        assert_eq!(
+            sweep_tmp_residue(dir, &|name: &str| name
+                .starts_with(crate::config::TMP_PREFIX)),
+            0
+        );
+        assert!(dir.join("uv-archive.tmp").exists());
+    }
+
+    /// ConfigService::new 的启动清扫应覆盖任务域各桶与环境目录（接线验证）
+    #[tokio::test]
+    async fn test_config_service_new_sweeps_task_and_env_tmp_residues() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 任务桶与环境目录由各自服务构造，本测试手动预建并放置残留
+        let browser = crate::utils::paths::browser_tasks_dir(tmp.path());
+        let scripts = crate::utils::paths::scripts_dir(tmp.path());
+        let http = crate::utils::paths::http_tasks_dir(tmp.path());
+        let env = crate::utils::paths::env_dir(tmp.path());
+        for dir in [&browser, &scripts, &http, &env] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(browser.join(".tmp_ghost.json"), b"{}").unwrap();
+        std::fs::write(scripts.join(".tmp_ghost.json"), b"{}").unwrap();
+        std::fs::write(http.join(".tmp_ghost.json"), b"{}").unwrap();
+        std::fs::write(env.join("uv-archive.tmp"), b"{}").unwrap();
+        std::fs::write(env.join("uv.tmp"), b"{}").unwrap();
+        // 正常文件不得被清扫波及
+        std::fs::write(browser.join("real.json"), b"{}").unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+
+        assert!(!browser.join(".tmp_ghost.json").exists());
+        assert!(!scripts.join(".tmp_ghost.json").exists());
+        assert!(!http.join(".tmp_ghost.json").exists());
+        assert!(!env.join("uv-archive.tmp").exists());
+        assert!(!env.join("uv.tmp").exists());
+        assert!(browser.join("real.json").exists(), "正常任务文件不得被清扫");
     }
 
     // ============ .trash 回滚区轮转清理 ============
