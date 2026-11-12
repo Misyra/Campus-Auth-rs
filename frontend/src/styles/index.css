@@ -27,6 +27,7 @@
 @import "./components/toggle.css";
 @import "./components/notification.css";
 @import "./components/modal.css";
+@import "./components/command-palette.css";
 @import "./components/update-dialog.css";
 @import "./components/log-viewer.css";
 @import "./components/misc.css";
