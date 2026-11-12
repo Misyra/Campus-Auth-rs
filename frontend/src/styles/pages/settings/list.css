@@ -93,9 +93,11 @@
 }
 .settings-list-page .card-body + .card-body { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
 .settings-list-page .card-body:has(+ .card-body) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-/* 控件行内的 form-row：写在下面 display:contents 组之前保持特异度升序（命中双规则时
-   .settings-list-page .card-body .form-row 恒以高特异度取胜，与先后顺序无关） */
-.setting-row-control .form-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; justify-content: flex-end; }
+/* `.setting-row-control .form-row`（flex 右对齐）已于 2026-11-13 删除：模板里
+   .setting-row-control（SettingsRow 插槽容器与监测/浏览器页共 6 处）内均无 .form-row
+   后代——.form-row 现存于 HttpFlowFields、档案/AI/任务弹窗，都不在设置页，规则从不命中；
+   即便日后出现，也会被下方 .settings-list-page .card-body .form-row 的 display:contents
+   以更高特异度（0,3,0 > 0,2,0）无条件中和。 */
 .settings-list-page :is(.settings-grid-2col, .ocr-settings-grid) { display: block; }
 .settings-list-page .settings-grid-2col > div:not(.setting-row),
 .settings-list-page .card-body .form-row { display: contents; }
