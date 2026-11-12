@@ -45,8 +45,9 @@ pub use profiles::{ProfileApi, ProfileSummary};
 pub use runtime::{ConfigReloadSignal, ProfileSnapshot, RuntimeConfig, build_runtime_config};
 pub use schema::{
     AppSettings, BrowserSettings, GlobalConfig, LoggingSettings, LoginChannel, MonitorSettings,
-    PauseSettings, ProfileData, RetrySettings, SettingsData, StartupAction, UpdateChannel,
-    UpdaterSettings, WorkerSettings,
+    NOTIFICATION_EVENT_TYPES, NotificationChannel, NotificationChannelKind, NotificationHeader,
+    NotificationSettings, PauseSettings, ProfileData, RetrySettings, SettingsData, StartupAction,
+    UpdateChannel, UpdaterSettings, WorkerSettings,
 };
 pub use service::ConfigError;
 pub use service::ConfigService;

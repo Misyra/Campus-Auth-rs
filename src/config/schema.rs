@@ -57,6 +57,8 @@ pub struct GlobalConfig {
     pub app: AppSettings,
     /// 自动更新配置
     pub updater: UpdaterSettings,
+    /// 推送通知配置（webhook / Bark / Server酱 / Telegram 通道）
+    pub notification: NotificationSettings,
 }
 
 /// 浏览器启动参数
@@ -477,6 +479,446 @@ impl Default for UpdaterSettings {
     }
 }
 
+/// 推送通知支持的事件类型白名单（与 `events::AppEvent::kind()` 同值；前端
+/// 「事件类型开关组」的可选项也以此为准）
+pub const NOTIFICATION_EVENT_TYPES: &[&str] = &[
+    "login_succeeded",
+    "login_failed",
+    "network_down",
+    "network_up",
+    "task_finished",
+    "task_failed",
+    "update_available",
+    "environment_ready",
+    "profile_switched",
+];
+
+/// 推送通道数量上限（防误配刷屏与端点滥用；前端同口径）
+pub const NOTIFICATION_MAX_CHANNELS: usize = 10;
+
+/// 单通道超时上下界（秒）
+pub const NOTIFICATION_TIMEOUT_MIN: u32 = 1;
+pub const NOTIFICATION_TIMEOUT_MAX: u32 = 60;
+
+/// 重试退避上下界（重试次数不含首次；基准间隔为首次重试前的等待）
+pub const NOTIFICATION_RETRY_MAX_ATTEMPTS_MAX: u32 = 10;
+pub const NOTIFICATION_RETRY_BASE_INTERVAL_MAX: u32 = 60;
+
+/// webhook 自定义请求头数量上限
+pub const NOTIFICATION_MAX_HEADERS: usize = 16;
+
+/// 通道默认超时（秒）
+fn default_notification_timeout() -> u32 {
+    10
+}
+
+/// 推送通道类型
+///
+/// `Webhook` 为自定义 POST JSON 通道；`Bark` / `Serverchan` / `Telegram`
+/// 为预设通道（各自只需凭据字段，消息格式内建模板化，无需用户写模板）。
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationChannelKind {
+    /// 自定义 Webhook（POST JSON 模板）
+    #[default]
+    Webhook,
+    /// Bark（iOS 推送）
+    Bark,
+    /// Server酱（微信推送）
+    Serverchan,
+    /// Telegram Bot
+    Telegram,
+}
+
+impl NotificationChannelKind {
+    /// 中文展示名（通道 `name` 留空时回退使用）
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Webhook => "Webhook",
+            Self::Bark => "Bark",
+            Self::Serverchan => "Server酱",
+            Self::Telegram => "Telegram",
+        }
+    }
+}
+
+/// webhook 自定义请求头（`value` 可为密钥：明文存储，口径与 `proxy_url` 同级，
+/// 暴露面由 GET/PATCH /api/config 的 token 鉴权兜底）
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct NotificationHeader {
+    /// 头名称（如 `Authorization`）
+    pub name: String,
+    /// 头值（可为密钥）
+    pub value: String,
+}
+
+/// 单个推送通道（serde tagged，`type` 为判别字段，snake_case）
+///
+/// 各通道共有 `id` / `name` / `enabled` / `timeout_seconds`；预设通道只需
+/// 凭据字段，webhook 额外携带自定义头与 JSON 模板。
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NotificationChannel {
+    /// 自定义 Webhook：向 `url` POST 渲染后的 JSON 模板
+    Webhook {
+        /// 通道唯一 id（同一 settings 内去重）
+        id: String,
+        /// 显示名（空时前端/日志回退类型名）
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// 目标 URL（仅 http/https）
+        url: String,
+        /// 自定义请求头（可含密钥头；未含 `content-type` 时补 `application/json`）
+        #[serde(default)]
+        headers: Vec<NotificationHeader>,
+        /// POST JSON 模板，占位符 `{{event_type}}/{{summary}}/{{profile}}/{{time}}/{{detail}}`；
+        /// 留空使用内建默认模板
+        #[serde(default)]
+        body_template: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+    /// Bark：POST `{server}/{device_key}`，内建 `{"title","body"}` JSON
+    Bark {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// 自建服务器地址（留空使用官方 `https://api.day.app`）
+        #[serde(default)]
+        server: String,
+        /// 设备 key
+        device_key: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+    /// Server酱：POST `https://sctapi.ftqq.com/{send_key}.send`（表单 title/desp）
+    Serverchan {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// SendKey（sct 开头）
+        send_key: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+    /// Telegram Bot：POST `https://api.telegram.org/bot{token}/sendMessage`
+    Telegram {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// Bot token
+        bot_token: String,
+        /// 目标 chat id（数字或 @channel）
+        chat_id: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+}
+
+impl NotificationChannel {
+    /// 通道类型判别
+    pub fn kind(&self) -> NotificationChannelKind {
+        match self {
+            Self::Webhook { .. } => NotificationChannelKind::Webhook,
+            Self::Bark { .. } => NotificationChannelKind::Bark,
+            Self::Serverchan { .. } => NotificationChannelKind::Serverchan,
+            Self::Telegram { .. } => NotificationChannelKind::Telegram,
+        }
+    }
+
+    /// 通道唯一 id
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Webhook { id, .. }
+            | Self::Bark { id, .. }
+            | Self::Serverchan { id, .. }
+            | Self::Telegram { id, .. } => id,
+        }
+    }
+
+    /// 用户填写的显示名（可能为空）
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Webhook { name, .. }
+            | Self::Bark { name, .. }
+            | Self::Serverchan { name, .. }
+            | Self::Telegram { name, .. } => name,
+        }
+    }
+
+    /// 展示名：`name` 非空用它，否则回退类型中文名
+    pub fn display_name(&self) -> &str {
+        let name = self.name().trim();
+        if name.is_empty() {
+            self.kind().display_label()
+        } else {
+            name
+        }
+    }
+
+    /// 是否启用
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Webhook { enabled, .. }
+            | Self::Bark { enabled, .. }
+            | Self::Serverchan { enabled, .. }
+            | Self::Telegram { enabled, .. } => *enabled,
+        }
+    }
+
+    /// 单次请求超时（秒）
+    pub fn timeout_seconds(&self) -> u32 {
+        match self {
+            Self::Webhook {
+                timeout_seconds, ..
+            }
+            | Self::Bark {
+                timeout_seconds, ..
+            }
+            | Self::Serverchan {
+                timeout_seconds, ..
+            }
+            | Self::Telegram {
+                timeout_seconds, ..
+            } => *timeout_seconds,
+        }
+    }
+}
+
+/// 推送通知设置（`global.notification` 节；serde default 免迁移，不 bump config_version）
+///
+/// 保存侧校验见 [`Self::validate`]（PATCH /api/config 合并后调用）；
+/// 消费方为 `crate::notification`（订阅 EventBus 后按配置推送）。
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct NotificationSettings {
+    /// 总开关（关闭后服务空转，不发送任何通知；测试发送端点不受此开关限制）
+    pub enabled: bool,
+    /// 推送通道列表（最多 [`NOTIFICATION_MAX_CHANNELS`] 个）
+    pub channels: Vec<NotificationChannel>,
+    /// 触发通知的事件类型集合（白名单校验；空集合 = 不推送任何事件）
+    pub events: Vec<String>,
+    /// 是否启用免打扰时段
+    pub quiet_enabled: bool,
+    /// 免打扰开始小时（0-23）
+    pub quiet_start_hour: u8,
+    /// 免打扰开始分钟（0-59）
+    pub quiet_start_minute: u8,
+    /// 免打扰结束小时（0-23；支持跨零点，如 22:00–08:00）
+    pub quiet_end_hour: u8,
+    /// 免打扰结束分钟（0-59）
+    pub quiet_end_minute: u8,
+    /// 发送失败的重试次数（不含首次；指数退避），0 = 只发一次
+    pub retry_max_attempts: u32,
+    /// 首次重试前等待的基准秒数，之后逐次翻倍（如 2 → 4 → 8）
+    pub retry_base_interval_seconds: u32,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            // 默认关闭：推送是可选能力，需用户显式添加通道并开启
+            enabled: false,
+            channels: Vec::new(),
+            // 默认只推最值得知道的两类：登录失败与网络断开（成功/恢复类噪音大）
+            events: vec!["login_failed".to_string(), "network_down".to_string()],
+            quiet_enabled: false,
+            quiet_start_hour: 22,
+            quiet_start_minute: 0,
+            quiet_end_hour: 8,
+            quiet_end_minute: 0,
+            retry_max_attempts: 3,
+            retry_base_interval_seconds: 2,
+        }
+    }
+}
+
+/// 校验 URL 仅 http/https 且带主机名（推送通道 URL 与 Bark 自建服务器共用）
+fn validate_notification_url(url: &str, label: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| format!("{label}格式非法: {url}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!("{label}仅支持 http/https，当前为: {other}"));
+        }
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if host.is_empty() {
+        return Err(format!("{label}缺少主机名: {url}"));
+    }
+    Ok(())
+}
+
+impl NotificationSettings {
+    /// 事件类型是否在推送集合内
+    pub fn is_event_enabled(&self, kind: &str) -> bool {
+        self.events.iter().any(|e| e == kind)
+    }
+
+    /// 免打扰窗口（本地时间判定）；时/分越界（手改配置文件）时返回 `None`
+    /// 视为未启用窗口，避免解析失败误伤
+    pub fn quiet_window(&self) -> Option<(chrono::NaiveTime, chrono::NaiveTime)> {
+        if !self.quiet_enabled {
+            return None;
+        }
+        let start = chrono::NaiveTime::from_hms_opt(
+            u32::from(self.quiet_start_hour),
+            u32::from(self.quiet_start_minute),
+            0,
+        )?;
+        let end = chrono::NaiveTime::from_hms_opt(
+            u32::from(self.quiet_end_hour),
+            u32::from(self.quiet_end_minute),
+            0,
+        )?;
+        Some((start, end))
+    }
+
+    /// 保存侧全量校验（PATCH /api/config 合并后调用；全部中文错误信息）
+    ///
+    /// 校验项：通道数量 / id 唯一且非空 / URL 仅 http-https / 超时与重试上下界 /
+    /// 事件类型白名单 / 免打扰时段时-分范围 / webhook 自定义头数量与头名 /
+    /// webhook 模板用样例值渲染后必须是合法 JSON。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.channels.len() > NOTIFICATION_MAX_CHANNELS {
+            return Err(format!(
+                "推送通道最多 {} 个，当前 {} 个",
+                NOTIFICATION_MAX_CHANNELS,
+                self.channels.len()
+            ));
+        }
+        let mut seen_ids = std::collections::HashSet::new();
+        for channel in &self.channels {
+            let id = channel.id().trim();
+            if id.is_empty() {
+                return Err(format!(
+                    "推送通道 {} 的 id 不能为空",
+                    channel.display_name()
+                ));
+            }
+            if !seen_ids.insert(id.to_string()) {
+                return Err(format!("推送通道 id 重复: {id}"));
+            }
+            if !(NOTIFICATION_TIMEOUT_MIN..=NOTIFICATION_TIMEOUT_MAX)
+                .contains(&channel.timeout_seconds())
+            {
+                return Err(format!(
+                    "推送通道 {} 的超时必须在 {}-{} 秒之间",
+                    channel.display_name(),
+                    NOTIFICATION_TIMEOUT_MIN,
+                    NOTIFICATION_TIMEOUT_MAX
+                ));
+            }
+            match channel {
+                NotificationChannel::Webhook {
+                    url,
+                    headers,
+                    body_template,
+                    ..
+                } => {
+                    validate_notification_url(url, "推送通道 Webhook 地址")?;
+                    if headers.len() > NOTIFICATION_MAX_HEADERS {
+                        return Err(format!("自定义请求头最多 {} 个", NOTIFICATION_MAX_HEADERS));
+                    }
+                    for header in headers {
+                        if header.name.trim().is_empty() {
+                            return Err("自定义请求头名称不能为空".to_string());
+                        }
+                    }
+                    // 模板用样例值渲染后必须可解析为 JSON：占位符写在 JSON 字符串
+                    // 值内才合法（如 {"title":"{{summary}}"}）；裸占位符渲染即碎，
+                    // 保存时拦下远好于每次推送都静默失败
+                    if !body_template.trim().is_empty()
+                        && let Err(e) = serde_json::from_str::<serde_json::Value>(
+                            &crate::notification::template::render_webhook_body(
+                                body_template,
+                                &crate::notification::template::MessageContent::sample(),
+                            ),
+                        )
+                    {
+                        return Err(format!("Webhook 消息模板渲染后不是合法 JSON: {e}"));
+                    }
+                }
+                NotificationChannel::Bark {
+                    server, device_key, ..
+                } => {
+                    if device_key.trim().is_empty() {
+                        return Err("推送通道 Bark 的 device_key 不能为空".to_string());
+                    }
+                    // 自建服务器留空 = 官方地址，非空才校验
+                    let server = server.trim();
+                    if !server.is_empty() {
+                        validate_notification_url(server, "推送通道 Bark 服务器地址")?;
+                    }
+                }
+                NotificationChannel::Serverchan { send_key, .. } => {
+                    if send_key.trim().is_empty() {
+                        return Err("推送通道 Server酱 的 SendKey 不能为空".to_string());
+                    }
+                }
+                NotificationChannel::Telegram {
+                    bot_token, chat_id, ..
+                } => {
+                    if bot_token.trim().is_empty() {
+                        return Err("推送通道 Telegram 的 Bot Token 不能为空".to_string());
+                    }
+                    if chat_id.trim().is_empty() {
+                        return Err("推送通道 Telegram 的 Chat ID 不能为空".to_string());
+                    }
+                }
+            }
+        }
+        for event in &self.events {
+            if !NOTIFICATION_EVENT_TYPES.contains(&event.as_str()) {
+                return Err(format!(
+                    "通知事件类型 {event} 不在支持列表，可选值: {}",
+                    NOTIFICATION_EVENT_TYPES.join(", ")
+                ));
+            }
+        }
+        for (hour, minute, label) in [
+            (self.quiet_start_hour, self.quiet_start_minute, "免打扰开始"),
+            (self.quiet_end_hour, self.quiet_end_minute, "免打扰结束"),
+        ] {
+            if hour > 23 {
+                return Err(format!("{label}小时必须在 0-23 之间"));
+            }
+            if minute > 59 {
+                return Err(format!("{label}分钟必须在 0-59 之间"));
+            }
+        }
+        if self.retry_max_attempts > NOTIFICATION_RETRY_MAX_ATTEMPTS_MAX {
+            return Err(format!(
+                "重试次数最多 {} 次",
+                NOTIFICATION_RETRY_MAX_ATTEMPTS_MAX
+            ));
+        }
+        if self.retry_base_interval_seconds == 0
+            || self.retry_base_interval_seconds > NOTIFICATION_RETRY_BASE_INTERVAL_MAX
+        {
+            return Err(format!(
+                "重试基准间隔必须在 1-{} 秒之间",
+                NOTIFICATION_RETRY_BASE_INTERVAL_MAX
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// 登录执行渠道
 ///
 /// `Browser` 走 Python Worker 浏览器自动化（默认，兼容存量）；`Http` 为 Rust
@@ -606,6 +1048,7 @@ pub enum StartupAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
 
     #[test]
     fn monitor_defaults_to_http_204_only() {
@@ -751,5 +1194,220 @@ mod tests {
         let legacy_json = r#"{"check_on_startup":true,"release_source_url":"https://x","check_interval_hours":24,"use_proxy":true,"proxy_port":7891}"#;
         let parsed: UpdaterSettings = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(parsed.resolved_proxy_url(), "http://127.0.0.1:7891");
+    }
+
+    // ============ 推送通知（notification 节） ============
+
+    /// 构造合法的 webhook 通道（测试正反例的基线）
+    fn webhook_channel() -> NotificationChannel {
+        NotificationChannel::Webhook {
+            id: "ch-1".into(),
+            name: "自建机器人".into(),
+            enabled: true,
+            url: "https://example.com/hook".into(),
+            headers: vec![NotificationHeader {
+                name: "Authorization".into(),
+                value: "Bearer secret".into(),
+            }],
+            body_template: String::new(),
+            timeout_seconds: 10,
+        }
+    }
+
+    /// 指定 URL 与消息模板的 webhook 通道（正反例局部变形用）
+    fn webhook_with(url: &str, body_template: &str) -> NotificationChannel {
+        NotificationChannel::Webhook {
+            id: "ch-1".into(),
+            name: String::new(),
+            enabled: true,
+            url: url.into(),
+            headers: Vec::new(),
+            body_template: body_template.into(),
+            timeout_seconds: 10,
+        }
+    }
+
+    /// serde tagged 通道：type 判别字段字面量与默认超时
+    #[test]
+    fn notification_channel_serde_tagged() {
+        let value = serde_json::to_value(webhook_channel()).unwrap();
+        assert_eq!(value["type"], "webhook");
+        assert_eq!(value["id"], "ch-1");
+        assert_eq!(value["timeout_seconds"], 10);
+        let back: NotificationChannel = serde_json::from_value(value).unwrap();
+        assert_eq!(back, webhook_channel());
+        // 未知 type 显式报错（不静默落入其他变体）
+        assert!(
+            serde_json::from_value::<NotificationChannel>(serde_json::json!({
+                "type": "pigeon", "id": "x"
+            }))
+            .is_err()
+        );
+        // 缺 type 判别字段同样报错
+        assert!(
+            serde_json::from_value::<NotificationChannel>(serde_json::json!({ "id": "x" }))
+                .is_err()
+        );
+    }
+
+    /// 缺字段兼容：timeout_seconds / headers / body_template / server 均可省略
+    #[test]
+    fn notification_channel_tolerates_missing_fields() {
+        let channel: NotificationChannel = serde_json::from_value(serde_json::json!({
+            "type": "bark", "id": "b1", "name": "", "enabled": true, "device_key": "key"
+        }))
+        .unwrap();
+        assert_eq!(channel.timeout_seconds(), 10, "缺省超时回退 10 秒");
+        assert_eq!(channel.display_name(), "Bark", "空 name 回退类型名");
+    }
+
+    /// 默认值：总开关关、事件集默认 login_failed + network_down、免打扰 22:00-08:00
+    #[test]
+    fn notification_defaults() {
+        let s = NotificationSettings::default();
+        assert!(!s.enabled, "推送默认关闭");
+        assert!(s.channels.is_empty());
+        assert_eq!(s.events, vec!["login_failed", "network_down"]);
+        assert!(!s.quiet_enabled);
+        assert_eq!((s.quiet_start_hour, s.quiet_start_minute), (22, 0));
+        assert_eq!((s.quiet_end_hour, s.quiet_end_minute), (8, 0));
+        assert_eq!(s.retry_max_attempts, 3);
+        assert_eq!(s.retry_base_interval_seconds, 2);
+        // 旧 settings.json 无 notification 节 → serde default 免迁移
+        let legacy: crate::config::SettingsData =
+            serde_json::from_str(r#"{"config_version":10,"active_profile_id":"default","auto_switch":false,"global":{"browser":{},"monitor":{},"pause":{},"logging":{},"retry_settings":{},"worker":{},"app":{},"updater":{}}}"#)
+                .unwrap();
+        assert_eq!(legacy.global.notification, NotificationSettings::default());
+    }
+
+    /// 校验正反例：合法配置通过；URL scheme / 超时越界 / 事件白名单 / 重复 id /
+    /// 免打扰范围 / 重试界限 / 凭据缺失逐一拦截
+    #[test]
+    fn notification_validate_positive_and_negative() {
+        let mut s = NotificationSettings {
+            channels: vec![webhook_channel()],
+            ..NotificationSettings::default()
+        };
+        assert!(s.validate().is_ok(), "基线配置应通过: {:?}", s.validate());
+
+        // 事件类型白名单
+        s.events = vec!["hack_the_planet".into()];
+        assert!(s.validate().is_err());
+        s.events = vec!["login_failed".into(), "network_down".into()];
+
+        // 非法 scheme
+        s.channels = vec![NotificationChannel::Webhook {
+            id: "ch-1".into(),
+            name: String::new(),
+            enabled: true,
+            url: "ftp://example.com/hook".into(),
+            headers: Vec::new(),
+            body_template: String::new(),
+            timeout_seconds: 10,
+        }];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("http/https"), "{err}");
+        // 缺主机名（WHATWG 解析器会吞掉多余斜杠把 ///path 当主机，用空 authority 触发）
+        s.channels = vec![webhook_with("http://", "")];
+        assert!(s.validate().is_err());
+        s.channels = vec![webhook_channel()];
+
+        // 超时越界
+        let bark = |timeout_seconds: u32| NotificationChannel::Bark {
+            id: "b1".into(),
+            name: String::new(),
+            enabled: true,
+            server: String::new(),
+            device_key: "k".into(),
+            timeout_seconds,
+        };
+        s.channels = vec![bark(0)];
+        assert!(s.validate().is_err());
+        s.channels = vec![bark(61)];
+        assert!(s.validate().is_err());
+
+        // 重复 id
+        s.channels = vec![webhook_channel(), webhook_channel()];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("id 重复"), "{err}");
+        // 空 id
+        s.channels = vec![NotificationChannel::Serverchan {
+            id: "  ".into(),
+            name: String::new(),
+            enabled: true,
+            send_key: "sct".into(),
+            timeout_seconds: 10,
+        }];
+        assert!(s.validate().is_err());
+        // 预设通道凭据缺失
+        s.channels = vec![NotificationChannel::Telegram {
+            id: "t1".into(),
+            name: String::new(),
+            enabled: true,
+            bot_token: "tk".into(),
+            chat_id: "  ".into(),
+            timeout_seconds: 10,
+        }];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("Chat ID"), "{err}");
+
+        // 免打扰范围
+        s.channels = Vec::new();
+        s.quiet_start_hour = 24;
+        assert!(s.validate().is_err());
+        s.quiet_start_hour = 22;
+        s.quiet_end_minute = 60;
+        assert!(s.validate().is_err());
+        s.quiet_end_minute = 0;
+
+        // 重试界限
+        s.retry_max_attempts = 11;
+        assert!(s.validate().is_err());
+        s.retry_max_attempts = 3;
+        s.retry_base_interval_seconds = 0;
+        assert!(s.validate().is_err());
+        s.retry_base_interval_seconds = 2;
+        assert!(s.validate().is_ok());
+    }
+
+    /// 非法 webhook 模板（渲染后不是合法 JSON）在保存时拦下
+    #[test]
+    fn notification_validate_rejects_broken_webhook_template() {
+        // 裸占位符：渲染后 JSON 碎掉
+        let mut s = NotificationSettings {
+            channels: vec![NotificationChannel::Webhook {
+                id: "ch-1".into(),
+                name: String::new(),
+                enabled: true,
+                url: "https://example.com/hook".into(),
+                headers: Vec::new(),
+                body_template: r#"{"title": {{summary}}}"#.into(),
+                timeout_seconds: 10,
+            }],
+            ..NotificationSettings::default()
+        };
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("合法 JSON"), "{err}");
+        // 合法模板（占位符位于字符串值内）通过
+        s.channels = vec![webhook_with(
+            "https://example.com/hook",
+            r#"{"title": "{{summary}}", "text": "{{detail}}"}"#,
+        )];
+        assert!(s.validate().is_ok());
+    }
+
+    /// 免打扰窗口解析：越界时/分返回 None（手改配置文件的防御口径）
+    #[test]
+    fn notification_quiet_window_bounds() {
+        let mut s = NotificationSettings::default();
+        assert!(s.quiet_window().is_none(), "未启用时无窗口");
+        s.quiet_enabled = true;
+        let (start, end) = s.quiet_window().unwrap();
+        assert_eq!(
+            (start.hour(), start.minute(), end.hour(), end.minute()),
+            (22, 0, 8, 0)
+        );
+        s.quiet_start_hour = 25;
+        assert!(s.quiet_window().is_none(), "越界时/分不得构造窗口");
     }
 }

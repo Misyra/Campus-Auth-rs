@@ -20,6 +20,7 @@ pub mod logging;
 pub mod login;
 pub mod monitor;
 pub mod network;
+pub mod notification;
 pub mod scheduler;
 pub mod status;
 pub mod tasks;
