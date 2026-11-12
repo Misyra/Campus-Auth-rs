@@ -174,6 +174,8 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
 /// 校验 PID 是否为本程序实例（防 PID 复用误杀）
 ///
 /// 比对目标进程可执行文件名是否含 `campus-auth`；取不到路径时保守返回 false。
+/// 同时接受下划线拼写 `campus_auth`：部署产物为连字符，而 cargo 测试二进制为
+/// `campus_auth-<hash>`，两者都是本程序，不应因文件名分隔符差异而漏识别。
 pub fn is_own_process(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -194,20 +196,53 @@ pub fn is_own_process(pid: u32) -> bool {
                 return false;
             }
             let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
-            path.contains("campus-auth")
+            path.contains("campus-auth") || path.contains("campus_auth")
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 无 /proc：用 libproc.h 的 proc_pidpath（extern "C" 直接声明，无需新依赖）
+        // 取目标 PID 的可执行路径。缓冲区取 PROC_PIDPATHINFO_MAXSIZE = 4 * 1024。
+        let mut buf = [0u8; 4096];
+        // SAFETY: 缓冲区指针与容量如实传入；proc_pidpath 只在缓冲区内写入并返回实际长度
+        let len = unsafe {
+            proc_pidpath(
+                pid as libc::pid_t,
+                buf.as_mut_ptr().cast::<libc::c_void>(),
+                buf.len() as libc::c_uint,
+            )
+        };
+        // 取不到路径（进程已退出/无权限）按「非本进程」保守处理：误判 false 只会
+        // 跳过 kill、清理残留后重新抢锁（代价小）；误判 true 则会杀掉疑似 PID 复用的
+        // 无辜进程（不可接受），所以失败方向必须选 false。
+        if len <= 0 {
+            return false;
+        }
+        let path = String::from_utf8_lossy(&buf[..len as usize]).to_lowercase();
+        // 本 cfg 块即函数末尾分支：块尾表达式就是返回值，不存在会误落入的尾部 false
+        path.contains("campus-auth") || path.contains("campus_auth")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // /proc/<pid>/exe 读不到（已退出/无权限）即视为非本程序
         if let Ok(link) = std::fs::read_link(format!("/proc/{pid}/exe")) {
             let s = link.to_string_lossy().to_lowercase();
             // 必须显式 return：漏写会静默落到末尾的 false，unix 上 --force 永远杀不掉旧实例
-            return s.contains("campus-auth");
+            return s.contains("campus-auth") || s.contains("campus_auth");
         }
-        // macOS 无 /proc：退化为保守拒绝（由调用方清理残留文件后抢锁）
+        // 未知平台无 /proc：退化为保守拒绝（由调用方清理残留文件后抢锁）
         false
     }
+}
+
+// 目标 PID 的可执行文件路径（macOS libproc，返回路径长度，失败返回 0）
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn proc_pidpath(
+        pid: libc::pid_t,
+        buffer: *mut libc::c_void,
+        buffersize: libc::c_uint,
+    ) -> libc::c_int;
 }
 
 /// 强制杀死指定 PID 的进程
@@ -343,5 +378,43 @@ mod tests {
             leftovers.is_empty(),
             "record_port 后不应残留临时文件: {leftovers:?}"
         );
+    }
+
+    /// 自身 PID 必须识别为本程序进程
+    ///
+    /// macOS 走 proc_pidpath、Linux 走 /proc/exe；cargo 测试二进制名为
+    /// `campus_auth-<hash>`，依赖实现里的下划线归一才能命中。
+    #[cfg(unix)]
+    #[test]
+    fn test_is_own_process_self_pid() {
+        assert!(is_own_process(std::process::id()));
+    }
+
+    /// 异名子进程（/bin/sleep）路径不含 campus-auth，不得误判为本程序进程
+    #[cfg(unix)]
+    #[test]
+    fn test_is_own_process_foreign_child_is_false() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn /bin/sleep");
+        let pid = child.id();
+        assert!(!is_own_process(pid), "/bin/sleep 不应被识别为本程序");
+        child.kill().expect("终止 sleep 子进程");
+        child.wait().expect("回收 sleep 子进程");
+    }
+
+    /// 已退出并被回收的 PID 取不到路径，按保守方向返回 false
+    #[cfg(unix)]
+    #[test]
+    fn test_is_own_process_dead_pid_is_false() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn /bin/sleep");
+        let pid = child.id();
+        child.kill().expect("终止 sleep 子进程");
+        child.wait().expect("回收 sleep 子进程");
+        assert!(!is_own_process(pid), "已回收的 PID 不应被识别为本程序");
     }
 }
