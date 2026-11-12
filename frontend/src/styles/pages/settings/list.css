@@ -93,6 +93,9 @@
 }
 .settings-list-page .card-body + .card-body { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
 .settings-list-page .card-body:has(+ .card-body) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+/* 控件行内的 form-row：写在下面 display:contents 组之前保持特异度升序（命中双规则时
+   .settings-list-page .card-body .form-row 恒以高特异度取胜，与先后顺序无关） */
+.setting-row-control .form-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; justify-content: flex-end; }
 .settings-list-page :is(.settings-grid-2col, .ocr-settings-grid) { display: block; }
 .settings-list-page .settings-grid-2col > div:not(.setting-row),
 .settings-list-page .card-body .form-row { display: contents; }
@@ -130,7 +133,6 @@
 .setting-row-control .setting-row-switch { flex: none; width: 44px; margin: 0; }
 .setting-row-control .setting-row-switch .toggle-slider { order: 0; }
 .setting-row.disabled .setting-row-control { opacity: .55; }
-.setting-row-control .form-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; justify-content: flex-end; }
 .setting-row-control .viewport-input-row { min-width: 0; }
 .setting-row-control .viewport-input { width: 100%; max-width: 100px; padding: 9px; }
 .setting-row-control .viewport-input-group { min-width: 0; }
@@ -164,9 +166,10 @@
 .settings-list-page .ocr-recognize-btn { width: auto; margin: 0; }
 .settings-list-page .ocr-result { width: 100%; justify-content: flex-end; }
 .settings-list-page .ocr-description { font-size: inherit; }
+/* :has 参数计入特异度（--pinned 低于 :hover/:focus-visible），升序排列；三条声明相同，顺序不影响计算值 */
+.settings-list-page section:has(.field-help--pinned),
 .settings-list-page section:has(.field-help:hover),
-.settings-list-page section:has(.field-help:focus-visible),
-.settings-list-page section:has(.field-help--pinned) { position: relative; z-index: var(--z-overlay); }
+.settings-list-page section:has(.field-help:focus-visible) { position: relative; z-index: var(--z-overlay); }
 
 @media (max-width: 768px) {
   .settings-mobile-jump { display: flex; align-items: center; gap: 12px; margin: 0 2px 16px; flex: none; }
