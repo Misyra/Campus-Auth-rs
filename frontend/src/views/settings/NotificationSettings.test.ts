@@ -8,6 +8,8 @@
  * - 通道增删：添加通道按所选类型生成草稿卡片，删除即移除（结果缓存同步清掉）；
  * - 类型切换：type 下拉切换就地重建通道为对应变体，字段表单随类型切换、
  *   公共字段（名称/启用/超时）保留；
+ * - 系统通知（os）通道：无凭据输入框（表单仅剩超时字段），后端载荷经草稿
+ *   编辑后保存形状不变（serde 往返无凭据字段混入）；
  * - 测试按钮三分支：发送中（禁用按钮）/ 成功提示 / 失败摘要（含请求级错误）；
  * - 事件类型开关组与免打扰时段绑定写入 config 草稿（保存仍由页面统一负责）。
  */
@@ -178,6 +180,67 @@ describe("NotificationSettings 类型切换", () => {
     // 名称输入框仍绑定同一草稿值
     const nameAfter = card2.querySelector<HTMLInputElement>('input[aria-label="通道 1 名称"]');
     expect(nameAfter!.value).toBe("宿舍机器人");
+  });
+});
+
+describe("NotificationSettings 系统通知通道", () => {
+  it("切换到系统通知：表单仅剩超时字段，无凭据输入框", async () => {
+    const notification = seedNotification();
+    mount();
+    addChannelByUI();
+    await flush();
+    const card = channelCards()[0];
+    // 先填名称再切换，顺带验证公共字段保留
+    const nameInput = card.querySelector<HTMLInputElement>('input[aria-label="通道 1 名称"]');
+    nameInput!.value = "桌面提醒";
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+
+    await switchChannelType(card, "系统通知");
+    await flush();
+
+    const rebuilt = notification.channels[0];
+    expect(rebuilt.type).toBe("os");
+    expect(rebuilt.name, "切换类型保留名称").toBe("桌面提醒");
+    expect(rebuilt.enabled, "切换类型保留启用态").toBe(true);
+    const card2 = channelCards()[0];
+    // 无凭据区：正文不再渲染任何文本输入框（webhook 地址 / bark key / sendkey / token 均为 text）
+    expect(
+      card2.querySelectorAll('.notif-channel-body input[type="text"]'),
+      "系统通知不应有凭据输入框",
+    ).toHaveLength(0);
+    // 表单形态：仅剩超时数字输入（草稿默认 10，与后端 serde default 一致）
+    const timeout = card2.querySelector<HTMLInputElement>('.notif-channel-body input[type="number"]');
+    expect(timeout, "系统通知仅保留超时输入").not.toBeNull();
+    expect(timeout!.value).toBe("10");
+    // 草稿形状：五个公共字段，无凭据字段
+    expect(Object.keys(rebuilt).sort()).toEqual(["enabled", "id", "name", "timeout_seconds", "type"]);
+  });
+
+  it("系统通知通道 serde 往返：后端载荷经草稿编辑后保存形状不变", async () => {
+    // 后端 GET /api/config 返回的 os 通道形状（timeout_seconds 恒序列化）
+    const wire = { type: "os", id: "ch-os-1", name: "系统通知", enabled: true, timeout_seconds: 15 };
+    const notification = seedNotification({
+      channels: [JSON.parse(JSON.stringify(wire))],
+    });
+    mount();
+    const card = channelCards()[0];
+    // UI 编辑名称与超时；页面统一「保存」把 config.notification 原样序列化进 PATCH /api/config
+    const nameInput = card.querySelector<HTMLInputElement>('input[aria-label="通道 1 名称"]');
+    nameInput!.value = "桌面提醒";
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    const timeout = card.querySelector<HTMLInputElement>('.notif-channel-body input[type="number"]');
+    timeout!.value = "20";
+    timeout!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    // JSON 往返后形状与后端契约一致：五字段、无凭据、超时为编辑后的数字
+    expect(JSON.parse(JSON.stringify(notification.channels[0]))).toEqual({
+      type: "os",
+      id: "ch-os-1",
+      name: "桌面提醒",
+      enabled: true,
+      timeout_seconds: 20,
+    });
   });
 });
 

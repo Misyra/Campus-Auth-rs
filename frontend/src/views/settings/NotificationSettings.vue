@@ -36,6 +36,7 @@ const CHANNEL_TYPE_OPTIONS: SelectOption[] = [
   { value: "bark", label: "Bark" },
   { value: "serverchan", label: "Server酱" },
   { value: "telegram", label: "Telegram" },
+  { value: "os", label: "系统通知" },
 ];
 
 const TYPE_LABELS: Record<NotificationChannelType, string> = {
@@ -43,6 +44,7 @@ const TYPE_LABELS: Record<NotificationChannelType, string> = {
   bark: "Bark",
   serverchan: "Server酱",
   telegram: "Telegram",
+  os: "系统通知",
 };
 
 function typeLabel(type: NotificationChannelType): string {
@@ -68,6 +70,9 @@ function makeChannel(type: NotificationChannelType): NotificationChannelConfig {
       return { type: "serverchan", ...base, send_key: "" };
     case "telegram":
       return { type: "telegram", ...base, bot_token: "", chat_id: "" };
+    case "os":
+      // 系统通知无凭据字段，公共字段即全部表单
+      return { type: "os", ...base };
   }
 }
 
@@ -91,7 +96,8 @@ function changeChannelType(channel: NotificationChannelConfig, type: string): vo
   rebuilt.id = channel.id;
   rebuilt.name = channel.name;
   rebuilt.enabled = channel.enabled;
-  rebuilt.timeout_seconds = channel.timeout_seconds;
+  // os 通道的 timeout_seconds 可选（后端 serde default 缺省 10），缺省落 10
+  rebuilt.timeout_seconds = channel.timeout_seconds ?? 10;
   const index = notification.value.channels.indexOf(channel);
   if (index >= 0) notification.value.channels.splice(index, 1, rebuilt);
   // 类型切换丢弃旧类型字段（如密钥），同步清掉旧的测试结果避免误导
@@ -336,7 +342,7 @@ const quietEnd = computed<string>({
       </div>
       <div class="card-body">
         <p class="hint">
-          支持自定义 Webhook 与 Bark、Server酱、Telegram 预设；改动需点击页面底部「保存」后生效。
+          支持自定义 Webhook 与 Bark、Server酱、Telegram 预设，以及本机系统通知；改动需点击页面底部「保存」后生效。
           密钥类字段明文存储在本机配置中（与代理地址同级别保护）。
         </p>
 
@@ -498,6 +504,20 @@ const quietEnd = computed<string>({
                   placeholder="sct 开头的 SendKey（sct.ftqq.com 获取）"
                   autocomplete="off"
                 />
+                <label :for="`notif-timeout-${channel.id}`">超时（秒）</label>
+                <input
+                  :id="`notif-timeout-${channel.id}`"
+                  v-model.number="channel.timeout_seconds"
+                  type="number"
+                  min="1"
+                  max="60"
+                />
+              </div>
+            </template>
+
+            <!-- 系统通知：无凭据区，仅超时可调 -->
+            <template v-else-if="channel.type === 'os'">
+              <div class="notif-field-grid">
                 <label :for="`notif-timeout-${channel.id}`">超时（秒）</label>
                 <input
                   :id="`notif-timeout-${channel.id}`"

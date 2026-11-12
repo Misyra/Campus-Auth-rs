@@ -510,7 +510,7 @@ export interface NotificationHeader {
 }
 
 /** 通道判别字段（serde tagged `type`，与后端 NotificationChannelKind 同值） */
-export type NotificationChannelType = "webhook" | "bark" | "serverchan" | "telegram";
+export type NotificationChannelType = "webhook" | "bark" | "serverchan" | "telegram" | "os";
 
 /** 通道公共字段（各判别变体都带） */
 interface NotificationChannelBase {
@@ -553,12 +553,20 @@ export interface TelegramChannelConfig extends NotificationChannelBase {
   chat_id: string;
 }
 
+/** 系统通知通道：本机桌面通知中心，无凭据字段（走本机桌面会话） */
+export interface OsChannelConfig extends Omit<NotificationChannelBase, "timeout_seconds"> {
+  type: "os";
+  /** 阻塞发送调用的放弃上限（秒；后端 serde default 缺省 10，可省略） */
+  timeout_seconds?: number;
+}
+
 /** 推送通道（可辨识联合：切 type 即切对应字段表单） */
 export type NotificationChannelConfig =
   | WebhookChannelConfig
   | BarkChannelConfig
   | ServerchanChannelConfig
-  | TelegramChannelConfig;
+  | TelegramChannelConfig
+  | OsChannelConfig;
 
 /** 推送通知设置（GET/PATCH /api/config 的 notification 段） */
 export interface NotificationConfig {
