@@ -2714,25 +2714,82 @@ class WorkerCore:
             logger.warning("close_browser 超时（%.1fs），跳过等待继续", internal_timeout)
         return {}
 
-    async def _capture_navigate(self, url: str, bs: dict, cancel_event: Any) -> None:
-        """页面捕获前置：确保浏览器就绪、建隔离会话页并导航到目标 URL。
+    @asynccontextmanager
+    async def _temp_capture_browser(self, bs: dict) -> AsyncIterator[Any]:
+        """独立非持久化临时浏览器（page_capture 专用）：browser + context + page 自包含。
 
-        门户页常在加载后异步拉验证码/配置脚本，导航后等待一轮 networkidle 让
-        DOM 与已加载资源尽量齐全；长轮询页面等满超时即按当前状态继续（不致命）。
-        取消事件是裸 threading.Event（非 StepContext），导航边界处直接检查置位。
+        纪律同 ``handle_test_redirect``：**不得复用 ``self._context``**——keep_alive
+        常驻登录态恰恰依赖 Cookie 与心跳页全保留（close_browser preserve_state），
+        而共享会话路径的 clear_cookies / 关旧页会静默摧毁它；且捕获对象本就是
+        “未登录门户”，不该携带常驻 Cookie。退出时整体关闭丢弃，仅当 Playwright
+        连接为本命令新建且常驻浏览器不在使用时才停止连接。
         """
-        await self.ensure_browser({"browser_settings": bs})
-        # 捕获用于分析“未登录门户”，不得复用常驻登录会话的 Cookie。
-        if self._context is not None:
-            await self._context.clear_cookies()
-        await self._prepare_session_page()
-        await self._navigate(self._page, url, _nav_timeout(bs))
+        from playwright.async_api import async_playwright
+
+        channel = str(bs.get("browser_channel") or "playwright").strip().lower()
+        custom_path = str(bs.get("browser_custom_path") or "").strip()
+        pure_mode = bool(bs.get("pure_mode", False))
+        headless = bs.get("headless", True)
+        # 对齐 _start_browser：未绑定代理即绕过系统代理（纯净模式只关闭可选定制，
+        # 不关闭直连保障），否则检测直连成功后捕获仍可能被失效代理阻断
+        launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
+        if self._bypass_system_proxy(bs) and self._is_chromium_channel(bs, channel):
+            if "--no-proxy-server" not in launch_args:
+                launch_args.append("--no-proxy-server")
+
+        created_playwright = False
+        browser: Any = None
+        context: Any = None
         try:
-            await self._page.wait_for_load_state("networkidle", timeout=8000)
-        except Exception:  # noqa: BLE001
-            logger.debug("networkidle 等待超时，按当前页面状态继续捕获")
-        if cancel_event is not None and cancel_event.is_set():
-            raise StepCancelled("页面捕获已取消")
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+                created_playwright = True
+            try:
+                browser = await self._launch_browser(
+                    self._playwright, channel, custom_path, headless, launch_args, bs,
+                )
+                context = await browser.new_context(**self._build_context_options(bs))
+            except Exception as exc:  # noqa: BLE001 — 缺 chromium / 自定义路径不存在等
+                # 保留原始异常细节（可执行文件路径等），包装为可诊断的中文错误
+                raise WorkerError(
+                    Outcome.UNKNOWN_ERROR, f"启动临时捕获浏览器失败: {exc}"
+                ) from exc
+            if not pure_mode:
+                # 对齐 _apply_stealth_and_routes（作用于临时 context，不触碰常驻会话）
+                if bs.get("low_resource_mode", False):
+                    await context.route("**/*", self._handle_low_resource_request)
+                if bs.get("stealth_mode", False):
+                    custom = (bs.get("stealth_custom_script") or "").strip()
+                    await context.add_init_script(custom or _STEALTH_INIT_SCRIPT)
+
+            async def _auto_accept(dialog: Any) -> None:
+                # 门户加载弹窗会阻塞导航与取 DOM：就地自动确认。不走共享会话的
+                # dialog 事件通道，避免污染 _task_dialogs 与前端事件流
+                try:
+                    await dialog.accept()
+                except Exception as exc:  # noqa: BLE001 — 弹窗可能已在间隙消失
+                    logger.debug(f"临时捕获页弹窗确认失败（忽略）: {exc}")
+
+            page = await context.new_page()
+            page.on("dialog", lambda d: asyncio.ensure_future(_auto_accept(d)))
+            yield page
+        finally:
+            if context is not None:
+                try:
+                    await asyncio.wait_for(context.close(), timeout=_WAIT_TIMEOUT_SECS)
+                except Exception:  # noqa: BLE001 — 临时上下文关闭失败不覆盖捕获结论
+                    logger.warning("关闭页面捕获临时上下文失败", exc_info=True)
+            if browser is not None:
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=_WAIT_TIMEOUT_SECS)
+                except Exception:  # noqa: BLE001
+                    logger.warning("关闭页面捕获临时浏览器失败", exc_info=True)
+            if created_playwright and self._browser is None and self._context is None:
+                try:
+                    await self._playwright.stop()
+                except Exception:  # noqa: BLE001
+                    logger.debug("停止临时 Playwright 连接失败", exc_info=True)
+                self._playwright = None
 
     @staticmethod
     async def _capture_mhtml(page: Any, target: Path) -> bool:
@@ -2812,8 +2869,10 @@ class WorkerCore:
         与 ``feedback_capture`` 的差异：本命令自带导航（无活跃页面也可用），
         产物固定写到 ``captures/latest/``（每次覆盖），内容只经 Rust 侧读盘消费，
         不走 IPC 回传——NDJSON 单行上限 1 MiB，门户页 HTML/JS 普遍超限。
-        会话语义与 ``execute_login_attempt`` 一致：占用浏览器会话槽位（Rust 侧
-        FIFO 排队），导航会替换当前页；存在活跃调试会话时由 Rust 互斥矩阵快速失败。
+        会话语义：**独立非持久化临时浏览器**（纪律同 ``handle_test_redirect``，
+        不得复用 ``self._context``）——捕获“未登录门户”既不该带常驻 Cookie，
+        也不得清 Cookie / 关旧页破坏 keep_alive 常驻登录态；捕获完成后整体关闭
+        丢弃，不占用常驻会话槽位。存在活跃调试会话时直接拒绝。
         """
         url = str(params.get("url") or "").strip()
         if not url:
@@ -2831,100 +2890,113 @@ class WorkerCore:
             if cancel_event is not None and cancel_event.is_set():
                 raise StepCancelled(f"页面捕获已取消（{stage}）")
 
+        # 与 test_redirect 一致：捕获类命令先取消待触发的浏览器空闲回收
+        self._cancel_browser_idle_release()
         try:
-            await self._capture_navigate(url, bs, cancel_event)
-            # 落盘目录与 _debug_screenshot_dir 同语义：锚定运行时 worker 工程目录，
-            # 不依赖进程 CWD；固定 captures/latest 每次覆盖，避免产物无界堆积
-            _ensure_not_cancelled("HTML 获取前")
-            cap_dir = _capture_dir()
-            shutil.rmtree(cap_dir, ignore_errors=True)
-            cap_dir.mkdir(parents=True, exist_ok=True)
-            html = await self._page.content()
-            (cap_dir / "page.html").write_text(html, encoding="utf-8")
-            _ensure_not_cancelled("截图前")
-            png_bytes = await self._page.screenshot(full_page=True)
-            screenshot_note: str | None = None
-            if len(png_bytes) > _CAPTURE_MAX_SCREENSHOT_BYTES:
-                png_bytes = await self._page.screenshot(full_page=False)
-                screenshot_note = "全页截图过大，已改为当前视口截图"
-            (cap_dir / "screenshot.png").write_bytes(png_bytes)
-            _ensure_not_cancelled("结构提取前")
-            try:
-                structure = await _capture_page_structure(self._page)
-            except Exception as exc:  # noqa: BLE001 — 原始 HTML 仍可作为生成兜底
-                structure = {"version": 1, "frames": [], "error": str(exc)[:300]}
-            (cap_dir / "page_structure.json").write_text(
-                json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            frame_items = structure.get("frames", [])
-            structure_summary = {
-                "frames": len(frame_items),
-                "forms": sum(len(item.get("forms", [])) for item in frame_items),
-                "controls": sum(len(item.get("controls", [])) for item in frame_items),
-                "captcha_candidates": sum(
-                    len(item.get("captcha_candidates", [])) for item in frame_items
-                ),
-            }
-            mhtml_ok = False
-            # MHTML 走 CDP，非 Chromium 渠道下调用必然失败：直接跳过，降级说明由
-            # 资源快照那条统一给出（避免日志里出现无意义的英文 CDP 异常）
-            if _channel_supports_cdp(bs):
-                mhtml_ok = await self._capture_mhtml(self._page, cap_dir / "page.mhtml")
-            _ensure_not_cancelled("资源快照前")
-            resources: dict[str, str] = {}
-            aliases: dict[str, str] = {}
-            note: str | None = None
-            try:
-                resources, aliases, note = await _capture_page_resources(
-                    self._page, cap_dir / "resources", bs=bs
-                )
-            except Exception as exc:  # noqa: BLE001 — 资源快照失败不阻断 HTML/截图
-                note = f"资源快照失败: {exc}"
-            _ensure_not_cancelled("离线副本生成前")
-            # 离线副本：把 HTML 中的资源引用改写成 resources/ 相对路径，解压后直接
-            # 双击即可还原（无 MHTML 的渠道下这是唯一可离线查看的形态）。原始
-            # page.html 保持不变——它是 Rust 侧喂给 LLM 的材质，URL 语义不该被污染。
-            offline_ok = False
-            if resources:
+            _ensure_not_cancelled("临时浏览器启动前")
+            async with self._temp_capture_browser(bs) as page:
+                await self._navigate(page, url, _nav_timeout(bs))
+                # 门户页常在加载后异步拉验证码/配置脚本，导航后等待一轮
+                # networkidle 让 DOM 与已加载资源尽量齐全；长轮询页面等满超时
+                # 即按当前状态继续（不致命）
                 try:
-                    offline_html = _rewrite_resource_urls(html, {**resources, **aliases})
-                    (cap_dir / "page.offline.html").write_text(offline_html, encoding="utf-8")
-                    offline_ok = True
-                except Exception as exc:  # noqa: BLE001 — 离线副本失败不影响其余产物
-                    extra = f"离线副本生成失败: {exc}"
-                    note = f"{note}；{extra}" if note else extra
-            if screenshot_note:
-                note = f"{note}；{screenshot_note}" if note else screenshot_note
-            try:
-                title = await self._page.title()
-            except Exception:  # noqa: BLE001 — 页面标题读取失败不致命
-                title = ""
-            meta = self._write_capture_meta(
-                cap_dir,
-                url,
-                self._page.url,
-                title,
-                resources,
-                structure_summary,
-                mhtml_ok=mhtml_ok,
-                offline_ok=offline_ok,
-                note=note,
-            )
-            logger.info(
-                "[capture] 页面捕获完成: %s (html=%d chars, resources=%d)",
-                meta["final_url"],
-                len(html),
-                len(resources),
-            )
-            return {
-                "final_url": meta["final_url"],
-                "title": title,
-                "html_chars": len(html),
-                "png_bytes": len(png_bytes),
-                "resources_count": len(resources),
-                "structure_summary": structure_summary,
-                "note": note,
-            }
+                    await page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:  # noqa: BLE001
+                    logger.debug("networkidle 等待超时，按当前页面状态继续捕获")
+                if cancel_event is not None and cancel_event.is_set():
+                    raise StepCancelled("页面捕获已取消")
+                # 落盘目录与 _debug_screenshot_dir 同语义：锚定运行时 worker 工程目录，
+                # 不依赖进程 CWD；固定 captures/latest 每次覆盖，避免产物无界堆积
+                _ensure_not_cancelled("HTML 获取前")
+                cap_dir = _capture_dir()
+                shutil.rmtree(cap_dir, ignore_errors=True)
+                cap_dir.mkdir(parents=True, exist_ok=True)
+                html = await page.content()
+                (cap_dir / "page.html").write_text(html, encoding="utf-8")
+                _ensure_not_cancelled("截图前")
+                png_bytes = await page.screenshot(full_page=True)
+                screenshot_note: str | None = None
+                if len(png_bytes) > _CAPTURE_MAX_SCREENSHOT_BYTES:
+                    png_bytes = await page.screenshot(full_page=False)
+                    screenshot_note = "全页截图过大，已改为当前视口截图"
+                (cap_dir / "screenshot.png").write_bytes(png_bytes)
+                _ensure_not_cancelled("结构提取前")
+                try:
+                    structure = await _capture_page_structure(page)
+                except Exception as exc:  # noqa: BLE001 — 原始 HTML 仍可作为生成兜底
+                    structure = {"version": 1, "frames": [], "error": str(exc)[:300]}
+                (cap_dir / "page_structure.json").write_text(
+                    json.dumps(structure, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                frame_items = structure.get("frames", [])
+                structure_summary = {
+                    "frames": len(frame_items),
+                    "forms": sum(len(item.get("forms", [])) for item in frame_items),
+                    "controls": sum(len(item.get("controls", [])) for item in frame_items),
+                    "captcha_candidates": sum(
+                        len(item.get("captcha_candidates", [])) for item in frame_items
+                    ),
+                }
+                mhtml_ok = False
+                # MHTML 走 CDP，非 Chromium 渠道下调用必然失败：直接跳过，降级说明由
+                # 资源快照那条统一给出（避免日志里出现无意义的英文 CDP 异常）
+                if _channel_supports_cdp(bs):
+                    mhtml_ok = await self._capture_mhtml(page, cap_dir / "page.mhtml")
+                _ensure_not_cancelled("资源快照前")
+                resources: dict[str, str] = {}
+                aliases: dict[str, str] = {}
+                note: str | None = None
+                try:
+                    resources, aliases, note = await _capture_page_resources(
+                        page, cap_dir / "resources", bs=bs
+                    )
+                except Exception as exc:  # noqa: BLE001 — 资源快照失败不阻断 HTML/截图
+                    note = f"资源快照失败: {exc}"
+                _ensure_not_cancelled("离线副本生成前")
+                # 离线副本：把 HTML 中的资源引用改写成 resources/ 相对路径，解压后直接
+                # 双击即可还原（无 MHTML 的渠道下这是唯一可离线查看的形态）。原始
+                # page.html 保持不变——它是 Rust 侧喂给 LLM 的材质，URL 语义不该被污染。
+                offline_ok = False
+                if resources:
+                    try:
+                        offline_html = _rewrite_resource_urls(html, {**resources, **aliases})
+                        (cap_dir / "page.offline.html").write_text(offline_html, encoding="utf-8")
+                        offline_ok = True
+                    except Exception as exc:  # noqa: BLE001 — 离线副本失败不影响其余产物
+                        extra = f"离线副本生成失败: {exc}"
+                        note = f"{note}；{extra}" if note else extra
+                if screenshot_note:
+                    note = f"{note}；{screenshot_note}" if note else screenshot_note
+                try:
+                    title = await page.title()
+                except Exception:  # noqa: BLE001 — 页面标题读取失败不致命
+                    title = ""
+                meta = self._write_capture_meta(
+                    cap_dir,
+                    url,
+                    page.url,
+                    title,
+                    resources,
+                    structure_summary,
+                    mhtml_ok=mhtml_ok,
+                    offline_ok=offline_ok,
+                    note=note,
+                )
+                logger.info(
+                    "[capture] 页面捕获完成: %s (html=%d chars, resources=%d)",
+                    meta["final_url"],
+                    len(html),
+                    len(resources),
+                )
+                return {
+                    "final_url": meta["final_url"],
+                    "title": title,
+                    "html_chars": len(html),
+                    "png_bytes": len(png_bytes),
+                    "resources_count": len(resources),
+                    "structure_summary": structure_summary,
+                    "note": note,
+                }
         finally:
             # finally 而非 except Exception：命令级超时的 task.cancel() 产生
             # CancelledError（BaseException），except Exception 拦不住会跳过注销

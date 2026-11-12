@@ -53,11 +53,13 @@ _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 #: await）的命令白名单。排除项及理由：
 #: - ocr_recognize / worker_health_check / browser_health_check / shutdown：
 #:   不使用 self._page，超时不应误伤 keep_alive preserve_state 保留页；
-#: - test_redirect：使用自建临时浏览器/页面，关 self._page 打不断它；
+#: - test_redirect / page_capture：使用自建临时浏览器/页面，关 self._page
+#:   打不断它们，反而会误伤 keep_alive 常驻会话（page_capture 已改为独立
+#:   非持久化临时浏览器，取消经 cancel_id 在阶段边界生效）；
 #: - close_browser：自带内部超时收敛，无需再关页。
 #: 白名单遗漏新命令时默认「不关页」，方向安全（宁可少自愈，不可误伤）。
 _INTERRUPTIBLE_METHODS = frozenset({
-    "execute_login_attempt", "execute_browser_task", "page_capture",
+    "execute_login_attempt", "execute_browser_task",
     "feedback_capture", "debug_start", "debug_step", "debug_run_all", "debug_stop",
 })
 

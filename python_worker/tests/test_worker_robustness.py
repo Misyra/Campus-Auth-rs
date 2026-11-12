@@ -619,16 +619,25 @@ def test_page_capture_cancelled_between_stages(monkeypatch, tmp_path):
 
     async def _run_case():
         core = WorkerCore()
-        core.ensure_browser = lambda config: _noop()
-        core._prepare_session_page = _noop
-        core._navigate = _noop
+        core._playwright = object()  # 复用既有连接：避免测试真实启动 Playwright
+
         class FakeContext:
-            async def clear_cookies(self):
-                pass
+            async def new_page(self):
+                return FakeCapturePage()
+
+            async def close(self):
+                closed.append("context")
 
         class FakeCapturePage:
             def __init__(self):
-                self.context = FakeContext()
+                self.context = None
+                self.url = "http://portal.example.com/"
+
+            def on(self, event, handler):
+                pass
+
+            async def goto(self, url, wait_until=None, timeout=None):
+                pass
 
             async def wait_for_load_state(self, state, timeout=None):
                 pass
@@ -641,7 +650,19 @@ def test_page_capture_cancelled_between_stages(monkeypatch, tmp_path):
             async def screenshot(self, full_page=True):
                 return b"png"
 
-        core._page = FakeCapturePage()
+        class FakeBrowser:
+            async def new_context(self, **opts):
+                return FakeContext()
+
+            async def close(self):
+                closed.append("browser")
+
+        closed: list[str] = []
+
+        async def fake_launch(playwright, channel, custom_path, headless, launch_args, bs):
+            return FakeBrowser()
+
+        core._launch_browser = fake_launch
         monkeypatch.setattr(
             playwright_worker, "_capture_dir", lambda: tmp_path / "latest"
         )
@@ -652,9 +673,145 @@ def test_page_capture_cancelled_between_stages(monkeypatch, tmp_path):
             await core.handle_page_capture({"url": "http://portal.example.com/", "cancel_id": "pc-cancel"})
         assert "pc-cancel" not in cancel_registry._events
         assert "pc-cancel" not in cancel_registry._pending
+        # 取消路径同样回收临时浏览器：context → browser 依次关闭
+        assert closed == ["context", "browser"]
 
-    async def _noop(*args, **kwargs):
-        return None
+    _run(_run_case())
+
+
+# ── P1-1：page_capture 独立临时浏览器，不触碰 keep_alive 常驻会话 ──
+
+
+def test_page_capture_preserves_keep_alive_session(monkeypatch, tmp_path):
+    """page_capture 用独立非持久化临时浏览器：常驻 Cookie 与心跳页原样保留。
+
+    常驻 context 不被清 Cookie、旧页（心跳页）不被关、会话对象引用不变；
+    临时 browser / context 捕获完成后全部关闭丢弃（无泄漏）。
+    """
+
+    async def _run_case():
+        core = WorkerCore()
+        core._playwright = object()  # 复用既有连接：避免测试真实启动 Playwright
+
+        # ── 常驻会话（keep_alive preserve_state 保留态的等价物）──
+        class ResidentPage:
+            def __init__(self):
+                self.close_calls = 0
+
+            async def close(self):
+                self.close_calls += 1
+
+        class ResidentContext:
+            def __init__(self, page):
+                self.cookies = [{"name": "sid", "value": "keep-alive-session"}]
+                self.pages = [page]
+                self.clear_cookie_calls = 0
+
+            async def clear_cookies(self):
+                self.clear_cookie_calls += 1
+
+            async def close(self):
+                raise AssertionError("常驻 context 不得被 page_capture 关闭")
+
+        class ResidentBrowser:
+            def is_connected(self):
+                return True
+
+            async def close(self):
+                raise AssertionError("常驻浏览器不得被 page_capture 关闭")
+
+        resident_page = ResidentPage()
+        resident_context = ResidentContext(resident_page)
+        core._browser = ResidentBrowser()
+        core._context = resident_context
+        core._page = resident_page
+
+        # 常驻会话的两大破坏点（clear_cookies / 关全部旧页）必须在该路径上不可达
+        async def _forbidden_ensure(config):
+            raise AssertionError("page_capture 不得经 ensure_browser 触碰常驻浏览器")
+
+        async def _forbidden_prepare():
+            raise AssertionError("page_capture 不得经 _prepare_session_page 关常驻旧页")
+
+        core.ensure_browser = _forbidden_ensure
+        core._prepare_session_page = _forbidden_prepare
+
+        # ── 临时浏览器桩（与常驻对象完全独立）──
+        class TempPage:
+            def __init__(self):
+                self.context = None
+                self.url = "http://portal.example.com/login"
+
+            def on(self, event, handler):
+                pass
+
+            async def goto(self, url, wait_until=None, timeout=None):
+                pass
+
+            async def wait_for_load_state(self, state, timeout=None):
+                pass
+
+            async def content(self):
+                return "<html><form></form></html>"
+
+            async def screenshot(self, full_page=True):
+                return b"png"
+
+            async def title(self):
+                return "校园网认证"
+
+        class TempContext:
+            def __init__(self):
+                self.close_calls = 0
+
+            async def new_page(self):
+                page = TempPage()
+                page.context = self
+                return page
+
+            async def close(self):
+                self.close_calls += 1
+
+        class TempBrowser:
+            def __init__(self):
+                self.context = TempContext()
+                self.close_calls = 0
+
+            async def new_context(self, **opts):
+                return self.context
+
+            async def close(self):
+                self.close_calls += 1
+
+        temp_browser = TempBrowser()
+
+        async def fake_launch(playwright, channel, custom_path, headless, launch_args, bs):
+            return temp_browser
+
+        core._launch_browser = fake_launch
+        monkeypatch.setattr(
+            playwright_worker, "_capture_dir", lambda: tmp_path / "latest"
+        )
+        # finally 会武装空闲回收：置 keep_alive 使其成为 no-op，避免悬挂任务
+        monkeypatch.setattr(playwright_worker, "_WORKER_KEEP_ALIVE", True)
+
+        result = await core.handle_page_capture({"url": "http://portal.example.com/"})
+
+        # 返回结构契约不变（Rust 侧零改动）
+        assert set(result) == {
+            "final_url", "title", "html_chars", "png_bytes",
+            "resources_count", "structure_summary", "note",
+        }
+        assert result["title"] == "校园网认证"
+        # 常驻会话原样保留：Cookie 未清、心跳页未关、引用未换、配置快照未污染
+        assert resident_context.clear_cookie_calls == 0
+        assert resident_page.close_calls == 0
+        assert core._context is resident_context
+        assert core._page is resident_page
+        assert core._last_browser_settings is None
+        # 临时浏览器完全关闭（无 context / page 泄漏）
+        assert temp_browser.context.close_calls == 1
+        assert temp_browser.close_calls == 1
 
     _run(_run_case())
 
