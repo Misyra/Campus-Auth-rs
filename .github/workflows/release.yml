@@ -4,6 +4,8 @@ name: Release
 #
 # 产物与 build.ps1 口径一致（解压即用）：
 #   campus-auth(-helper)(.exe)  # 主程序（前端已嵌入）+ 更新替换助手
+#   campus-auth.version         # 版本 marker（一行 Cargo.toml 版本号；非 Windows
+#                               #   更新器经它提取包内版本，Windows 仅随包保持一致）
 #   resources/                  # 托盘图标 / task-recorder 等静态资源
 #   src/ + frontend/ + Cargo 清单 # Dockerfile 的最小源码构建上下文
 #   python_worker/              # Python Worker 源码（运行时按需引导 uv 环境）
@@ -153,6 +155,11 @@ jobs:
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth.exe" $out
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth-helper.exe" $out
           Set-Content -LiteralPath "$out/campus-auth.portable" -Value "campus-auth-portable-v1" -Encoding utf8NoBOM
+          # 版本 marker：非 Windows 读取端的版本来源（无 PE 版本资源），与 Windows
+          # 版本资源同源取 Cargo.toml version；Windows 也写入以保持六矩阵产物一致
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if (-not $version) { throw "Cargo.toml 缺少 version 字段" }
+          Set-Content -LiteralPath "$out/campus-auth.version" -Value $version -Encoding utf8NoBOM
           Copy-Item "resources" "$out/resources" -Recurse
           Copy-Item "src" "$out/src" -Recurse
           New-Item -ItemType Directory -Path "$out/frontend" | Out-Null
@@ -191,6 +198,14 @@ jobs:
           cp "target/$RELEASE_TARGET/release/campus-auth" pkg/
           cp "target/$RELEASE_TARGET/release/campus-auth-helper" pkg/
           printf '%s\n' 'campus-auth-portable-v1' > pkg/campus-auth.portable
+          # 版本 marker：非 Windows 无 PE 版本资源，更新器从包内 exe 同目录的该文件
+          # 提取版本（与 Windows 版本资源同源取 Cargo.toml version，严格 semver）
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "Cargo.toml 缺少 version 字段" >&2
+            exit 1
+          fi
+          printf '%s\n' "$version" > pkg/campus-auth.version
           cp -R resources pkg/resources
           cp -R src pkg/src
           mkdir -p pkg/frontend

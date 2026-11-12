@@ -9,6 +9,7 @@
 #   dist/
 #   ├── campus-auth(.exe)            # 主程序（前端已嵌入）
 #   ├── campus-auth-helper(.exe)     # 更新替换助手
+#   ├── campus-auth.version          # 版本 marker（一行 Cargo.toml 版本号，更新器读取）
 #   ├── LICENSE                     # AGPL-3.0-only 全文（二进制分发必备）
 #   ├── Dockerfile                   # Docker 构建文件
 #   ├── docker-compose.yml           # 默认 GHCR 镜像编排
@@ -175,6 +176,10 @@ Copy-Item $mainExe $Out
 Copy-Item $helperExe $Out
 # 明确区分携带 Cargo 源码的便携包与开发工程，卸载时仍保留源码仓库守卫。
 Set-Content -LiteralPath (Join-Path $Out "campus-auth.portable") -Value "campus-auth-portable-v1" -Encoding utf8NoBOM
+
+# 版本 marker：非 Windows 无 PE 版本资源，更新器从包内 exe 同目录的该文件提取
+# 版本（与 Windows 版本资源同源取 Cargo.toml version；与 release.yml 组装口径一致）
+Set-Content -LiteralPath (Join-Path $Out "campus-auth.version") -Value $cargoVersion -Encoding utf8NoBOM
 
 Copy-Item (Join-Path $Root "resources") (Join-Path $Out "resources") -Recurse
 
