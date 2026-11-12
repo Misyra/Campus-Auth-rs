@@ -508,51 +508,117 @@ fn classify_response(
     }
 }
 
+/// 一次直连登录尝试的共享前提：旧固定链（[`run_once`]）与新式流程（[`run_flow_once`]）
+/// 在「构造尝试输入」段的单一实现。
+///
+/// 两路径的步骤编排各自独立，但尝试开始前的输入构造此前是逐字重复的两份代码：
+/// 出口路由准备 → 出口绑定地址填充本机 IP/MAC → 共用 HTTP 客户端 → 内置占位符表
+/// 与脱敏字典。现统一在 [`AttemptContext::prepare`] 构造，调用方解构取用各字段，
+/// 各自执行段保持原样。
+///
+/// 共用 HTTP 客户端的口径（原 run_once 内联注释随实现上收至此）：退出登录请求 /
+/// 登录页抓取 / 前置请求 / 登录请求四处都用它——连接池挂在 `Client` 上，CSRF 令牌
+/// 绑定 TCP 连接的门户要求取 token 与发登录落在同一条 keep-alive 连接，故整次尝试
+/// 只建一个（见 [`build_client`]）。
+///
+/// 两路径执行段尚未收敛的口径差异（本结构不做统一，收敛留给后续脱糖批次）：
+/// - 总时限：旧路径仅逐请求 `REQUEST_TIMEOUT`；流程路径另有 `FLOW_TIMEOUT` 总预算，
+///   单步超时取 `min(REQUEST_TIMEOUT, 剩余预算)`
+/// - 变量预算：`MAX_EXTRACT_VALUE_BYTES` / `MAX_FLOW_VARIABLE_BYTES` 上限只有流程
+///   路径执行，旧路径的脚本产出没有本地预算（仅 IPC 层 `MAX_TRANSFORM_IPC_BYTES`）
+/// - 退出登录动作：`logout_request` 两种任务形态都可配置（保存闸口不区分），但
+///   只有旧路径执行，新式流程静默跳过——风险是「带 steps 的任务配了下线动作却不
+///   生效」无任何提示
+struct AttemptContext {
+    /// 按出口绑定地址填充本机 IP/MAC 后的请求副本（脚本 ctx 与模板 `{local_ip}` 的
+    /// 数据源）；`None` = 出口未指定绑定地址，沿用调用方传入的原始请求。
+    /// 调用方解构后以副本遮蔽原请求，保持与原就地构造同形。
+    bound: Option<HttpLoginRequest>,
+    /// 本次尝试共用的 HTTP 客户端（同一次尝试内所有请求共用连接池）
+    client: reqwest::Client,
+    /// 内置占位符表（username/password/isp/auth_url/local_ip/local_mac）；
+    /// 脚本产出与步骤提取值随后并入同一张表
+    vars: BTreeMap<String, String>,
+    /// 脱敏字典（初始为内置凭据派生值；执行段每并入新值时同步追加，
+    /// 终局 normalize 后供报告脱敏）
+    secrets: Vec<String>,
+    /// 尝试计时起点（构造前取，中止与成功报告的耗时口径一致）
+    start: Instant,
+}
+
+impl AttemptContext {
+    /// 构造一次登录尝试的全部共享输入；失败返回与原先就地构造一致的终止报告。
+    ///
+    /// 出口准备失败映射 `NavigationTimeout`（出口拨号属瞬时环境问题，会话层可重试）；
+    /// 客户端构建失败映射 `UnknownError`。
+    // Err 侧的 HttpAttemptReport 超 200 字节触发 result_large_err：报告只在尝试
+    // 失败时构造一次，栈上中转一次无所谓，不值得为压尺寸改签名引入装箱。
+    #[allow(clippy::result_large_err)]
+    async fn prepare(req: &HttpLoginRequest) -> Result<Self, HttpAttemptReport> {
+        let start = Instant::now();
+        let egress = match crate::network::egress::PreparedEgress::prepare(&req.network).await {
+            Ok(route) => route,
+            Err(error) => {
+                return Err(abort_report(
+                    Outcome::NavigationTimeout,
+                    error.to_string(),
+                    None,
+                    None,
+                    None,
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+        };
+        // 出口指定绑定地址才值得克隆请求副本：本机地址需异步查询网卡，
+        // 由调用方（持有 MonitorService 或测试端点自建检测器）按需填充
+        let bound = egress
+            .local_address()
+            .map(|address| req.clone().with_local_address(&address));
+        let req = bound.as_ref().unwrap_or(req);
+        let client = match build_client(req.ignore_https_errors, &egress) {
+            Ok(client) => client,
+            Err(e) => {
+                return Err(abort_report(
+                    Outcome::UnknownError,
+                    format!("HTTP 客户端构建失败: {e}"),
+                    None,
+                    None,
+                    None,
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+        };
+        let vars = initial_vars(req);
+        let secrets = collect_secrets(&vars);
+        Ok(Self {
+            bound,
+            client,
+            vars,
+            secrets,
+            start,
+        })
+    }
+}
+
 /// 执行一次直连登录尝试（不发网络验证，验证由会话状态机负责）
 pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     if !req.steps.is_empty() {
         return run_flow_once(req).await;
     }
-    let start = Instant::now();
-
-    // 0. 本次尝试共用的 HTTP 客户端（退出登录请求 / 登录页抓取 / 前置请求 / 登录请求
-    //    四处都用它）：连接池挂在 Client 上，CSRF 令牌绑定 TCP 连接的门户要求取 token 与
-    //    发登录落在同一条 keep-alive 连接，故整次尝试只能建一个。见 [`build_client`]。
-    let egress = match crate::network::egress::PreparedEgress::prepare(&req.network).await {
-        Ok(route) => route,
-        Err(error) => {
-            return abort_report(
-                Outcome::NavigationTimeout,
-                error.to_string(),
-                None,
-                None,
-                None,
-                start.elapsed().as_millis() as u64,
-            );
-        }
+    // 共享尝试前提：出口路由 → 本机地址绑定 → 共用客户端 → 内置占位符表与脱敏字典
+    let AttemptContext {
+        bound,
+        client,
+        mut vars,
+        mut secrets,
+        start,
+    } = match AttemptContext::prepare(req).await {
+        Ok(context) => context,
+        Err(report) => return report,
     };
-    let bound_request = egress
-        .local_address()
-        .map(|address| req.clone().with_local_address(&address));
-    let req = bound_request.as_ref().unwrap_or(req);
-    let client = match build_client(req.ignore_https_errors, &egress) {
-        Ok(client) => client,
-        Err(e) => {
-            return abort_report(
-                Outcome::UnknownError,
-                format!("HTTP 客户端构建失败: {e}"),
-                None,
-                None,
-                None,
-                start.elapsed().as_millis() as u64,
-            );
-        }
-    };
-
-    // 占位符表：先放内置项（下线请求只能用这些，见下方第 1 步），脚本产出的字段在第 2 步
-    // 并入同一张表。
-    let mut vars = initial_vars(req);
-    let mut secrets = collect_secrets(&vars);
+    // 出口绑定副本遮蔽原请求；占位符表先只有内置项（下线请求只能用这些，见第 1 步），
+    // 脚本产出的字段在第 2 步并入同一张表
+    let req = bound.as_ref().unwrap_or(req);
 
     // 1. 退出登录动作（可选）：治「IP 已在线，拒绝重复登录」类门户——先踢掉旧会话再登录。
     //    必须在**登录页抓取与凭据变换脚本之前**：这类门户连取令牌的接口都可能被旧会话
@@ -568,7 +634,7 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
     //
     // 步骤编号（与 `docs/guides/http-login-guide.md` 的 3.x 节一致）：
     // 1 下线 → 2 底层变量表 + 凭据变换脚本 → 3 前置请求 → 4 模板渲染 → 5 发送 → 6 成败判定。
-    // 变量表（`vars`）在这里先建出来，脚本产出合并进它是在第 2 步（紧跟本段之后）。
+    // 变量表（`vars`）已由共享尝试前提建出，脚本产出合并进它是在第 2 步（紧跟本段之后）。
     if let Some(logout) = &req.logout_request {
         let logout_url = substitute(&logout.url, &vars);
         let logout_headers = substitute(&logout.headers, &vars);
@@ -810,40 +876,20 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
 
 /// 执行可编辑的有序 HTTP 登录流程；旧任务仍走上面的固定链。
 async fn run_flow_once(req: &HttpLoginRequest) -> HttpAttemptReport {
-    let start = Instant::now();
-    let egress = match crate::network::egress::PreparedEgress::prepare(&req.network).await {
-        Ok(route) => route,
-        Err(error) => {
-            return abort_report(
-                Outcome::NavigationTimeout,
-                error.to_string(),
-                None,
-                None,
-                None,
-                start.elapsed().as_millis() as u64,
-            );
-        }
+    // 共享尝试前提：出口路由 → 本机地址绑定 → 共用客户端 → 内置占位符表与脱敏字典
+    let AttemptContext {
+        bound,
+        client,
+        mut vars,
+        mut secrets,
+        start,
+    } = match AttemptContext::prepare(req).await {
+        Ok(context) => context,
+        Err(report) => return report,
     };
-    let bound_request = egress
-        .local_address()
-        .map(|address| req.clone().with_local_address(&address));
-    let req = bound_request.as_ref().unwrap_or(req);
-    let client = match build_client(req.ignore_https_errors, &egress) {
-        Ok(client) => client,
-        Err(error) => {
-            return abort_report(
-                Outcome::UnknownError,
-                format!("HTTP 客户端构建失败: {error}"),
-                None,
-                None,
-                None,
-                start.elapsed().as_millis() as u64,
-            );
-        }
-    };
-    let mut vars = initial_vars(req);
-    // 步骤可覆盖内置变量；后面统一脱敏时仍须记住前面请求用过的旧值。
-    let mut secrets = collect_secrets(&vars);
+    // 出口绑定副本遮蔽原请求；步骤可覆盖内置变量，后面统一脱敏时
+    // 仍须记住前面请求用过的旧值。
+    let req = bound.as_ref().unwrap_or(req);
     let result_id = if req.result_step_id.is_empty() {
         req.steps
             .iter()
