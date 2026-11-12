@@ -1121,7 +1121,9 @@ def test_browser_idle_release_fires_and_cancels():
         async def fake_close(self):
             closed.append(True)
 
-        orig_close = WorkerCore.close_browser
+        # 空闲回收在生命周期锁内直接走锁内关闭（close_browser 公开入口会二次
+        # 加锁），故探针挂在 _close_browser_locked 上
+        orig_close = WorkerCore._close_browser_locked
         orig_secs = pw.BROWSER_IDLE_RELEASE_SECS
         orig_env = pw._WORKER_KEEP_ALIVE
         WorkerCore.close_browser = fake_close
@@ -1679,6 +1681,87 @@ def test_evaluate_outer_deadline_maps_to_assertion_failed(monkeypatch):
             await run_step_async(object(), step, context)
         assert ei.value.outcome == "assertion_failed"
         assert "超时" in ei.value.message
+
+    asyncio.run(_run())
+
+
+def test_idle_release_close_serializes_with_command_ensure(monkeypatch):
+    """P2 缺口③（P2-3 配套）：空闲回收关闭进行中命令到达，生命周期锁保证串行。
+
+    回收关闭卡在不可中断的关闭调用里（"cancel 已启动 task 无效"的最坏情形）；
+    持锁的 ensure_browser 必须等关闭完全退出后再判定状态，就绪的浏览器不会被
+    并发关闭撕成"命令已确认、状态已被清空"的裂缝。
+    变异验证：去掉 ensure_browser/_browser_idle_release 的生命周期锁本测试变红。
+    """
+
+    async def _run():
+        import playwright_worker as pw
+        from playwright_worker import WorkerCore
+
+        class AliveBrowser:
+            def is_connected(self):
+                return True
+
+        class AliveContext:
+            async def cookies(self):
+                return []
+
+        core = WorkerCore()
+        core._browser = AliveBrowser()
+        core._context = AliveContext()
+        core._last_browser_settings = {"pure_mode": True}
+
+        timeline: list[str] = []
+        close_entered = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def slow_close_locked(self):
+            timeline.append("close-enter")
+            close_entered.set()
+            try:
+                await release_close.wait()
+            except asyncio.CancelledError:
+                # 现实中 close 可能卡在不可中断的 CDP/native 关闭里，取消无法
+                # 提前终止它，只能等其自然返回
+                timeline.append("close-cancel-ignored")
+            core._browser = None
+            core._context = None
+            timeline.append("close-exit")
+
+        async def fake_start(self, config):
+            core._browser = AliveBrowser()
+            core._context = AliveContext()
+            timeline.append("rebuild")
+
+        orig_close = WorkerCore._close_browser_locked
+        orig_start = WorkerCore._start_browser
+        orig_secs = pw.BROWSER_IDLE_RELEASE_SECS
+        orig_env = pw._WORKER_KEEP_ALIVE
+        WorkerCore._close_browser_locked = slow_close_locked
+        WorkerCore._start_browser = fake_start
+        pw.BROWSER_IDLE_RELEASE_SECS = 0.02
+        pw._WORKER_KEEP_ALIVE = False
+        try:
+            core._arm_browser_idle_release()
+            await close_entered.wait()
+            # 回收关闭进行中，命令到达
+            ensure_task = asyncio.ensure_future(
+                core.ensure_browser({"browser_settings": {"pure_mode": True}})
+            )
+            for _ in range(3):
+                await asyncio.sleep(0)  # 让 ensure_browser 走到锁等待点
+            release_close.set()
+            await ensure_task
+            assert core._browser is not None, "ensure 返回后浏览器必须就绪（不被回收关闭撕开）"
+            assert core._context is not None
+            assert "rebuild" in timeline, f"锁内应观察到已清空状态并重建: {timeline}"
+            assert timeline.index("close-exit") < timeline.index("rebuild")
+        finally:
+            WorkerCore._close_browser_locked = orig_close
+            WorkerCore._start_browser = orig_start
+            pw.BROWSER_IDLE_RELEASE_SECS = orig_secs
+            pw._WORKER_KEEP_ALIVE = orig_env
+            core._cancel_browser_idle_release()
 
     asyncio.run(_run())
 

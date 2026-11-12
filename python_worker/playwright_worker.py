@@ -1266,6 +1266,10 @@ class WorkerCore:
         self._screenshot_cleanup_tasks: set[asyncio.Task] = set()
         # 防止同一个 Page 重复绑定 dialog 处理器。
         self._wired_page_ids: set[int] = set()
+        # 浏览器生命周期互斥锁：串行化 ensure_browser / close_browser / _close_session
+        # 与空闲回收的关闭段，消除"回收关闭进行中命令判定浏览器就绪"的交错
+        # （P2-3）。只包生命周期段，命令内的步骤执行在锁外，不串行化命令本身。
+        self._browser_lifecycle_lock = asyncio.Lock()
 
     # ── 浏览器启动参数构建 ──
 
@@ -1549,7 +1553,8 @@ class WorkerCore:
             )
         except Exception:  # noqa: BLE001 — 启动环节异常源众多（driver 崩溃/参数非法等），统一回滚后原样上抛
             logger.error("浏览器启动失败，回滚资源", exc_info=True)
-            await self.close_browser()
+            # 仅由 ensure_browser（已持生命周期锁）调用，走锁内关闭避免死锁
+            await self._close_browser_locked()
             raise
 
     def _wire_page(self, page: Any) -> None:
@@ -1653,37 +1658,40 @@ class WorkerCore:
         bs = config.get("browser_settings", {})
         # 任何浏览器命令开始都取消待触发的空闲自动释放
         self._cancel_browser_idle_release()
-        # 会话级释放后的热恢复：浏览器进程存活且配置未变，仅重建轻量 context
-        # 与页面（全新 cookie 罐，会话隔离语义不变），省去 1-3s 冷启动
-        if (
-            self._browser is not None
-            and self._context is None
-            and self._last_browser_settings == bs
-            and self._browser.is_connected()
-        ):
-            try:
-                # 旧 context 已随会话级释放关闭，其页面对象 id 可能被 Python
-                # 复用：重建 context 前先清空防重复绑定集合，否则新页会被
-                # 误判为"已绑定"而漏装 dialog 处理器（对齐 _close_session）
-                self._wired_page_ids.clear()
-                self._context = await self._browser.new_context(
-                    **self._build_context_options(bs)
-                )
-                self._wire_context()
-                if not bs.get("pure_mode", False):
-                    await self._apply_stealth_and_routes(bs)
-                self._page = await self._new_page()
-                logger.info("复用浏览器进程热恢复会话上下文")
+        # 生命周期段整体持锁：空闲回收的关闭与命令侧的就绪判定/重建互斥，
+        # 命令看到的浏览器状态不会在判定与使用之间被并发关闭撕开
+        async with self._browser_lifecycle_lock:
+            # 会话级释放后的热恢复：浏览器进程存活且配置未变，仅重建轻量 context
+            # 与页面（全新 cookie 罐，会话隔离语义不变），省去 1-3s 冷启动
+            if (
+                self._browser is not None
+                and self._context is None
+                and self._last_browser_settings == bs
+                and self._browser.is_connected()
+            ):
+                try:
+                    # 旧 context 已随会话级释放关闭，其页面对象 id 可能被 Python
+                    # 复用：重建 context 前先清空防重复绑定集合，否则新页会被
+                    # 误判为"已绑定"而漏装 dialog 处理器（对齐 _close_session）
+                    self._wired_page_ids.clear()
+                    self._context = await self._browser.new_context(
+                        **self._build_context_options(bs)
+                    )
+                    self._wire_context()
+                    if not bs.get("pure_mode", False):
+                        await self._apply_stealth_and_routes(bs)
+                    self._page = await self._new_page()
+                    logger.info("复用浏览器进程热恢复会话上下文")
+                    return
+                except Exception:  # noqa: BLE001 — 热恢复涉及建 context/装路由/建页多环节，任一失败统一回退完整重建
+                    logger.warning("浏览器进程热恢复失败，回退完整重建", exc_info=True)
+                    await self._close_browser_locked()
+            has_browser = self._browser is not None or self._context is not None
+            if has_browser and await self._health_check() and self._last_browser_settings == bs:
                 return
-            except Exception:  # noqa: BLE001 — 热恢复涉及建 context/装路由/建页多环节，任一失败统一回退完整重建
-                logger.warning("浏览器进程热恢复失败，回退完整重建", exc_info=True)
-                await self.close_browser()
-        has_browser = self._browser is not None or self._context is not None
-        if has_browser and await self._health_check() and self._last_browser_settings == bs:
-            return
-        logger.info("浏览器未就绪或配置变更，重建浏览器")
-        await self.close_browser()
-        await self._start_browser(config)
+            logger.info("浏览器未就绪或配置变更，重建浏览器")
+            await self._close_browser_locked()
+            await self._start_browser(config)
 
     async def _health_check(self) -> bool:
         """检查 Browser 与 BrowserContext 是否都仍可用。"""
@@ -1724,6 +1732,15 @@ class WorkerCore:
             await self._safe_close(self._context, "上下文")
             self._context = None
             self._wired_page_ids.clear()
+        async with self._browser_lifecycle_lock:
+            await self._close_browser_locked()
+
+    async def _close_browser_locked(self) -> None:
+        """close_browser 的锁内实现（调用方必须已持有生命周期锁）。
+
+        ensure_browser / _start_browser 在临界区内也需要完整关闭，经此入口
+        避免对非重入的 asyncio.Lock 二次加锁死锁。
+        """
         if self._browser is not None:
             await self._safe_close(self._browser, "浏览器")
             self._browser = None
@@ -1758,6 +1775,11 @@ class WorkerCore:
         self._wired_page_ids.clear()
         # 与 close_browser 同款兜底：截图与 cancel 注册统一释放。
         self._teardown_all_debug_sessions()
+        async with self._browser_lifecycle_lock:
+            await self._close_session_locked()
+
+    async def _close_session_locked(self) -> None:
+        """_close_session 的锁内实现（调用方必须已持有生命周期锁）。"""
         logger.info("会话级资源已释放（浏览器进程保留）")
 
     def _cancel_browser_idle_release(self) -> None:
@@ -1774,7 +1796,13 @@ class WorkerCore:
         self._browser_idle_task = asyncio.create_task(self._browser_idle_release())
 
     async def _browser_idle_release(self) -> None:
-        """空闲到期后全量关闭浏览器释放内存（Worker 进程仍由 Rust 空闲超时管理）。"""
+        """空闲到期后全量关闭浏览器释放内存（Worker 进程仍由 Rust 空闲超时管理）。
+
+        关闭全程持有任务引用并持生命周期锁：命令侧 ensure_browser 入口的
+        cancel（_cancel_browser_idle_release）在睡眠期/等锁期/关闭期均能送达；
+        拿到锁后复查状态——等待期间命令可能已重建浏览器，绝不能关掉新实例
+        （P2-3）。
+        """
         try:
             await asyncio.sleep(BROWSER_IDLE_RELEASE_SECS)
         except asyncio.CancelledError:
@@ -1790,7 +1818,26 @@ class WorkerCore:
             BROWSER_IDLE_RELEASE_SECS,
         )
         try:
-            await asyncio.wait_for(self.close_browser(), timeout=_WAIT_TIMEOUT_SECS)
+            async with self._browser_lifecycle_lock:
+                # 调试会话兜底保护：活跃调试期间绝不回收
+                if self._debug_sessions:
+                    return
+                if self._browser is None and self._context is None:
+                    return
+                logger.info(
+                    "浏览器空闲 %ds，自动释放（worker.keep_alive 未启用）",
+                    BROWSER_IDLE_RELEASE_SECS,
+                )
+                # 超时兜底：挂死的关闭不得永久占住生命周期锁堵死后续命令；
+                # wait_for 取消内层关闭后锁释放，半关闭状态由下一轮
+                # ensure_browser 的健康检查/重建收敛
+                await asyncio.wait_for(
+                    self._close_browser_locked(), timeout=_WAIT_TIMEOUT_SECS
+                )
+        except asyncio.CancelledError:
+            # 命令到达后取消本任务：浏览器生命周期已由命令路径接管。关闭若已
+            # 开始，残留半关闭状态由命令侧 ensure_browser 的健康检查/重建收敛
+            return
         except asyncio.TimeoutError:
             logger.warning("浏览器空闲自动释放超时（8s），跳过")
         except Exception as exc:  # noqa: BLE001
