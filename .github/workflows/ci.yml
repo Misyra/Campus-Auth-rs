@@ -46,6 +46,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Dockerfile 的 rust 基础镜像 tag 与 rust-toolchain.toml 是双源声明：升级 Rust
+      # 时只改一边，容器构建就会现场下载另一套工具链，产物与本地/CI 不可复现。
+      # 口径：tag 的主/次版本必须与 channel 一致（patch 由 rustup 按 channel 解析，
+      # 即 tag 1.98 ↔ channel 1.98.0 视为一致）。
+      - name: Dockerfile Rust 工具链一致性检查
+        shell: pwsh
+        run: |
+          $config = Get-Content rust-toolchain.toml -Raw
+          if ($config -notmatch 'channel\s*=\s*"([^"]+)"') { throw "rust-toolchain.toml 缺少 toolchain.channel" }
+          $channel = $Matches[1]
+          $dockerfile = Get-Content Dockerfile -Raw
+          # 兼容 tag@digest 形式：只取 tag 段（无 digest 或带 digest 均可命中，纯 digest 无版本 tag 则报错）
+          if ($dockerfile -notmatch '(?m)^FROM\s+rust:([^@\s]+)') { throw "Dockerfile 未找到 rust: 基础镜像（需保留版本 tag）" }
+          $imageTag = $Matches[1]
+          $dockerVersion = ($imageTag -replace '-.*$', '')
+          if ($channel -ne $dockerVersion -and -not $channel.StartsWith("$dockerVersion.")) {
+            throw "Dockerfile rust:$imageTag 与 rust-toolchain.toml channel=$channel 漂移，请同步升级两边"
+          }
+          Write-Host "Dockerfile rust:$imageTag 与 rust-toolchain.toml channel=$channel 一致"
+
       - name: 读取 Rust 工具链版本
         id: rust-toolchain
         shell: pwsh
