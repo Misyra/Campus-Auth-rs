@@ -770,7 +770,7 @@ def test_handle_evaluate_hung_script_times_out():
         step = StepConfig(id="1", step_type="evaluate", code="while(true){}")
         with pytest.raises(WorkerError) as ei:
             await handle_evaluate(page, step, StepContext(page=page, default_timeout=100))
-        assert ei.value.outcome == "unknown_error"
+        assert ei.value.outcome == "assertion_failed"
         assert "超时" in ei.value.message
 
     asyncio.run(_run())
@@ -1126,7 +1126,7 @@ def test_browser_idle_release_fires_and_cancels():
         orig_close = WorkerCore._close_browser_locked
         orig_secs = pw.BROWSER_IDLE_RELEASE_SECS
         orig_env = pw._WORKER_KEEP_ALIVE
-        WorkerCore.close_browser = fake_close
+        WorkerCore._close_browser_locked = fake_close
         pw.BROWSER_IDLE_RELEASE_SECS = 0.05
         pw._WORKER_KEEP_ALIVE = False
         try:
@@ -1147,7 +1147,7 @@ def test_browser_idle_release_fires_and_cancels():
             core._arm_browser_idle_release()
             assert core._browser_idle_task is None, "keep_alive 时不装空闲回收"
         finally:
-            WorkerCore.close_browser = orig_close
+            WorkerCore._close_browser_locked = orig_close
             pw.BROWSER_IDLE_RELEASE_SECS = orig_secs
             pw._WORKER_KEEP_ALIVE = orig_env
 
@@ -1844,3 +1844,57 @@ def test_cancel_registry_pending_cap_evicts_oldest():
     ev_new = reg.register("newest")
     assert ev_new.is_set() is True, "新近 pending 必须存活（clear() 旧口径会连坐清掉）"
 
+
+def test_dispatch_guarded_timeout_full_chain_interrupt_and_convergence(monkeypatch, capsys):
+    """超时→取消→force_interrupt_pending→收敛全链路（P2 缺口②）。
+
+    命令级超时后取消任务并触发一次强制中断（真实语义：关页使挂起的 CDP
+    await 退出）；handler 迟到返回的结果被 emit_once 抑制，不产生第二行响应。
+    """
+
+    async def _run():
+        import worker_main
+        from playwright_worker import worker_core
+
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
+        interrupt_calls = []
+        page_closed = asyncio.Event()
+
+        async def fake_force_interrupt_pending():
+            # 真实实现关闭 self._page，使挂起的 Playwright await 以
+            # "目标已关闭"异常结束；此处以事件放行等价模拟
+            interrupt_calls.append(True)
+            page_closed.set()
+
+        monkeypatch.setattr(
+            worker_core, "force_interrupt_pending", fake_force_interrupt_pending
+        )
+
+        converged = []
+
+        async def stubborn_handler(params):
+            try:
+                await page_closed.wait()  # 模拟挂在 CDP await 上的步骤
+            except asyncio.CancelledError:
+                converged.append("cancelled")
+                # 现实中的 handler 可能吞掉取消并在打断后迟到返回结果
+                return {"late": True}
+
+        worker_main.COMMANDS["execute_browser_task"] = stubborn_handler
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 31, "method": "execute_browser_task", "params": {}}
+            )
+        finally:
+            del worker_main.COMMANDS["execute_browser_task"]
+
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1, f"应仅有一封响应（迟到结果被抑制）: {lines}"
+        msg = json.loads(lines[0])
+        assert msg["id"] == 31
+        assert msg["result"]["success"] is False
+        assert msg["result"]["data"]["outcome"] == "unknown_error"
+        assert interrupt_calls == [True], "白名单内命令超时应触发恰好一次强制中断"
+        assert converged == ["cancelled"], "被取消的 handler 应真正收敛退出"
+
+    asyncio.run(_run())

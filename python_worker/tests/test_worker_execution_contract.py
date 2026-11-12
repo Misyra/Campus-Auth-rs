@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from debug_session import DebugSession, _build_steps_info
-from models import Outcome, StepConfig, TaskConfig
+from models import Outcome, StepConfig, StructuredResult, TaskConfig
 import playwright_worker
 from playwright_worker import WorkerCore
 from step_handlers import StepCancelled, StepContext, WorkerError
@@ -768,6 +768,158 @@ def test_login_system_variables_skip_missing_keys(monkeypatch):
         "ISP": "custom-isp",
         "LOGIN_URL": "http://10.0.0.1/login",
     }
+
+
+def test_system_variables_skip_none_values():
+    """P2-7：serde null 的 Profile 字段不注入字面 "None"。
+
+    Rust 侧字段可为 null（如直连渠道 ISP 留空经 JSON 传 null），str(None)
+    会把 "None" 当成凭据/地址注入任务模板；None 与缺失同等跳过，空串原样注入。
+    """
+    out = WorkerCore._system_variables(
+        {"username": None, "password": "p", "isp": None, "auth_url": None, "trigger_url": None}
+    )
+    assert out == {"PASSWORD": "p"}
+    # trigger_url 为 null 时 LOGIN_URL 不注入（auth_url 也为 None 无回落值）
+    out2 = WorkerCore._system_variables(
+        {"username": "u", "auth_url": "http://10.0.0.1/login", "trigger_url": None}
+    )
+    assert out2 == {"USERNAME": "u", "LOGIN_URL": "http://10.0.0.1/login"}
+
+
+# ── P2 缺口④：_run_task 失败/取消 cookie 清理矩阵 ──
+
+
+def _run_task_core(monkeypatch, run_steps_impl):
+    """装配 _run_task：浏览器/建页为空实现，context.clear_cookies 可计数。"""
+    core = WorkerCore()
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.clear_cookies_calls = 0
+
+        async def clear_cookies(self) -> None:
+            self.clear_cookies_calls += 1
+
+    ctx = FakeContext()
+
+    async def fake_ensure_browser(*_args, **_kwargs):
+        return None
+
+    async def fake_prepare_session_page():
+        core._page = None
+        core._context = ctx
+
+    def fake_make_context(*_args, **_kwargs):
+        return StepContext(page=None)
+
+    monkeypatch.setattr(core, "ensure_browser", fake_ensure_browser)
+    monkeypatch.setattr(core, "_prepare_session_page", fake_prepare_session_page)
+    monkeypatch.setattr(core, "_make_context", fake_make_context)
+    monkeypatch.setattr(playwright_worker, "run_steps", run_steps_impl)
+    return core, ctx
+
+
+def test_run_task_clears_cookies_on_failure_result(monkeypatch):
+    """矩阵①：步骤结果失败（非 success/cancelled）→ 清 cookies。"""
+
+    async def failing(_page, _steps, _context):
+        return StructuredResult(outcome=Outcome.UNKNOWN_ERROR.value, message="失败")
+
+    core, ctx = _run_task_core(monkeypatch, failing)
+    result = asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert result.outcome == Outcome.UNKNOWN_ERROR.value
+    assert ctx.clear_cookies_calls == 1, "失败结果必须清除 context cookies"
+
+
+def test_run_task_keeps_cookies_on_success_and_cancelled(monkeypatch):
+    """矩阵②：成功与取消结果 → 不清 cookies（登录态/取消现场保留）。"""
+
+    async def succeed(_page, _steps, _context):
+        return StructuredResult(outcome=Outcome.SUCCESS.value, message="成功")
+
+    core, ctx = _run_task_core(monkeypatch, succeed)
+    asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx.clear_cookies_calls == 0
+
+    async def cancelled(_page, _steps, _context):
+        return StructuredResult(outcome=Outcome.CANCELLED.value, message="已取消")
+
+    core2, ctx2 = _run_task_core(monkeypatch, cancelled)
+    asyncio.run(core2._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx2.clear_cookies_calls == 0
+
+
+def test_run_task_clears_cookies_on_worker_error_except_cancel(monkeypatch):
+    """矩阵③：WorkerError 异常路径 → 非 cancelled 清 cookies，cancelled 不清。"""
+
+    async def raise_failure(_page, _steps, _context):
+        raise WorkerError(Outcome.SELECTOR_FAILED, "选择器失败")
+
+    core, ctx = _run_task_core(monkeypatch, raise_failure)
+    with pytest.raises(WorkerError):
+        asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx.clear_cookies_calls == 1
+
+    async def raise_cancelled(_page, _steps, _context):
+        raise StepCancelled("步骤已取消")
+
+    core2, ctx2 = _run_task_core(monkeypatch, raise_cancelled)
+    with pytest.raises(StepCancelled):
+        asyncio.run(core2._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx2.clear_cookies_calls == 0, "取消不得清除 cookies（保留现场）"
+
+
+def test_run_task_clears_cookies_on_unexpected_exception(monkeypatch):
+    """矩阵④：未预期异常 → 清 cookies 并原样上抛。"""
+
+    async def raise_boom(_page, _steps, _context):
+        raise RuntimeError("boom")
+
+    core, ctx = _run_task_core(monkeypatch, raise_boom)
+    with pytest.raises(RuntimeError):
+        asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx.clear_cookies_calls == 1
+
+
+def test_debug_start_cancelled_after_establish_tears_down_ghost_session(monkeypatch, tmp_path):
+    """P2 缺口①：取消恰好在会话建成后到达 → 幽灵会话收尾。
+
+    会话写入字典与响应返回之间取消事件置位时，debug_start 必须弹出会话、
+    释放截图/取消注册、关闭会话页，并以 cancelled 语义上抛——不能留下
+    Rust 已判定取消、Worker 却仍视为活跃的调试会话。
+    """
+    from playwright_worker import cancel_registry
+
+    class GhostPage(_FakeDebugPage):
+        async def close(self):
+            pass
+
+    page = GhostPage()
+    core = _debug_start_core(monkeypatch, tmp_path, page)
+
+    async def fake_capture(_session, *, step_index=None, full_page=False):
+        # 模拟取消落在"会话已建成、初始截图"窗口内
+        cancel_registry.trigger("ghost-cancel-p27")
+        return True
+
+    monkeypatch.setattr(core, "_capture_debug_frame", fake_capture)
+
+    with pytest.raises(StepCancelled) as ei:
+        asyncio.run(
+            core.handle_debug_start(
+                {
+                    "task_config": {"task_id": "ghost", "url": "", "steps": [], "variables": {}},
+                    "auth_url": "",
+                    "trigger_url": "",
+                    "cancel_id": "ghost-cancel-p27",
+                }
+            )
+        )
+
+    assert "已取消" in ei.value.message
+    assert core._debug_sessions == {}, "幽灵调试会话必须被收尾弹出"
+    assert core._page is None, "会话页应随幽灵会话一并关闭"
 
 
 def test_debug_run_all_continues_after_optional_failure_and_applies_delay(monkeypatch):
