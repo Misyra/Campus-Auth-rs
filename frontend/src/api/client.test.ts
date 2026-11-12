@@ -9,13 +9,15 @@
  * - 交换 401 失败走引导态（fragment 保留、不写缓存）；
  * - 无 hash 时 sessionStorage 缓存复用（同 tab 刷新不再依赖 fragment）；
  * - submitManagementPassword 的 AUTH_NOT_CONFIGURED 透传与密码错误/网络失败分支；
+ * - refreshAuthToken 与 resetAuthToken 的语义分界：WS 重连刷新仅清内存缓存
+ *   （sessionStorage 保留、复用同一 token），401 证实的失效才双层全清；
  * - 引导交换用裸 fetch 直连（不经 request()：会因 ensureAuthToken 递归，且
  *   request 的 401 重试/信封语义不适用于引导端点）。
  *
  * 另含 `isNoBrowserMessage` 文案握手与 `request()` 的超时/取消/401/信封解包路径。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ApiError, http, isNoBrowserMessage, ensureAuthToken, refreshAuthToken, submitManagementPassword, parseBootstrapSecret } from "./client";
+import { ApiError, http, isNoBrowserMessage, ensureAuthToken, hasUsableAuthToken, refreshAuthToken, submitManagementPassword, parseBootstrapSecret } from "./client";
 
 /** 与后端 `browser::NO_BROWSER_MESSAGE` 逐字同步 */
 const BACKEND_NO_BROWSER_MESSAGE =
@@ -92,7 +94,8 @@ const BOOTSTRAP_SECRET = "a".repeat(64);
 beforeEach(async () => {
   // 清空三类凭据来源，保证每条用例从「干净引导态」出发：
   // fragment / sessionStorage 直接清；内存缓存经 refreshAuthToken 重置
-  //（无 hash 无缓存时它不发任何请求）
+  //（新语义下它保留 sessionStorage，但此前已 clear，同样为空；
+  // 无 hash 无缓存时它不发任何请求）
   sessionStorage.clear();
   location.hash = "";
   await refreshAuthToken();
@@ -164,6 +167,36 @@ describe("ensureAuthToken bootstrap 握手", () => {
     expect(parseBootstrapSecret("http://127.0.0.1:50721/")).toBeNull();
     expect(parseBootstrapSecret("")).toBeNull();
     expect(parseBootstrapSecret("  ")).toBeNull();
+  });
+});
+
+describe("refreshAuthToken 与 resetAuthToken 的语义分界", () => {
+  it("WS 重连刷新仅清内存缓存：保留 sessionStorage 并复用同一 token", async () => {
+    // 模拟同 tab 已引导过的状态：token 同时在 sessionStorage（后端持久化的镜像）
+    sessionStorage.setItem("campus_auth_token", "tok-persist");
+    await expect(ensureAuthToken()).resolves.toBe("tok-persist");
+    const fetchMock = stubFetch(() => jsonResponse({ data: { token: "不应被取用" } }));
+    // WS 重连前的刷新只清内存：sessionStorage 保留 → 恢复出同一 token，不发任何请求。
+    // 后端重启场景下旧 token 依然有效，页面不被迫回到引导页
+    await expect(refreshAuthToken()).resolves.toBe("tok-persist");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("campus_auth_token")).toBe("tok-persist");
+    // 恢复结果对后续请求可见
+    await expect(ensureAuthToken()).resolves.toBe("tok-persist");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("401 触发的 reset 双层全清：内存与 sessionStorage 一并失效，随后匿名重试", async () => {
+    sessionStorage.setItem("campus_auth_token", "tok-stale");
+    const fetchMock = stubFetch(() => jsonResponse({ error: {} }, { status: 401 }));
+    const err = await http.get("/api/x").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(401);
+    // 原始（带 token）+ reset 后的匿名重试，共 2 次
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 401 说明凭据被吊销/轮换：双层缓存必须一并废弃，交回引导态
+    expect(sessionStorage.getItem("campus_auth_token")).toBeNull();
+    expect(hasUsableAuthToken()).toBe(false);
   });
 });
 

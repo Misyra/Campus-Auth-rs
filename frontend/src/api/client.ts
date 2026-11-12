@@ -83,7 +83,7 @@ function writeSessionToken(token: string): void {
   }
 }
 
-/** 清除 sessionStorage 的 token 缓存（401 / 显式刷新时同步失效） */
+/** 清除 sessionStorage 的 token 缓存（仅经 resetAuthToken：401 证实的失效才双层同步废弃） */
 function clearSessionToken(): void {
   try {
     sessionStorage.removeItem(SESSION_TOKEN_KEY);
@@ -271,11 +271,20 @@ function resetAuthToken(): void {
 
 /**
  * 强制刷新 token 并返回新值：WS 重连前调用。
- * token 持久化后常规重启不再换发，本函数主要服务于「凭据已被吊销」的场景：
+ *
+ * 语义分界（token 由后端持久化，正常重启不变）：
+ * - **常规路径——仅清内存缓存**：sessionStorage 保留，ensureAuthToken 的读取链
+ *   （内存 → hash 交换 → sessionStorage）会从中恢复出原 token，WS 重连仍带同一
+ *   token。后端重启场景下旧 token 依然有效，页面不再被迫回到引导页重新引导。
+ * - **轮换路径——双层全清**：仅当后端秘钥文件损坏成对重建（token 真被轮换）
+ *   时，恢复出的旧 token 会在后续 HTTP 请求收到 401，由 request() 调用
+ *   resetAuthToken 把内存与 sessionStorage 一并清空 → 无凭据可用时交给引导页兜底。
+ *
  * 失败返回 null，调用方以匿名建连（后端 401 关掉后走正常退避，不比旧行为差）。
  */
 export function refreshAuthToken(): Promise<string | null> {
-  resetAuthToken();
+  authToken = null;
+  tokenPromise = null;
   return ensureAuthToken();
 }
 
