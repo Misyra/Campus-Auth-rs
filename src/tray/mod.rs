@@ -61,8 +61,10 @@ pub enum TrayAction {
     StartMonitor,
     /// 停止监测（EngineCommand::Stop）
     StopMonitor,
-    /// 打开 Web 控制台（open::that）
+    /// 打开 Web 控制台（open::that，URL 携带 `#auth=<bootstrap>` fragment）
     OpenWeb,
+    /// 复制带 auth fragment 的界面完整 URL 到系统剪贴板
+    CopyWebLink,
     /// 手动触发一次登录（等价于控制台「手动登录」按钮，来源标记 Manual）
     ManualLogin,
     /// 退出（EngineCommand::Shutdown + 停止自身）
@@ -94,6 +96,10 @@ pub struct TrayDeps {
     pub host: Option<String>,
     /// 是否运行在轻量模式（Axum 按需启动）
     pub lightweight: bool,
+    /// 管理密码覆盖值（CLI/env，透传给按需启动的 Axum 与凭据门禁）
+    pub management_password_override: Option<String>,
+    /// 显式豁免无凭据的非回环绑定（--allow-unauthenticated-bind，透传给凭据门禁）
+    pub allow_unauthenticated_bind: bool,
     /// 应用级关闭令牌（Quit 时取消，驱动 launcher 走完整优雅关闭流程）
     pub shutdown: CancellationToken,
 }
@@ -398,6 +404,7 @@ fn menu_action_for(id: &str, snap: &StatusSnapshot) -> Option<TrayAction> {
         }
         "manual_login" => Some(TrayAction::ManualLogin),
         "open_web" => Some(TrayAction::OpenWeb),
+        "copy_web_link" => Some(TrayAction::CopyWebLink),
         "quit" => Some(TrayAction::Quit),
         _ => None,
     }
@@ -592,11 +599,25 @@ async fn handle_action(
                     .unwrap_or_else(|e| e.into_inner())
                     .is_none()
             {
+                // 凭据门禁参数与完整模式同源：覆盖值来自 CLI/env（TrayDeps 透传），
+                // 配置值取实时设置；生效值计算与 exchange 运行期共用同一纯函数，
+                // 绑定前的 fail-closed 检查在 prepare_axum_listener 内执行
+                let config_password = deps.config.load_settings().global.app.management_password;
+                let gate = app::BindCredentialGate {
+                    effective_password: crate::web::auth::effective_management_password(
+                        deps.management_password_override.as_deref(),
+                        &config_password,
+                    )
+                    .into_owned(),
+                    allow_unauthenticated_bind: deps.allow_unauthenticated_bind,
+                };
                 match app::start_axum(
                     deps.container.clone(),
                     deps.log_tx.clone(),
                     deps.port,
                     deps.host.as_deref(),
+                    &gate,
+                    deps.management_password_override.clone(),
                 )
                 .await
                 {
@@ -613,11 +634,27 @@ async fn handle_action(
                     Err(e) => warn!("托盘按需启动 Axum 失败: {e}"),
                 }
             }
-            let url = format!("http://127.0.0.1:{}", resolve_web_port(deps, axum_handle));
+            // URL 携带 bootstrap fragment（fragment 不进服务器日志）；日志只记
+            // 基础 URL，绝不记录 bootstrap 秘钥
+            let port = resolve_web_port(deps, axum_handle);
+            let bootstrap = crate::web::auth::read_bootstrap_file(&deps.config.base_path());
+            let url = crate::web::auth::ui_url(port, bootstrap.as_deref());
             if let Err(e) = open::that(&url) {
-                warn!("打开浏览器失败 ({url}): {e}");
+                warn!("打开浏览器失败 (http://127.0.0.1:{port}): {e}");
             } else {
-                info!("已打开 Web 控制台: {url}");
+                info!("已打开 Web 控制台: http://127.0.0.1:{port}（已携带 auth fragment）");
+            }
+            false
+        }
+        TrayAction::CopyWebLink => {
+            // 与 OpenWeb 同一 URL 构造口径（含 auth fragment）；剪贴板即用户
+            // 显式要求持有该链接，提示中提醒勿外传
+            let port = resolve_web_port(deps, axum_handle);
+            let bootstrap = crate::web::auth::read_bootstrap_file(&deps.config.base_path());
+            let url = crate::web::auth::ui_url(port, bootstrap.as_deref());
+            match copy_to_clipboard(&url).await {
+                Ok(()) => info!("界面链接已复制到剪贴板（含 auth fragment，请勿外传）"),
+                Err(e) => warn!("复制界面链接失败: {e}"),
             }
             false
         }
@@ -709,6 +746,7 @@ fn update_tray(
 /// 停止监测 / 启动监测        ← 随引擎状态切换文本
 /// 手动登录
 /// 打开控制台
+/// 复制界面链接               ← 复制带 auth fragment 的完整 URL（换机/远程场景）
 /// 退出
 /// ```
 ///
@@ -744,6 +782,12 @@ fn build_menu() -> MenuBuildResult {
         Box::new(MenuItem::with_id(
             MenuId::new("open_web"),
             "打开控制台",
+            true,
+            None,
+        )),
+        Box::new(MenuItem::with_id(
+            MenuId::new("copy_web_link"),
+            "复制界面链接",
             true,
             None,
         )),
@@ -811,6 +855,76 @@ fn resolve_web_port(deps: &TrayDeps, axum_handle: &Arc<Mutex<Option<AxumServeHan
                 .map(|h| h.port)
         })
         .unwrap_or(deps.port)
+}
+
+/// 把文本写入系统剪贴板（async，供泵任务调用）
+///
+/// 不引入剪贴板依赖，按平台借用系统工具：Windows `clip`、macOS `pbcopy`、
+/// Linux 依次探测 `wl-copy`（Wayland）/ `xclip` / `xsel`。文本一律经 stdin
+/// 传入（不进命令行参数，避免进程列表泄露 auth fragment）。
+async fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        clipboard_via(&["clip"], text).await
+    }
+    #[cfg(target_os = "macos")]
+    {
+        clipboard_via(&["pbcopy"], text).await
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for command in [
+            ["wl-copy"],
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+        ] {
+            if which::which(command[0]).is_ok() {
+                return clipboard_via(&command, text).await;
+            }
+        }
+        Err("未找到可用的剪贴板工具（wl-copy / xclip / xsel），请手动复制".to_string())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        Err("当前平台不支持自动复制剪贴板".to_string())
+    }
+}
+
+/// 经指定系统工具写剪贴板（`command` 含程序名与参数，文本走 stdin）
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+async fn clipboard_via(command: &[&str], text: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut cmd = tokio::process::Command::new(command[0]);
+    cmd.args(&command[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // Windows GUI 子系统下避免闪烁控制台窗口（与其他子进程一致）
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("启动剪贴板工具 {} 失败: {e}", command[0]))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .await
+            .map_err(|e| format!("写入剪贴板失败: {e}"))?;
+        stdin.shutdown().await.ok();
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("等待剪贴板工具退出失败: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("剪贴板工具 {} 退出异常: {status}", command[0]))
+    }
 }
 
 /// 重写 `.instance` 信息文件（PID + 端口），与 [`crate::utils::lock::InstanceLock::record_port`]
@@ -994,6 +1108,10 @@ mod tests {
         assert!(matches!(
             menu_action_for("open_web", &stopped),
             Some(TrayAction::OpenWeb)
+        ));
+        assert!(matches!(
+            menu_action_for("copy_web_link", &stopped),
+            Some(TrayAction::CopyWebLink)
         ));
         assert!(matches!(
             menu_action_for("quit", &stopped),

@@ -83,6 +83,17 @@ pub struct CliArgs {
     #[arg(long, value_enum)]
     pub startup_action: Option<StartupAction>,
 
+    /// 管理密码覆盖值：非回环绑定（Docker/局域网）下经 POST /api/auth/exchange
+    /// 的 password 分支换取鉴权 token；非空时优先于 settings.json 的
+    /// management_password（env: CAMPUS_AUTH_MANAGEMENT_PASSWORD）
+    #[arg(long, env = "CAMPUS_AUTH_MANAGEMENT_PASSWORD")]
+    pub management_password: Option<String>,
+
+    /// 显式允许无管理凭据绑定非回环地址（自行承担暴露风险；
+    /// env: CAMPUS_AUTH_ALLOW_UNAUTH_BIND，取 true/1 等布尔值）
+    #[arg(long, env = "CAMPUS_AUTH_ALLOW_UNAUTH_BIND")]
+    pub allow_unauthenticated_bind: bool,
+
     /// 允许在系统临时目录中运行（临时目录拦截的排查放行，仅在确认已解压但仍被误判时使用）
     #[arg(long, hide = true)]
     pub allow_temp: bool,
@@ -129,6 +140,13 @@ struct AppConfig {
     log_retention_days: u32,
     /// 是否写日志文件（false 时 `init_logging` 跳过文件层）
     log_file_enabled: bool,
+    /// 管理密码（settings.json 的 app.management_password；覆盖值缺省时生效）。
+    /// 启动期即读取用于非回环绑定的凭据门禁（服务容器尚未初始化，无法走 ConfigService）
+    management_password: String,
+    /// 管理密码覆盖值（CLI `--management-password` / env，非空时优先于配置值）
+    management_password_override: Option<String>,
+    /// 显式豁免无凭据的非回环绑定（--allow-unauthenticated-bind）
+    allow_unauthenticated_bind: bool,
 }
 
 /// 启动过程中累积的中间状态
@@ -285,13 +303,17 @@ async fn run_after_logging(
                     && info.port > 0
                     && app_config.auto_open_browser
                 {
-                    let url = format!("http://127.0.0.1:{}", info.port);
+                    // 与首启路径同口径：URL 携带 bootstrap fragment（fragment 不进
+                    // 服务器日志；运行中实例的凭据文件与本次启动共享同一 base_path）
+                    let bootstrap = crate::web::auth::read_bootstrap_file(&app_config.base_path);
+                    let url = crate::web::auth::ui_url(info.port, bootstrap.as_deref());
                     if open::that(&url).is_ok() {
                         // 控制台层写 stderr（终端启动可见）；本路径提前返回后，
-                        // run 外层统一 drop log_guard 并 flush 该条日志
+                        // run 外层统一 drop log_guard 并 flush 该条日志。
+                        // 日志只记不含 fragment 的基础 URL，绝不记录 bootstrap 秘钥
                         info!(
                             pid = info.pid,
-                            url = %url,
+                            url = %format!("http://127.0.0.1:{}", info.port),
                             "已有实例运行中，已在浏览器打开其 Web 控制台"
                         );
                         return Ok(());
@@ -324,9 +346,19 @@ async fn run_after_logging(
     // 完整模式先真实占住监听端口，再初始化服务容器。这样端口权限等不可恢复
     // 错误不会启动 Engine / Scheduler / Bridge 后立刻整套关闭；可恢复的占用或
     // Windows 10013 已在 prepare_axum_listener 内切换到内核分配端口。
+    // 凭据门禁参数在此一并确定：容器尚未初始化，配置值取启动期轻量读结果
+    // （覆盖值来自 CLI/env），生效值计算与 exchange 运行期共用同一纯函数。
+    let bind_gate = app::BindCredentialGate {
+        effective_password: crate::web::auth::effective_management_password(
+            app_config.management_password_override.as_deref(),
+            &app_config.management_password,
+        )
+        .into_owned(),
+        allow_unauthenticated_bind: app_config.allow_unauthenticated_bind,
+    };
     let prepared_axum = if matches!(app_config.runtime_mode, RuntimeMode::Full) {
         Some(
-            app::prepare_axum_listener(app_config.port, app_config.host.as_deref())
+            app::prepare_axum_listener(app_config.port, app_config.host.as_deref(), &bind_gate)
                 .await
                 .context("Web 控制台端口准备失败")?,
         )
@@ -398,6 +430,8 @@ async fn run_after_logging(
             port: state.app_config.port,
             host: state.app_config.host.clone(),
             lightweight: matches!(state.app_config.runtime_mode, RuntimeMode::Lightweight),
+            management_password_override: state.app_config.management_password_override.clone(),
+            allow_unauthenticated_bind: state.app_config.allow_unauthenticated_bind,
             shutdown: state.shutdown_token.clone(),
         });
         state.tray_manager = Some(tray);
@@ -466,6 +500,9 @@ fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result<AppConfig>
         log_level: startup.log_level,
         log_retention_days: startup.log_retention_days,
         log_file_enabled: startup.log_file_enabled,
+        management_password: startup.management_password,
+        management_password_override: cli.management_password.clone(),
+        allow_unauthenticated_bind: cli.allow_unauthenticated_bind,
     })
 }
 
@@ -483,6 +520,8 @@ struct StartupSettings {
     log_level: tracing_subscriber::filter::LevelFilter,
     log_retention_days: u32,
     log_file_enabled: bool,
+    /// 管理密码（settings.json 的 app.management_password，供凭据门禁启动期读取）
+    management_password: String,
 }
 
 /// 读取 settings.json 中的启动字段：端口、托盘显示、运行模式、自动打开浏览器 + 日志配置
@@ -501,6 +540,7 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         log_level: LevelFilter::INFO,
         log_retention_days: 7,
         log_file_enabled: true,
+        management_password: String::new(),
     };
     let settings_path = crate::utils::paths::settings_path(base_path);
     let raw = match std::fs::read_to_string(&settings_path) {
@@ -552,6 +592,12 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         .unwrap_or(true);
     let (log_level, log_retention_days, log_file_enabled) =
         crate::logging::logging_config_from_value(&value);
+    // 管理密码：启动期轻量读，供非回环绑定的凭据门禁（容器初始化前无法走 ConfigService）
+    let management_password = app
+        .and_then(|a| a.get("management_password"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     StartupSettings {
         port,
         #[cfg(feature = "desktop")]
@@ -561,6 +607,7 @@ fn read_startup_settings(base_path: &Path) -> StartupSettings {
         log_level,
         log_retention_days,
         log_file_enabled,
+        management_password,
     }
 }
 
@@ -668,8 +715,13 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
         .prepared_axum
         .take()
         .ok_or_else(|| anyhow::anyhow!("完整模式缺少预绑定的 Axum 监听器"))?;
-    let handle = app::start_axum_with_listener(container, state.log_tx.clone(), prepared)
-        .context("Web 控制台启动失败")?;
+    let handle = app::start_axum_with_listener(
+        container,
+        state.log_tx.clone(),
+        prepared,
+        state.app_config.management_password_override.clone(),
+    )
+    .context("Web 控制台启动失败")?;
     let port = handle.port;
     if let Some(lock) = &state.instance_lock
         && let Err(e) = lock.record_port(port)
@@ -689,7 +741,7 @@ async fn launch_full(state: &mut LauncherState) -> Result<()> {
     // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
     // 此前配置项是死开关，UI「静默启动」切换无任何效果
     if state.app_config.auto_open_browser {
-        open_browser(port);
+        open_browser(&state.app_config.base_path, port);
     }
 
     // Engine 崩溃恢复
@@ -1097,13 +1149,18 @@ async fn graceful_shutdown(state: &mut LauncherState) {
 // 辅助函数
 // ============================================================
 
-/// 打开系统默认浏览器
-fn open_browser(port: u16) {
-    let url = format!("http://127.0.0.1:{port}");
+/// 打开系统默认浏览器（URL 携带 `#auth=<bootstrap>` fragment，见 `web::auth::ui_url`）
+///
+/// 日志只记录不含 fragment 的基础 URL，绝不记录 bootstrap 秘钥；凭据文件尚未
+/// 生成/读取失败时退化为不带 fragment 的普通 URL（此时 Axum 启动路径已生成凭据，
+/// 正常情况下不会走到退化分支）。
+fn open_browser(base_path: &Path, port: u16) {
+    let bootstrap = crate::web::auth::read_bootstrap_file(base_path);
+    let url = crate::web::auth::ui_url(port, bootstrap.as_deref());
     if let Err(e) = open::that(&url) {
-        warn!("打开浏览器失败 ({url}): {e}");
+        warn!("打开浏览器失败 (http://127.0.0.1:{port}): {e}");
     } else {
-        info!("已打开浏览器: {url}");
+        info!("已打开浏览器: http://127.0.0.1:{port}（已携带 auth fragment）");
     }
 }
 

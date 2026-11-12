@@ -359,9 +359,13 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
             get(routes::tools::task_recorder)
         }),
         // ---- 鉴权（auth）----
-        // token 发放端点：响应读取受 CORS 保护（仅 localhost Origin 可读），
-        // 跨域恶意网页无法获取 token，中间件对此路径豁免
-        ("GET", "/api/auth/token", || get(auth::token_handler)),
+        // bootstrap/管理密码换取端点：请求方必须已持有不经网络发放的凭据
+        // （界面 fragment 携带的 bootstrap，或非回环绑定下的管理密码），
+        // 不构成免鉴权绕过，中间件对此路径豁免；旧 GET /api/auth/token 已删除，
+        // 不存在任何免鉴权发放 token 的端点（见 web::auth 模块说明）
+        ("POST", "/api/auth/exchange", || {
+            post(auth::exchange_handler)
+        }),
     ]
 }
 

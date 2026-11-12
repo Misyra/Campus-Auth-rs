@@ -65,6 +65,11 @@ pub struct AppState {
     pub shutdown_tx: watch::Sender<()>,
     /// 本地 API 鉴权 token（见 `web::auth` 模块说明）
     pub auth_token: Arc<str>,
+    /// bootstrap 握手秘钥（与 token 成对生成/轮换；仅 `POST /api/auth/exchange` 比对）
+    pub auth_bootstrap: Arc<str>,
+    /// 管理密码覆盖值（CLI `--management-password` / env `CAMPUS_AUTH_MANAGEMENT_PASSWORD`，
+    /// 优先于 settings.json 的 `management_password`；None = 未提供）
+    pub management_password_override: Option<Arc<str>>,
     /// Host 头校验策略（见 `web::host` 模块说明；由监听绑定地址推导，
     /// 回环绑定强制校验以阻断 DNS rebinding，Docker/LAN 显式暴露时跳过）
     pub host_policy: super::host::HostPolicy,
@@ -74,12 +79,18 @@ pub struct AppState {
 
 impl AppState {
     /// 构造应用状态
+    // 参数含鉴权凭据三元组（token/bootstrap/管理密码覆盖）与横切注入，
+    // 收敛为结构体会让 app::build_router 装配路径更绕，按 tray 事件循环
+    // 同口径放行参数数
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         container: Arc<ServiceContainer>,
         log_tx: broadcast::Sender<LogEntry>,
         ws_tx: broadcast::Sender<String>,
         shutdown_tx: watch::Sender<()>,
         auth_token: Arc<str>,
+        auth_bootstrap: Arc<str>,
+        management_password_override: Option<Arc<str>>,
         host_policy: super::host::HostPolicy,
     ) -> Self {
         // 细粒度依赖从容器抽出（trait object 化），handler 不再触达 container
@@ -115,6 +126,8 @@ impl AppState {
             ws_tx,
             shutdown_tx,
             auth_token,
+            auth_bootstrap,
+            management_password_override,
             host_policy,
             operations: Arc::new(WebOperations::new()),
         }

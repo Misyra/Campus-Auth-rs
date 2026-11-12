@@ -365,6 +365,16 @@ pub struct AppSettings {
     /// 长期运行场景下浏览器/Worker 常驻内存会缓慢增长，按周期优雅自重启回收。
     /// 运行时修改无需重启即生效（重启计时任务每分钟读一次该值）。
     pub auto_restart_hours: u32,
+    /// 管理密码：非回环绑定（Docker / 局域网显式暴露）下经 `POST /api/auth/exchange`
+    /// 的 password 分支换取鉴权 token 的唯一凭据；回环绑定下该分支一律拒绝。
+    ///
+    /// 空串 = 未配置（此时非回环绑定会因 fail-closed 门禁拒绝启动，除非以
+    /// `--allow-unauthenticated-bind` 显式豁免）。CLI/env 覆盖值
+    /// （`--management-password` / `CAMPUS_AUTH_MANAGEMENT_PASSWORD`）优先于本字段；
+    /// exchange 每次请求实时读取本字段，UI 修改即时生效。
+    /// 注意：明文存储（与 proxy_url 同级安全档），经 GET/PATCH /api/config 透出，
+    /// 暴露面由 token 鉴权兜底；局域网 HTTP 明文传输下的凭据可见性风险见 docker/README.md。
+    pub management_password: String,
 }
 
 impl Default for AppSettings {
@@ -381,6 +391,9 @@ impl Default for AppSettings {
             // 默认启用 24h 周期自重启：长期运行内存缓慢增长的主要回收手段，
             // 新装即受保护；存量用户 settings.json 已显式存值，不受默认值影响
             auto_restart_hours: 24,
+            // 管理密码默认未配置：回环绑定（默认部署形态）无需它，非回环绑定
+            // 由启动期 fail-closed 门禁提示用户显式配置或豁免
+            management_password: String::new(),
         }
     }
 }

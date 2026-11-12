@@ -2113,10 +2113,10 @@
     }
    }
   },
-  "/api/auth/token": {
-   "get": {
-    "operationId": "get___api_auth_token",
-    "summary": "获取本地 API 鉴权 token（响应受 CORS 读保护，仅 localhost Origin 可读）",
+  "/api/auth/exchange": {
+   "post": {
+    "operationId": "post___api_auth_exchange",
+    "summary": "以 bootstrap 握手秘钥（界面 URL fragment 携带）或管理密码（仅非回环绑定接受）换取鉴权 token；请求体恰含其一，成功 200 返回 data.token，失败 401（管理密码未配置时 error.code=AUTH_NOT_CONFIGURED）",
     "responses": {
      "200": {
       "description": "OK",
@@ -2124,6 +2124,30 @@
        "application/json": {
         "schema": {}
        }
+      }
+     },
+     "400": {
+      "description": "Bad Request",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "401": {
+      "description": "Unauthorized",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {}
       }
      }
     }

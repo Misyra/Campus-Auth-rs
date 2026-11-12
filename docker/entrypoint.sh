@@ -28,6 +28,13 @@ chmod 755 "${DATA_DIR}" 2>/dev/null || true
 # 由 launcher 的 clap env 已处理，此处仅打印提示
 echo "[entrypoint] 数据目录: ${DATA_DIR}"
 echo "[entrypoint] 监听: ${CAMPUS_AUTH_HOST:-0.0.0.0}:${CAMPUS_AUTH_PORT:-50721}"
+# 管理凭据状态提示（仅提示是否设置，绝不回显值）：非回环绑定（0.0.0.0）时
+# 未配置管理凭据会 fail-closed 拒绝启动，此处提前给出三条出路便于排障
+if [ -n "${CAMPUS_AUTH_MANAGEMENT_PASSWORD:-}" ]; then
+    echo "[entrypoint] 管理凭据: 已设置（CAMPUS_AUTH_MANAGEMENT_PASSWORD）"
+else
+    echo "[entrypoint] 管理凭据: 未设置（绑定非回环地址时将拒绝启动；请设置 management_password 或 CAMPUS_AUTH_MANAGEMENT_PASSWORD，或显式 CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true 豁免）"
+fi
 echo "[entrypoint] 启动命令: $*"
 
 exec "$@"
