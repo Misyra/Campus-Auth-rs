@@ -314,6 +314,14 @@ fn build_settings_merge(
     // 此处不再 unwrap（此前写法正确但制造 panic 观感）
     let global_empty = global_patch.is_empty();
     let other_empty = other_patch.is_empty();
+    // monitor 的 url_expected_responses 必须整体替换而非深合并：url_check_urls 是
+    // 前端回传的**完整** URL 检测清单（url_targets 数组同批整体替换），而 json_merge
+    // 对空对象是 no-op、对新对象是按键合并——清空列表清不掉旧映射、换列表会残留
+    // 被移除 URL 的旧期望条目。合并前取出补丁值，合并后整体覆盖。
+    let monitor_expected = global_patch
+        .get("monitor")
+        .and_then(|m| m.get("url_expected_responses"))
+        .cloned();
     let global_patch = Value::Object(global_patch);
     let other_patch = Value::Object(other_patch);
     Some(Box::new(move |settings| {
@@ -326,6 +334,15 @@ fn build_settings_merge(
         // 合并其他字段（如 active_profile_id 等）
         if !other_empty {
             json_merge(&mut current_value, &other_patch);
+        }
+        // monitor 期望响应映射整体替换（深合并无法表达「清空/移除条目」）
+        if let Some(expected) = monitor_expected
+            && let Some(monitor) = current_value
+                .get_mut("global")
+                .and_then(|g| g.get_mut("monitor"))
+                .and_then(Value::as_object_mut)
+        {
+            monitor.insert("url_expected_responses".to_string(), expected);
         }
         serde_json::from_value::<crate::config::SettingsData>(current_value)
             .map_err(|e| format!("设置合并后校验失败: {e}"))
