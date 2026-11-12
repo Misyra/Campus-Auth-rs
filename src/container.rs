@@ -185,13 +185,15 @@ impl ServiceContainer {
         ));
 
         // ---- Layer 8：定时任务调度器 ----
-        // new() 经 Arc::new_cyclic 直接返回 Arc<Self>（自引用弱句柄，M1）
+        // new() 经 Arc::new_cyclic 直接返回 Arc<Self>（自引用弱句柄，M1）；
+        // 任务执行终态由 executor 统一入口发布，调度域仅在目标任务加载失败时补发
         let scheduler = SchedulerService::new(
             config.clone(),
             tasks.clone(),
             executor.clone(),
             status.clone(),
             reload_rx,
+            events.clone(),
         )
         .context("初始化 SchedulerService 失败")?;
 

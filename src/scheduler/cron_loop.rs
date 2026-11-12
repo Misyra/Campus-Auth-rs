@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration as TokioDuration, Instant as TokioInstant, sleep};
 
 use crate::config::runtime::ConfigReloadSignal;
+use crate::events::{AppEvent, TaskSummary};
 use crate::scheduler::task::{
     CRON_PARSE_PREFIX, CRON_PARSE_SUFFIX, DEFAULT_SCHEDULED_TIMEOUT, STARTUP_RETRY_INTERVAL_SECS,
     ScheduledTask, TaskTrigger,
@@ -475,6 +476,17 @@ async fn execute_attempt(
         Err(e) => {
             let msg = format!("加载目标任务失败: {target_id} ({e})");
             tracing::warn!(task_id = %task_id, target_id = %target_id, error = %e, "加载目标任务失败");
+            // 调度域独立终态：执行链未进入 executor（统一入口不会发布任务事件），
+            // 此处补发 TaskFailed——task_id 取目标任务 id（与 executor 发布口径一致），
+            // 类型未知为 None；跳过/禁用/额度用尽等放弃路径不是失败，不发布
+            service.events.publish(AppEvent::TaskFailed(TaskSummary {
+                task_id: target_id.clone(),
+                task_kind: None,
+                reason: Some(crate::tasks::executor::brief_reason(
+                    &msg,
+                    crate::tasks::executor::TASK_EVENT_REASON_MAX_CHARS,
+                )),
+            }));
             (false, msg)
         }
     };

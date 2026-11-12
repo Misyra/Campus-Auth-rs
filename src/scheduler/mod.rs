@@ -3,9 +3,14 @@
 //! 负责 `SchedulerService` 的构造、定时任务的 CRUD 与持久化、配置热重载
 //! 通知，以及调度主循环（`cron_loop`）的生命周期管理（启动/停止）。
 //!
-//! 构造函数 `new` 注入 `ConfigService` / `TaskManager` / `LoginOrchestrator` /
-//! `TaskExecutor` / `StatusManager`，并通过 `ConfigReloadSignal` 流感知配置变更；
+//! 构造函数 `new` 注入 `ConfigService` / `TaskManager` / `TaskExecutor` /
+//! `StatusManager` / `EventBus`，并通过 `ConfigReloadSignal` 流感知配置变更；
 //! `start` 启动后台调度 task 并返回可停止的 `ServiceHandle`。
+//!
+//! 事件发布：调度触发的任务执行经 `TaskExecutor` 统一入口发布终态事件（成功/
+//! 失败收敛点在 executor 侧，单点覆盖 cron / 手动 / 启动触发）；仅「目标任务
+//! 加载失败」这一调度域独立终态（执行链未进入 executor）在 `cron_loop` 补发
+//! `TaskFailed`。跳过/禁用/额度用尽等放弃路径不是失败终态，不发布事件。
 
 pub mod cron_loop;
 pub mod task;
@@ -19,6 +24,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::config::ConfigService;
 use crate::config::runtime::ConfigReloadSignal;
+use crate::events::EventBus;
 use crate::status::StatusManager;
 use crate::tasks::TaskManager;
 use crate::web::error::ApiError;
@@ -90,6 +96,8 @@ pub struct SchedulerService {
     executor: Arc<crate::tasks::TaskExecutor>,
     /// 状态广播。
     status_manager: Arc<StatusManager>,
+    /// 事件总线（调度域独立终态补发 TaskFailed；任务执行终态由 executor 统一入口发布）
+    events: Arc<EventBus>,
     /// 外部发送变更通知的 sender。
     task_change_tx: mpsc::Sender<TaskChange>,
     /// 主循环持有的变更接收端（start 时取出）。
@@ -131,6 +139,7 @@ impl SchedulerService {
         executor: Arc<crate::tasks::TaskExecutor>,
         status: Arc<StatusManager>,
         reload_rx: mpsc::Receiver<ConfigReloadSignal>,
+        events: Arc<EventBus>,
     ) -> Result<Arc<Self>, SchedulerError> {
         let base_path = config.base_path();
         // 路径经 `utils::paths` 统一；启动已预建，此处保留幂等创建（测试直构兼容）。
@@ -148,6 +157,7 @@ impl SchedulerService {
             task_manager: tasks,
             executor,
             status_manager: status,
+            events,
             task_change_tx,
             task_change_rx: tokio::sync::Mutex::new(Some(task_change_rx)),
             reload_rx: tokio::sync::Mutex::new(Some(reload_rx)),
@@ -742,6 +752,7 @@ fn systemtime_to_iso(t: std::time::SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::AppEvent;
 
     /// 按绑定任务类型钳制 timeout 覆写：浏览器 [1,600] 秒、脚本 [1,3600] 秒，
     /// 与执行侧钳制常量一致；钳制值回写，None 不处理
@@ -795,6 +806,14 @@ mod tests {
     /// 各依赖均为廉价的内存级构造，装配方式参考 `engine::run_loop` 测试。
     /// 返回 TempDir 一并交给调用方持有，避免目录被提前清理。
     async fn make_test_service() -> (Arc<SchedulerService>, tempfile::TempDir) {
+        let (service, _events, tmp) = make_test_service_with_events().await;
+        (service, tmp)
+    }
+
+    /// [`make_test_service`] 的事件变体：额外返回注入服务的事件总线，
+    /// 供终态事件发布的断言测试订阅。
+    async fn make_test_service_with_events()
+    -> (Arc<SchedulerService>, Arc<EventBus>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(8);
         let config = crate::config::ConfigService::new(tmp.path().to_path_buf(), reload_tx)
@@ -817,8 +836,11 @@ mod tests {
             environment,
             config.clone(),
         );
-        let service = SchedulerService::new(config, tasks, executor, status, reload_rx).unwrap();
-        (service, tmp)
+        let events = Arc::new(EventBus::new());
+        let service =
+            SchedulerService::new(config, tasks, executor, status, reload_rx, events.clone())
+                .unwrap();
+        (service, events, tmp)
     }
 
     /// A2 回归：`get_task` 与同文件其余方法同口径——锁中毒时恢复读取内存缓存，
@@ -905,6 +927,42 @@ mod tests {
         );
         let on_disk = ScheduledTask::load_from(&task_path).unwrap();
         assert!(on_disk.last_run.is_some(), "执行后 last_run 应已写入磁盘");
+    }
+
+    /// 调度域独立终态事件：目标任务加载失败（执行链未进入 executor，统一入口
+    /// 不会发布）时补发 TaskFailed——task_id 取目标任务 id，task_kind 未知为 None，
+    /// 原因短语说明加载失败
+    #[tokio::test]
+    async fn test_execute_scheduled_task_publishes_task_failed_on_missing_target() {
+        let (service, events, _tmp) = make_test_service_with_events().await;
+        let mut rx = events.subscribe();
+        let task = ScheduledTask::new(
+            "t1".to_string(),
+            "0 8 * * *".to_string(),
+            "missing_target".to_string(),
+        );
+        let task_path = service.scheduled_dir.join("t1.json");
+        ScheduledTask::save_to(&task_path, &task).unwrap();
+        // 从磁盘加载进内存缓存（与调度循环 reload 同口径）
+        cron_loop::load_and_parse_all(&service);
+        assert!(service.get_task("t1").is_some(), "前置：任务应在内存缓存中");
+
+        cron_loop::execute_scheduled_task(task, service.clone(), RunSource::Cron).await;
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.event.kind(), "task_failed");
+        match &envelope.event {
+            AppEvent::TaskFailed(s) => {
+                assert_eq!(s.task_id, "missing_target");
+                assert!(s.task_kind.is_none(), "目标任务加载失败时类型未知");
+                let reason = s.reason.as_deref().unwrap_or_default();
+                assert!(
+                    reason.contains("加载目标任务失败"),
+                    "原因短语应说明加载失败: {reason}"
+                );
+            }
+            other => panic!("应为 TaskFailed，实际 {other:?}"),
+        }
     }
 
     // ============ A14：toggle_task 与 delete_task/外部删除的竞态 ============
