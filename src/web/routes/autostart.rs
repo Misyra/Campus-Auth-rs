@@ -23,7 +23,7 @@ pub async fn get_autostart(
         let base = config.base_path();
         tokio::task::spawn_blocking(move || crate::utils::platform::self_start_status(&base))
             .await
-            .map_err(ApiError::internal)?
+            .map_err(|e| ApiError::Internal(format!("查询自启动状态后台任务异常: {e}")))?
             .map_err(|error| ApiError::internal(format!("{error:#}")))?
     };
     #[cfg(any(windows, target_os = "macos"))]
@@ -37,8 +37,8 @@ pub async fn get_autostart(
     #[cfg(all(target_os = "linux", feature = "openwrt"))]
     let enabled = tokio::task::spawn_blocking(crate::utils::platform::openwrt_self_start_enabled)
         .await
-        .map_err(ApiError::internal)?
-        .map_err(ApiError::internal)?;
+        .map_err(|e| ApiError::Internal(format!("查询自启动状态后台任务异常: {e}")))?
+        .map_err(|error| ApiError::internal(format!("{error:#}")))?;
     let runtime_mode = serde_json::to_value(&settings.global.app.startup_action)
         .ok()
         .and_then(|v| v.as_str().map(String::from))

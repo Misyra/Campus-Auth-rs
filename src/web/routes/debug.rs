@@ -318,10 +318,13 @@ pub async fn feedback_bundle(
             .unix_permissions(0o644);
 
         // 局部闭包：统一「start_file + write_all」一组写入的错误映射
-        // （ZipError / io::Error → ApiError::Internal），消除逐组重复的 map_err 样板
+        // （ZipError / io::Error → ApiError::Internal，统一中文动作标签；
+        // 原始错误文本保留在末尾供排障），消除逐组重复的 map_err 样板
         let mut add = |name: &str, data: &[u8]| -> Result<(), ApiError> {
-            zw.start_file(name, opts).map_err(ApiError::internal)?;
-            zw.write_all(data).map_err(ApiError::internal)
+            zw.start_file(name, opts)
+                .map_err(|e| ApiError::Internal(format!("写入诊断包失败: {e}")))?;
+            zw.write_all(data)
+                .map_err(|e| ApiError::Internal(format!("写入诊断包失败: {e}")))
         };
 
         // logs
@@ -363,7 +366,8 @@ pub async fn feedback_bundle(
             add("debug/README.txt", note.as_bytes())?;
         }
 
-        zw.finish().map_err(ApiError::internal)?;
+        zw.finish()
+            .map_err(|e| ApiError::Internal(format!("写入诊断包失败: {e}")))?;
     }
     let bytes = buf.into_inner();
     let filename = format!("campus-auth-feedback-{stamp}.zip");

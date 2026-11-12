@@ -638,9 +638,9 @@ pub async fn export_logs(
             .unix_permissions(0o644);
         let mut write_entry = |name: &str, bytes: &[u8]| -> Result<(), ApiError> {
             zw.start_file(name, opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+                .map_err(|e| ApiError::Internal(format!("写入日志包失败: {e}")))?;
             zw.write_all(bytes)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+                .map_err(|e| ApiError::Internal(format!("写入日志包失败: {e}")))?;
             Ok(())
         };
         write_entry("README.txt", readme.as_bytes())?;
@@ -648,7 +648,8 @@ pub async fn export_logs(
         for (rel, bytes) in &files {
             write_entry(rel, bytes)?;
         }
-        zw.finish().map_err(|e| ApiError::Internal(e.to_string()))?;
+        zw.finish()
+            .map_err(|e| ApiError::Internal(format!("写入日志包失败: {e}")))?;
     }
     let bytes = buf.into_inner();
     let filename = format!("campus-auth-logs-{stamp}.zip");

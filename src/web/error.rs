@@ -321,7 +321,13 @@ impl From<crate::environment::EnvironmentError> for ApiError {
 
 impl From<std::io::Error> for ApiError {
     fn from(e: std::io::Error) -> Self {
-        ApiError::Internal(e.to_string())
+        // routes 层裸 `?` 传播的 IO 错误统一按「失败类别（原始错误）」人话化
+        // （对齐 utils::io_human 范式）；`ErrorKind` 类别让用户能读懂「是文件
+        // 缺失还是没权限」，原始 `std::io` 文本保留在末尾供日志比对
+        ApiError::Internal(format!(
+            "{}（{e}）",
+            crate::utils::io_human::io_kind_label(e.kind())
+        ))
     }
 }
 
@@ -329,7 +335,7 @@ impl From<serde_json::Error> for ApiError {
     fn from(e: serde_json::Error) -> Self {
         // serde_json::Error 在 `?` 路径中多用于内部序列化/反序列化（不含请求体解析，
         // 后者由各 route 显式映射为 BadRequest）。内部序列化失败应映射 500，而非 400。
-        ApiError::Internal(e.to_string())
+        ApiError::Internal(format!("内部 JSON 处理失败: {e}"))
     }
 }
 

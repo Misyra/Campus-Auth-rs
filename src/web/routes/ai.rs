@@ -658,6 +658,10 @@ pub async fn capture_bundle(
         let opts = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o644);
+        // zip 写入失败 → 统一中文动作标签（原始 zip/IO 错误文本保留在末尾供排障）
+        fn zip_err<E: std::fmt::Display>(e: E) -> ApiError {
+            ApiError::Internal(format!("写入导出压缩包失败: {e}"))
+        }
 
         // 按预算判定可收入的文件：读前先查大小，超限跳过并记录说明
         async fn read_within_budget(
@@ -689,8 +693,8 @@ pub async fn capture_bundle(
             }
             match read_within_budget(&path, &mut total, MAX_CAPTURE_BYTES).await {
                 Some(bytes) => {
-                    zw.start_file(name, opts).map_err(ApiError::internal)?;
-                    zw.write_all(&bytes).map_err(ApiError::internal)?;
+                    zw.start_file(name, opts).map_err(zip_err)?;
+                    zw.write_all(&bytes).map_err(zip_err)?;
                 }
                 None => skipped.push(name.to_string()),
             }
@@ -704,8 +708,8 @@ pub async fn capture_bundle(
                 match read_within_budget(&entry.path(), &mut total, MAX_CAPTURE_BYTES).await {
                     Some(bytes) => {
                         zw.start_file(format!("resources/{name}"), opts)
-                            .map_err(ApiError::internal)?;
-                        zw.write_all(&bytes).map_err(ApiError::internal)?;
+                            .map_err(zip_err)?;
+                        zw.write_all(&bytes).map_err(zip_err)?;
                     }
                     None => skipped.push(format!("resources/{name}")),
                 }
@@ -714,7 +718,7 @@ pub async fn capture_bundle(
         // 跳过说明随 zip 附带，导出者能感知产物不完整而非默默缺失
         if !skipped.is_empty() {
             zw.start_file("_skipped_by_quota.txt", opts)
-                .map_err(ApiError::internal)?;
+                .map_err(zip_err)?;
             zw.write_all(
                 format!(
                     "以下文件因捕获包总量超过 {} MiB 上限被跳过：\n{}",
@@ -723,9 +727,9 @@ pub async fn capture_bundle(
                 )
                 .as_bytes(),
             )
-            .map_err(ApiError::internal)?;
+            .map_err(zip_err)?;
         }
-        zw.finish().map_err(ApiError::internal)?;
+        zw.finish().map_err(zip_err)?;
     }
     let bytes = buf.into_inner();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
