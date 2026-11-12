@@ -1,0 +1,97 @@
+name: Audit
+
+# 月度依赖安全审计：cargo audit 扫 Rust 依赖（Cargo.lock + RustSec advisory DB），
+# npm audit 扫前端依赖。每月 1 日定时跑一次（低峰 03:00 UTC，同 fuzz.yml 时段），
+# 支持手动 dispatch 随查随跑；月度节奏兼顾新披露漏洞的发现与主干安静。
+# 失败处理：
+# - cargo audit：锁文件内任一已知漏洞即失败，如实报告——不建 .cargo/audit.toml ignore
+#   豁免文件（豁免条目过期不清理会掩盖真实风险），确需豁免时再补建并在此注明口径；
+#   fuzz/ 独立 lockfile 不纳入：依赖为纯 dev 性质的 fuzz 工具链且不进发布产物，
+#   与 npm dev 依赖「仅报告不拦截」同口径。
+# - npm audit 分两级：--omit=dev 只审运行时依赖（打进产物、影响用户），漏洞即失败；
+#   全量口径（含 devDependencies）只进日志与 JSON 报告，不拦截。
+# 两端失败均上传 JSON 报告 artifact 供排查；修复依赖版本后重跑转绿。
+
+on:
+  schedule:
+    # 每月 1 日 03:00 UTC（北京时间 11:00）
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+
+# 只拉代码跑审计，无发布/推包需求，GITHUB_TOKEN 收敛为只读
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-audit:
+    name: cargo audit（Rust 依赖漏洞）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # cargo-audit 是独立二进制（直接解析 Cargo.lock 并查询 RustSec advisory DB），
+      # 不需要 Rust 工具链；工具版本随 install-action 取最新（审计工具应跟最新漏洞库）
+      - name: 安装 cargo-audit
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-audit
+
+      # JSON 全量报告落盘（无论成败，供失败时上传）；退出码在此吞掉，
+      # 「漏洞即失败」由下一步的人类可读输出承担
+      - name: cargo audit（JSON 报告落盘）
+        run: cargo audit --json > cargo-audit-report.json || true
+
+      - name: cargo audit（漏洞即失败）
+        run: cargo audit
+
+      - name: 上传审计报告
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cargo-audit-report
+          path: cargo-audit-report.json
+          if-no-files-found: ignore
+
+  npm-audit:
+    name: npm audit（前端依赖漏洞）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # npm audit 只读 package-lock.json 查 registry advisory DB，无需安装依赖（不跑 npm ci），
+      # 也不需要 npm 缓存
+      - name: 安装 Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      # 全量口径（含 devDependencies）：可读输出进日志供知悉，退出码吞掉——
+      # dev 漏洞不影响构建产物，仅报告不拦截
+      - name: npm audit（全量报告，dev 仅提示）
+        run: npm audit || true
+
+      # JSON 全量报告落盘供失败时上传；退出码同样吞掉
+      - name: npm audit（JSON 报告落盘）
+        run: npm audit --json > npm-audit-report.json || true
+
+      # 严格口径只管运行时依赖：--omit=dev 排除 devDependencies，漏洞即失败；
+      # dev 漏洞已在上方日志与 JSON 报告中可见，不再拦截
+      - name: npm audit（runtime 依赖漏洞即失败）
+        run: npm audit --omit=dev
+
+      - name: 上传审计报告
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-audit-report
+          path: frontend/npm-audit-report.json
+          if-no-files-found: ignore
