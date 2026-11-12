@@ -350,56 +350,56 @@ def _patch_imports(monkeypatch, *, ddddocr_ok, numpy_ok):
 def test_preload_ocr_deps_full_load_when_ddddocr_present(monkeypatch):
     import builtins
 
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
     # force=True 直达完整加载路径（force=False 启动期先走能力探测门控，见下方门控测试）
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
     # 完整加载路径：仅 import ddddocr 一次即返回，不再额外 import numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 0
     # 任务 10：完整加载 → 能力上报 ocr=True
-    assert worker_main.OCR_CAPABILITIES == {"ocr": True}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": True}
     assert builtins.__import__ is not None
 
 
 def test_preload_ocr_deps_falls_back_to_numpy(monkeypatch):
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=True)
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
     # ddddocr 缺失（未安装/不完整）时退化为仅预加载 numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
     # numpy-only 不具备 OCR 识别能力（任务 10）
-    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_silent_when_missing(monkeypatch):
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=False)
     # 两者都缺失时静默跳过，不抛异常（Worker 仍能正常启动）
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
-    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_gate_probes_only_without_force(monkeypatch):
     import importlib.util
 
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
     # 模拟 ddddocr 未安装（与真实 venv 是否装有无关）：探测层 find_spec 短路，
     # 不触发任何被拦截的 import，能力保持 False 且不产生 import WARN
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    worker_main._preload_ocr_deps()
+    ocr_runtime._preload_ocr_deps()
     assert calls == {"ddddocr": 0, "numpy": 0}
-    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
     import builtins
 
-    import worker_main
+    import ocr_runtime
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
@@ -409,7 +409,66 @@ def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
 
     monkeypatch.setattr("builtins.__import__", fake_import)
     # 损坏的 OCR DLL 不得阻止 Worker 启动，否则普通手动登录也会一起失效。
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
+
+
+# ── P2-1 影子模块修复回归 ──
+
+def test_preload_ocr_deps_single_source_no_shadow_import():
+    """playwright_worker 不得再 import worker_main（P2-1 影子模块根因钉死）。
+
+    `python worker_main.py` 启动时脚本跑在 __main__ 名下，playwright_worker 一旦
+    导入 worker_main 就会把其模块体重新执行一遍，产生第二份 OCR_CAPABILITIES
+    ——force 预热翻转写进影子字典，health check 永远上报启动探测结果。
+    修复后预加载函数下沉 ocr_runtime，两端共享同一模块。按 AST 检查真实
+    import 语句（而非源码文本），注释里提到该缺陷不会误报。
+    """
+    import ast
+    import inspect
+
+    import playwright_worker
+
+    tree = ast.parse(inspect.getsource(playwright_worker))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            offenders = [alias.name for alias in node.names if alias.name == "worker_main"]
+            assert not offenders, f"playwright_worker 出现影子导入: {offenders}"
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module != "worker_main", "playwright_worker 出现影子导入"
+
+
+def test_worker_health_check_reads_live_capability_after_force_flip(monkeypatch):
+    """force 预热翻转能力后，worker_health_check 必须立即读到新值。
+
+    影子模块缺陷的运行时症状：_run_task 入口 force=True 翻转的是影子字典，
+    health check 永远回启动探测结果。修复后 worker_core.capabilities 与
+    ocr_runtime.OCR_CAPABILITIES 是同一对象（worker_main._serve 注入同一字典），
+    翻转即上报。此前该场景无法经任何进程内测试表达——影子只存在于脚本启动形态。
+    """
+    import asyncio
+
+    import ocr_runtime
+    from playwright_worker import worker_core
+
+    # 对齐 worker_main._serve 的注入：核心与 ocr_runtime 共享同一字典对象
+    worker_core.capabilities = ocr_runtime.OCR_CAPABILITIES
+    try:
+        # 启动探测失败（依赖不可用）→ 能力 False
+        _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=False)
+        ocr_runtime._preload_ocr_deps(force=True)
+        assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
+
+        # 有码任务入口 force 预热成功（探测失败但依赖实际可用的边缘态）→
+        # 翻转为 True；health check 无需重启 Worker 即读到新值
+        _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
+        ocr_runtime._preload_ocr_deps(force=True)
+        assert ocr_runtime.OCR_CAPABILITIES == {"ocr": True}
+        result = asyncio.run(worker_core.handle_worker_health_check({}))
+        assert result["healthy"] is True
+        assert result["capabilities"] == {"ocr": True}
+    finally:
+        # 能力字典是模块级共享状态，复位避免污染后续用例的真实探测结果
+        ocr_runtime.OCR_CAPABILITIES["ocr"] = False
 
 
 # ── IPC 响应/事件序列化 ──

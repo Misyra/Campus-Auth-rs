@@ -47,7 +47,12 @@ from step_handlers import (
     _suppress_task,
     run_step_async,
 )
-from ocr_runtime import OCR_TIMEOUT_SECS, _get_ocr, _preprocess_ocr_image
+from ocr_runtime import (
+    OCR_TIMEOUT_SECS,
+    _get_ocr,
+    _preload_ocr_deps,
+    _preprocess_ocr_image,
+)
 from debug_session import DebugSession, _build_steps_info
 from config_session import (
     ProfileSessionState,
@@ -1983,11 +1988,12 @@ class WorkerCore:
         context: StepContext | None = None
         try:
             # 有码任务在拉起浏览器前同步预热一次：主线程加载 ddddocr/numpy C 扩展
-            # 入缓存，后续后台线程的分类识别只命中缓存，避免 Windows loader lock 卡 100s
+            # 入缓存，后续后台线程的分类识别只命中缓存，避免 Windows loader lock 卡
+            # 100s。_preload_ocr_deps 从 ocr_runtime 顶层导入（P2-1 影子模块修复）：
+            # 不得 `from worker_main import`——脚本形态启动时会重执行 worker_main
+            # 模块体，force 翻转写进第二份能力字典，health check 读不到。
             if any(s.step_type == "ocr" for s in (task_config.steps or [])):
                 try:
-                    from worker_main import _preload_ocr_deps  # noqa: WPS433
-
                     _preload_ocr_deps(force=True)
                 except Exception:  # noqa: BLE001 — 预热 best-effort，失败不影响任务
                     pass
