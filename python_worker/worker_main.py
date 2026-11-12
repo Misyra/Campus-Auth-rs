@@ -60,11 +60,13 @@ _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 #: - test_redirect / page_capture：使用自建临时浏览器/页面，关 self._page
 #:   打不断它们，反而会误伤 keep_alive 常驻会话（page_capture 已改为独立
 #:   非持久化临时浏览器，取消经 cancel_id 在阶段边界生效）；
-#: - profile_session_start / profile_session_stop：使用独立持久上下文（独立
-#:   Playwright 连接，不复用也不触碰 self._page），强制关页既打不着它们也会
-#:   误伤 keep_alive 常驻会话；且会话存续期（start 返回后到 stop 之间）不处于
-#:   任何命令执行窗口内，命令级超时天然不适用——对齐 debug session 的豁免口径
-#:   （会话生命周期独立于单条命令预算，长会话命令只覆盖 start/stop 本身）；
+#: - profile_session_start / profile_session_stop / profile_auto_login：使用
+#:   独立持久上下文（独立 Playwright 连接，不复用也不触碰 self._page），强制
+#:   关页既打不着它们也会误伤 keep_alive 常驻会话；profile_session_* 的会话
+#:   存续期（start 返回后到 stop 之间）不处于任何命令执行窗口内，命令级超时
+#:   天然不适用；profile_auto_login 虽是单条命令全程受超时约束，但同样运行在
+#:   独立上下文上，超时自愈靠任务取消 + 退出兜底收尾即可——对齐 debug session
+#:   的豁免口径（独立上下文的命令不进强制关页白名单）；
 #: - close_browser：自带内部超时收敛，无需再关页。
 #: 白名单遗漏新命令时默认「不关页」，方向安全（宁可少自愈，不可误伤）。
 _INTERRUPTIBLE_METHODS = frozenset({

@@ -137,13 +137,14 @@ def _make_udd(tmp_path: Path) -> Path:
 
 
 def test_commands_registry_pins_profile_session_contract():
-    """COMMANDS 注册表钉住：与 README 命令表逐项对应（17 项）。"""
+    """COMMANDS 注册表钉住：与 README 命令表逐项对应（18 项）。"""
     expected = {
         "worker_health_check", "browser_health_check", "test_redirect",
         "execute_login_attempt", "execute_browser_task", "close_browser",
         "debug_start", "debug_step", "debug_run_all", "debug_stop", "debug_status",
         "feedback_capture", "page_capture",
         "profile_session_start", "profile_session_stop",
+        "profile_auto_login",
         "ocr_recognize", "shutdown",
     }
     assert set(COMMANDS) == expected

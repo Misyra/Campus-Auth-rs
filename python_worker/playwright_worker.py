@@ -3,7 +3,8 @@
 本模块是 Python 侧浏览器自动化执行平面。Rust 主进程通过 NDJSON IPC
 调用此处注册的处理器（见 ``COMMANDS``），每个处理器对应一种命令：
 browser_health_check / test_redirect / execute_login_attempt / execute_browser_task /
-debug_start / debug_step / debug_stop / ocr_recognize / shutdown。
+debug_start / debug_step / debug_stop / ocr_recognize / profile_session_* /
+profile_auto_login / shutdown。
 
 Worker 仅作为"浏览器动作执行器"，单次动作返回 StructuredResult；
 重试、状态机、取消调度由 Rust 侧负责。取消通过 ``cancel_id`` 映射到
@@ -53,6 +54,13 @@ from config_session import (
     RECORDER_BINDING_NAME,
     RecorderSink,
     build_recorder_init_script,
+)
+from auto_login import (
+    AUTO_LOGIN_BACKFILL_SETTLE_MS,
+    AUTO_LOGIN_LOAD_STATE_TIMEOUT_MS,
+    auto_login_success_message,
+    build_replay_steps,
+    validate_auto_login_actions,
 )
 from variable_resolver import resolve
 
@@ -2817,14 +2825,14 @@ class WorkerCore:
             logger.warning("close_browser 超时（%.1fs），跳过等待继续", internal_timeout)
         return {}
 
-    # ── 持久配置会话（profile_session_*）──
+    # ── 持久配置会话（profile_session_*）与持久自动登录（profile_auto_login）──
     #
     # 「记住密码」模式：门户登录页自带「记住密码」（凭据存 cookies/localStorage），
     # 持久化 user_data_dir 即可跨进程保留；下次打开门户页时门户自己的 JS 会把账号
     # 密码默认填入（纯页面行为，无头可用）。因此自动化只需录制登录点击：本节命令
     # 开一次 headed 持久会话供用户手动登录（勾选门户记住密码），录下点击/选择序列；
-    # 之后的自动登录 = 无头持久上下文打开门户页（门户 JS 自动回填）+ 回放点击 +
-    # 网络验证兜底（Rust 侧编排）。
+    # 之后的自动登录（profile_auto_login）= 无头持久上下文打开门户页（门户 JS
+    # 自动回填）+ 回放录制动作 + 网络验证兜底（Rust 侧编排）。
 
     async def _start_profile_playwright(self) -> Any:
         """为配置会话启动独占的 Playwright 连接。
@@ -3052,6 +3060,217 @@ class WorkerCore:
             truncated,
         )
         return {"recorded_actions": actions, "truncated": truncated}
+
+    async def _settle_auto_login_page(self, page: Any, context: Any) -> None:
+        """门户页沉降：load 态等待（有界 best-effort）+ 固定沉降窗口。
+
+        「记住密码」的账号密码回填是门户自己的 JS 干的（通常挂在 load /
+        onload 后的异步请求上），``goto``（domcontentloaded）返回不代表回填
+        已发生。这里等 ``load``（有界，慢资源门户到不了 load 就放弃等待）
+        再加固定沉降窗口（常量见 ``auto_login`` 模块，窗口可测）；沉降等待
+        经 ``_sleep_cancellable`` 保持取消可响应。沉降**不作为任何成败判定**
+        ——登录是否真的成功由 Rust 侧登录后网络验证兜底。
+        """
+        try:
+            await asyncio.wait_for(
+                page.wait_for_load_state("load"),
+                timeout=AUTO_LOGIN_LOAD_STATE_TIMEOUT_MS / 1000,
+            )
+        except Exception as exc:  # noqa: BLE001 — load 缺席（慢资源/已导航走）不阻断流程
+            logger.debug("门户页 load 态等待未达成（忽略，继续沉降）: %s", exc)
+        await _sleep_cancellable(AUTO_LOGIN_BACKFILL_SETTLE_MS / 1000, context)
+
+    async def handle_profile_auto_login(self, params: dict) -> dict:
+        """持久自动登录：无头持久上下文打开门户页 + 回放录制动作 + 结构化结果。
+
+        params：``user_data_dir``（必需）、``portal_url``（必需，仅 http/https）、
+        ``recorded_actions``（数组，可为空 = 只打开门户页等回填不点击）、
+        ``browser_settings``（可选，直连/资源路由/stealth 口径对齐 _start_browser）、
+        ``cancel_id``。
+
+        行为：**headless** ``launch_persistent_context``（与配置会话的 headed
+        区分）→ goto portal_url → 回填沉降 → 逐条回放（click → click 处理器、
+        change → select 处理器，经 ``run_step_async`` 沿用既有超时/取消契约）
+        → 回放后沉降（给提交导航留落地窗口）→ 关浏览器返回结果。
+
+        成败口径：本命令的成功 = 回放全部动作无错误且页面完成导航/加载沉降；
+        **登录是否真的成功以 Rust 侧登录后网络验证兜底**（非本命令职责）。
+        回放步骤失败 → ``assertion_failed``；门户导航失败按既有导航分类
+        （``navigation_timeout`` / ``network_error``）；取消 → ``cancelled``；
+        参数/占用错误 → ``unknown_error`` 结构化错误（浏览器启动前拦截）。
+
+        生命周期：与配置会话**共用同一占用注册表**（``self._profile_session``
+        槽位，同时仅一个持久类操作）；持久目录**只写不清**（绝不清理
+        cookies/localStorage）；幽灵收尾对齐配置会话范式（close 事件回收 +
+        失败/取消整场回收 + Worker 退出兜底）；命令级超时覆盖本命令全程，
+        不进 ``_INTERRUPTIBLE_METHODS``（独立上下文，关 self._page 既打不着
+        它也会误伤 keep_alive，豁免口径同 profile_session_*）。
+        """
+        user_data_dir = str(params.get("user_data_dir") or "").strip()
+        if not user_data_dir:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "profile_auto_login 缺少 user_data_dir")
+        portal_url = str(params.get("portal_url") or "").strip()
+        if not portal_url:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "profile_auto_login 缺少 portal_url")
+        if not portal_url.startswith(("http://", "https://")):
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "portal_url 仅支持 http/https 地址")
+        raw_actions = params.get("recorded_actions")
+        if raw_actions is None:
+            raw_actions = []
+        if not isinstance(raw_actions, list):
+            raise WorkerError(Outcome.UNKNOWN_ERROR, "recorded_actions 必须是数组")
+        # 校验前置（浏览器启动之前）：畸形/不认识的 type 直接结构化报错，
+        # 不留半开浏览器
+        try:
+            actions = validate_auto_login_actions(raw_actions)
+        except ValueError as exc:
+            raise WorkerError(Outcome.UNKNOWN_ERROR, f"recorded_actions 非法: {exc}") from exc
+        replay_steps = build_replay_steps(actions)
+        bs = params.get("browser_settings", {}) or {}
+        cancel_id = str(params.get("cancel_id") or "")
+        cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
+
+        def _ensure_not_cancelled(stage: str) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise StepCancelled(f"持久自动登录已取消（{stage}）")
+
+        try:
+            # 占用互斥：与配置会话共用同一槽位（同时仅一个持久类操作）；
+            # 浏览器进程已退出的幽灵会话先收尾再放行（口径同 profile_session_start）
+            existing = self._profile_session
+            if existing is not None:
+                if self._profile_session_is_alive(existing):
+                    raise WorkerError(
+                        Outcome.UNKNOWN_ERROR,
+                        "已存在活跃配置会话，请先停止当前配置会话",
+                    )
+                logger.warning("发现浏览器已退出的配置会话，收尾后执行自动登录")
+                await self._teardown_profile_session(existing)
+
+            channel = str(bs.get("browser_channel") or "playwright").strip().lower()
+            custom_path = str(bs.get("browser_custom_path") or "").strip()
+            pure_mode = bool(bs.get("pure_mode", False))
+            # 对齐 _start_browser / profile_session_start：未绑定代理即绕过系统
+            # 代理（直连保障），纯净模式只关闭可选定制、不关闭直连保障
+            launch_args = [] if pure_mode else self._build_launch_args(bs, channel)
+            if self._bypass_system_proxy(bs) and self._is_chromium_channel(bs, channel):
+                if "--no-proxy-server" not in launch_args:
+                    launch_args.append("--no-proxy-server")
+            ctx_opts = self._build_context_options(bs)
+
+            start = time.perf_counter()
+            # 会话对象先建、资源逐项挂载：任一环节失败，except 统一回收已创建
+            # 部分（record=False：自动登录只回放，不注入录制器）
+            session = ProfileSessionState(
+                session_id=uuid.uuid4().hex,
+                user_data_dir=user_data_dir,
+                portal_url=portal_url,
+                record=False,
+            )
+            try:
+                _ensure_not_cancelled("浏览器启动前")
+                session.own_playwright = await self._start_profile_playwright()
+                # headless 持久上下文：与配置会话（headed 手动登录）区分，
+                # user_data_dir 原样挂载（cookies/localStorage 只写不清）
+                session.context = await self._launch_persistent_context(
+                    playwright=session.own_playwright,
+                    channel=channel,
+                    custom_path=custom_path,
+                    headless=True,
+                    launch_args=launch_args,
+                    user_data_dir=user_data_dir,
+                    ctx_opts=ctx_opts,
+                    bs=bs,
+                )
+                # 资源/直连/stealth 口径对齐 _start_browser：低资源路由与反检测
+                # 脚本作用于本命令自己的上下文（pure_mode 语义同正式登录：全关闭）
+                if not pure_mode:
+                    await self._apply_stealth_and_routes(bs, context=session.context)
+                # 持久上下文可能自带预开页：统一关掉，维持单活跃页语义
+                for old_page in list(session.context.pages):
+                    await self._safe_close(old_page, "auto login pre-open page")
+                session.page = await session.context.new_page()
+
+                # 门户页弹窗就地自动确认（口径同配置会话页，不污染共享事件通道）
+                async def _auto_accept(dialog: Any) -> None:
+                    try:
+                        await dialog.accept()
+                    except Exception as exc:  # noqa: BLE001 — 弹窗可能已在间隙消失
+                        logger.debug(f"自动登录页弹窗确认失败（忽略）: {exc}")
+
+                page_on = getattr(session.page, "on", None)
+                if callable(page_on):
+                    page_on("dialog", lambda d: asyncio.ensure_future(_auto_accept(d)))
+                # 浏览器进程意外退出 → 幽灵收尾（槽位释放，user_data_dir 保留）
+                context_on = getattr(session.context, "on", None)
+                if callable(context_on):
+                    context_on("close", lambda _c: self._on_profile_context_closed(session))
+
+                # 占用注册表在导航前持锁：导航/回放全程拒绝其他持久类操作
+                self._profile_session = session
+                _ensure_not_cancelled("门户导航前")
+                await self._navigate(session.page, portal_url, _nav_timeout(bs))
+                # 回填沉降：等门户 JS 把账号密码填好（窗口可测，best-effort）
+                step_context = StepContext(
+                    page=session.page,
+                    cancel_event=cancel_event,
+                    default_timeout=_to_ms(bs, "timeout", 10000),
+                    navigation_timeout=_nav_timeout(bs),
+                )
+                await self._settle_auto_login_page(session.page, step_context)
+                # 逐条回放（空数组 = 只打开门户页等回填不点击）：既有步骤处理器
+                # 沿用既有超时/取消契约；失败即中止（后续动作依赖前序语义）
+                for index, step in enumerate(replay_steps):
+                    _ensure_not_cancelled(f"回放动作 {index + 1} 前")
+                    try:
+                        await run_step_async(
+                            session.page,
+                            step,
+                            step_context,
+                            step_index=index,
+                            total_steps=len(replay_steps),
+                        )
+                    except WorkerError as exc:
+                        if isinstance(exc, StepCancelled):
+                            raise
+                        # 回放步骤失败统一归 assertion_failed（Rust 侧可重试、
+                        # 不回收 Worker）：保留原始消息与动作定位
+                        raise WorkerError(
+                            Outcome.ASSERTION_FAILED,
+                            f"回放第 {index + 1}/{len(replay_steps)} 个动作失败"
+                            f"（{actions[index]['type']} {actions[index]['selector']}）"
+                            f": {exc.message}",
+                        ) from exc
+                if replay_steps:
+                    # 回放后沉降：登录点击通常触发提交导航，给导航/加载留落地
+                    # 窗口（best-effort，超时不判失败——成败由 Rust 网络验证兜底）
+                    await self._settle_auto_login_page(session.page, step_context)
+            except BaseException:
+                # 启动失败 / 导航失败 / 回放失败 / 取消：回收已创建资源，
+                # 绝不留半开浏览器（user_data_dir 原样保留，含幽灵收尾语义）
+                await self._teardown_profile_session(session)
+                raise
+            # 幽灵取消窗口（对齐配置会话）：取消恰落在完成与响应返回之间时，
+            # 不能留下 Rust 已判定取消、Worker 却报成功的自动登录
+            if cancel_event is not None and cancel_event.is_set():
+                await self._teardown_profile_session(session)
+                raise StepCancelled("持久自动登录已取消（完成阶段）")
+            await self._teardown_profile_session(session)
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            logger.info(
+                "持久自动登录完成: actions=%d, 耗时=%dms, user_data_dir 保留挂载",
+                len(replay_steps),
+                duration_ms,
+            )
+            return StructuredResult(
+                outcome=Outcome.SUCCESS.value,
+                message=auto_login_success_message(len(replay_steps)),
+                duration_ms=duration_ms,
+            ).to_dict()
+        finally:
+            # cancel_id 只覆盖本命令本身（全程）
+            if cancel_id:
+                cancel_registry.unregister(cancel_id)
 
     @asynccontextmanager
     async def _temp_capture_browser(self, bs: dict) -> AsyncIterator[Any]:
@@ -3568,6 +3787,7 @@ COMMANDS: dict[str, Callable] = {
     "page_capture": worker_core.handle_page_capture,
     "profile_session_start": worker_core.handle_profile_session_start,
     "profile_session_stop": worker_core.handle_profile_session_stop,
+    "profile_auto_login": worker_core.handle_profile_auto_login,
     "ocr_recognize": worker_core.handle_ocr_recognize,
     "shutdown": worker_core.handle_shutdown,
 }

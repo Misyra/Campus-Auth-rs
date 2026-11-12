@@ -86,7 +86,7 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 
 缺少统一策略时继续兼容旧的 `bind_proxy` 和 `redirect_test_use_proxy`；新主程序不再暴露两个独立代理入口。自定义浏览器参数中的代理相关标志会被过滤，不能覆盖统一出口。Worker 不修改系统代理或 DNS；TUN 防火墙的强制拦截仍需用户配置例外。
 
-与 `playwright_worker.py` 的 `COMMANDS` 注册表逐项对应（17 项）。
+与 `playwright_worker.py` 的 `COMMANDS` 注册表逐项对应（18 项）。
 
 | 命令 | 说明 |
 |------|------|
@@ -105,6 +105,7 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 | `page_capture` | 清理旧登录态后导航到目标页，落盘 MHTML（仅 Chromium 渠道，走 CDP）、原始 HTML、离线副本 `page.offline.html`（资源引用改写为 `resources/`，解压即可脱网还原）、结构化控件摘要与脱敏局部 HTML、CSS-JS 资源及截图到 `captures/latest/`（**非 Chromium 渠道无 CDP**，CSS/JS 改由页面枚举 + HTTP 回补抓取；超大全页截图自动降为视口截图；由 `POST /api/ai/capture` 触发） |
 | `profile_session_start` | 启动持久配置会话（headed 持久上下文，详见[持久配置会话](#持久配置会话profile_session_)）：打开门户页供用户手动登录（勾选门户「记住密码」），注入录制器录下登录点击/选择序列 |
 | `profile_session_stop` | 停止配置会话并关闭持久浏览器，返回录制动作；**user_data_dir 的 cookie/localStorage 原样保留，绝不清理**（详见[持久配置会话](#持久配置会话profile_session_)） |
+| `profile_auto_login` | 持久自动登录（无头持久上下文执行器，详见[持久自动登录](#持久自动登录profile_auto_login)）：打开门户页等「记住密码」JS 自动回填 + 回放 `recorded_actions` + 结构化结果；登录成败以 Rust 侧网络验证兜底 |
 | `ocr_recognize` | OCR 识别（需可选 `ocr` 依赖；不占单会话槽位、不被 WorkerBusy 拒绝，但 Worker 内仍串行排队执行） |
 | `shutdown` | 优雅关闭 Worker 进程 |
 
@@ -113,8 +114,9 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 > 不被 WorkerBusy 拒绝，但 Worker 内仍串行排队执行（Rust → Worker 的命令始终
 > 串行，`_serve` 主循环 `await` 至该条命令结束），且**不参与** Worker 回收时的
 > 全量取消（Rust 侧 `CancelRegistry` 为其单独分区）。`profile_session_*` 与
-> 自动化浏览器实例相互独立（独占 Playwright 连接，不共享 context/page，不占
-> 单会话槽位），自带「同一时刻仅一个活跃配置会话」互斥（见下节）。
+> `profile_auto_login` 与自动化浏览器实例相互独立（独占 Playwright 连接，不共享
+> context/page，不占单会话槽位），三者共用「同一时刻仅一个持久类操作」占用
+> 注册表（配置会话进行中时 auto_login 报占用，反之亦然）。
 
 ## 持久配置会话（profile_session_*）
 
@@ -127,8 +129,8 @@ cookies/localStorage；把 `user_data_dir` 持久化后这些登录态跨进程�
    记住密码），Worker 录下点击/选择序列；
 2. `profile_session_stop`：关闭浏览器（登录态保留在 `user_data_dir`），取回
    录制结果；
-3. 之后的自动登录（Rust 侧编排）：无头持久上下文打开门户页（门户 JS 自动
-   回填）+ 回放录到的点击 + 网络验证兜底。
+3. 之后的自动登录（`profile_auto_login`）：无头持久上下文打开门户页（门户 JS
+   自动回填）+ 回放录到的点击 + 网络验证兜底（Rust 侧编排）。
 
 ### 请求 / 响应契约
 
@@ -195,6 +197,62 @@ Python 回传 `{"type": "truncated"}` 标记（文档计数随导航归零，需
 - **与自动化回收完全独立**：`close_browser` 命令 / 浏览器空闲回收 /
   ensure_browser 重建回滚只管自动化浏览器，不触碰配置会话；
 - stop 后或收尾后可再次 start（`session_id` 每次重新生成）。
+
+## 持久自动登录（profile_auto_login）
+
+「记住密码」自动登录的 Worker 侧执行器（编排由 Rust 侧负责）：无头持久上下文
+打开门户页 → 门户自己的 JS 自动回填账号密码（纯页面行为）→ 逐条回放
+`recorded_actions` → 返回结构化结果。**本命令的成功 = 回放全部动作无错误且
+页面完成导航/加载沉降；登录是否真的成功以 Rust 侧登录后网络验证兜底**
+（非本命令职责）。
+
+### 请求 / 响应契约
+
+- params：`user_data_dir`（**必需**，持久目录，缺失报错）、`portal_url`
+  （**必需**，仅 http/https）、`recorded_actions`（数组，元素
+  `{type, selector, strategy, ts, value?}` 即 `profile_session_stop` 的
+  `recorded_actions` 原样回传；**空数组 = 只打开门户页等回填不点击**——门户
+  可能记忆了会话直接放行成功页）、`browser_settings`（可选，直连/资源路由/
+  stealth 口径对齐 `_start_browser`，作用于本命令自己的持久 context）、
+  `cancel_id`（可选，覆盖本命令全程）；
+- 行为：**headless** `launch_persistent_context(user_data_dir)`（与配置会话的
+  headed 区分）→ `goto(portal_url)`（导航超时口径同既有分类
+  `navigation_timeout` / `network_error`）→ **回填沉降**（`load` 态等待 5s
+  best-effort + 固定沉降 1.5s，常量在 `auto_login.py`，窗口可测）→ 逐条回放
+  （见下）→ **回放后沉降**（给提交导航留落地窗口，best-effort 不判失败）→
+  关浏览器返回；命令级超时（`rust_timeout_ms` 的 0.9×）覆盖本命令全程。
+- 返回：沿用 `_structured_result` 信封语义——
+  - 成功：`success=true`，`data.outcome="success"` + 人话 `message` +
+    `duration_ms`（StructuredResult 形状，与 `execute_login_attempt` 一致）；
+  - 回放步骤失败：`success=false`，`data.outcome="assertion_failed"`，message
+    带动作定位（第 N/M 个 + type + selector）与原始失败原因（Rust 侧可重试、
+    不回收 Worker）；
+  - 取消：`success=true`，`data.outcome="cancelled"`；
+  - 参数缺失/非法、`recorded_actions` 畸形（非数组 / 非对象元素 / 不认识的
+    type / `change` 缺非空 value / 超上限 200 条）：浏览器启动**之前**即
+    `success=false` + `data.outcome="unknown_error"`（不重试语义）。
+
+### 回放映射（复用既有步骤处理器，不另写执行器）
+
+- `click` → `click` 处理器：selector 直接用录制串（Playwright 兼容形态，
+  含 `text="..."` / 结构路径），候选拆分、隐藏降级、文本兜底全部复用；
+- `change` → `select` 处理器：按录制 value 做 option 精确值匹配 → 文本匹配
+  兜底，最终 `select_option`；
+- 每步预算沿用上下文默认超时（`browser_settings.timeout`，秒）与取消契约，
+  失败即中止回放（后续动作依赖前序语义）。
+
+### 生命周期
+
+- **占用互斥**：与 `profile_session_*` **共用同一占用注册表**（同一时刻仅
+  一个持久类操作；配置会话进行中报「已存在活跃配置会话」，幽灵会话自动收尾
+  后放行）；
+- **持久目录只写不清**：绝不清理 `user_data_dir` 的 cookies/localStorage
+  （正常完成 / 失败 / 取消 / 幽灵回收 / Worker 退出兜底一律原样保留）；
+- **幽灵收尾对齐配置会话范式**：浏览器进程意外退出经 close 事件回收槽位，
+  命令失败/取消整场回收（不留半开浏览器）；
+- 不进 `_INTERRUPTIBLE_METHODS` 强制中断白名单：本命令运行在独立上下文上
+  （关 `self._page` 既打不着它也会误伤 keep_alive 常驻会话），超时自愈靠
+  任务取消 + 退出兜底收尾（豁免口径同 `profile_session_*`）。
 
 ## 依赖安装
 
