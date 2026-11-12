@@ -516,7 +516,9 @@ impl LoginSession {
                 // if_unowned）发现槽位不属于本会话时不会误杀占用方。
                 Err(e @ BridgeError::WorkerBusy) => Ok(StructuredResult {
                     outcome: Outcome::NetworkError,
-                    message: format!("Worker 忙（被其他任务占用，将重试）: {e}"),
+                    // Display（「Worker 忙: 调试会话进行中」）已含定性信息，
+                    // 此处不再重复拼接错误原文，只补处置提示
+                    message: format!("{e}（将自动重试）"),
                     data: Value::Null,
                     screenshot_url: None,
                     duration_ms: 0,
