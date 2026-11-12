@@ -44,6 +44,7 @@ jobs:
   build:
     name: 构建 ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +90,12 @@ jobs:
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
+
+      # 按 target 区分缓存 scope，六个矩阵互不污染（key 还自动含 rustc 版本与 Cargo.lock）
+      - name: 缓存 Cargo 构建产物
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: release-${{ matrix.target }}
 
       # tray-icon 的 Linux 后端链接 GTK3 / appindicator / xdo（muda 菜单模拟点击），
       # 构建期需要 -dev 头文件
@@ -259,6 +266,7 @@ jobs:
   docker:
     name: 构建 Docker ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -302,6 +310,7 @@ jobs:
     name: 发布 Docker 多架构清单
     needs: [build, docker]
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     env:
       IMAGE_NAME: ghcr.io/misyra/campus-auth-rs
     steps:
