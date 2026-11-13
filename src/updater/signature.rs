@@ -46,9 +46,18 @@
 //!   检查的发布必然带签名（「同源同批」）；仅镜像源未同步 latest.json 签名
 //!   文件时会遇到，拒绝是预期安全行为；
 //! - GitHub Release API 路径：优先取发布附带的 `latest.json` 资产（发布方对
-//!   完整清单的整体签名，见 `check.rs`）；资产缺失或不可用时回退逐资产合成
-//!   清单——合成清单无签名，嵌公钥构建下同样被拒绝（fail-closed），未嵌公钥
-//!   构建与现状一致。
+//!   完整清单的整体签名，见 `check.rs`）。嵌公钥构建下资产**缺失或不可用**
+//!   （下载失败 / 解析失败 / 签名校验失败）一律直接拒绝，绝不回退逐资产合成
+//!   清单——合成清单无签名字段，属纯 TLS 信任，与嵌钥构建的签名信任锚不可
+//!   共存（资产缺失报 [`UpdaterError::SignedManifestMissing`]，其余错误原样
+//!   透传）；未嵌公钥构建不做校验，资产不可用时照旧回退合成清单（与现状
+//!   一致）。
+//! - 升级窗口：签名启用（Secret 注入）后的第一个发布 tag 起按「同源同批」恒
+//!   同时产出「公钥嵌入 + 已签名清单资产」。Stable 路径每次检查取当前
+//!   releases/latest，旧 release 自然不再被命中；通道枚举路径在最高候选缺当前
+//!   平台资产时会尝试更低候选，签名启用前的旧发布在该异常窗口内会被拒绝（见
+//!   上条），待下一个正常发布出现即恢复。镜像源未同步 latest.json 资产时的
+//!   拒绝同理，是预期安全行为。
 //!
 //! ## 签名工具链
 //!
@@ -73,7 +82,9 @@ fn embedded_pubkey_b64() -> Option<&'static str> {
 ///
 /// `build.rs` 已在构建期校验格式，此处解析失败属防御分支：按未启用签名校验
 /// 处理（保可用性）并显著告警，不让一次构建事故静默摧毁更新可用性。
-fn embedded_verifying_key() -> Option<VerifyingKey> {
+/// `pub(crate)` 供 `check.rs` GitHub Release 路径取钥并按构建形态分流回退
+/// 口径（见 [`verify_manifest_value`] 与 `check.rs` 的对应注释）。
+pub(crate) fn embedded_verifying_key() -> Option<VerifyingKey> {
     let b64 = embedded_pubkey_b64()?;
     match decode_pubkey(b64) {
         Ok(key) => Some(key),
@@ -84,8 +95,8 @@ fn embedded_verifying_key() -> Option<VerifyingKey> {
     }
 }
 
-/// 解析 base64 编码的 ed25519 公钥
-fn decode_pubkey(pubkey_b64: &str) -> Result<VerifyingKey, String> {
+/// 解析 base64 编码的 ed25519 公钥（`pub(crate)` 供 `check.rs` 测试注入密钥）
+pub(crate) fn decode_pubkey(pubkey_b64: &str) -> Result<VerifyingKey, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(pubkey_b64.trim())
         .map_err(|e| format!("公钥 base64 解码失败: {e}"))?;
@@ -147,10 +158,13 @@ fn manifest_signing_bytes(manifest: &serde_json::Value) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// 清单接受前的签名严格校验（`check.rs` 拉取链路的统一入口）
+/// 清单接受前的签名严格校验（`check.rs` 自定清单路径的统一入口）
 ///
 /// 嵌公钥构建：签名缺失或校验失败 → [`UpdaterError::ManifestSignatureInvalid`]；
 /// 未嵌公钥构建：不校验直接放行，与现状一致（兼容语义见模块 doc）。
+/// GitHub Release 路径不直接走本函数：该路径需按构建形态分流回退口径，且
+/// 测试要注入显式公钥，故由 `check.rs` 经 [`embedded_verifying_key`] 取钥后
+/// 调 [`verify_manifest_with_key`]（校验语义与本函数一致）。
 pub(crate) fn verify_manifest_value(manifest: &serde_json::Value) -> Result<(), UpdaterError> {
     match embedded_verifying_key() {
         Some(key) => verify_manifest_with_key(manifest, Some(&key)),
