@@ -14,11 +14,10 @@ import { useRepoImport } from "./composables/useRepoImport";
 import { useUpdateDialog } from "./composables/useUpdateDialog";
 import { useCommandPalette, installCommandPaletteHotkey } from "./composables/useCommandPalette";
 import AuthBootstrapGuide from "./components/AuthBootstrapGuide.vue";
-import IconApp from "./components/common/IconApp.vue";
 import { hasUsableAuthToken } from "./api/client";
 
 // 五个低频浮层（向导 / 调试面板 / 仓库导入 / 更新弹窗 / 命令面板）异步分包：首屏 JS 只保留
-// 常驻布局与高频弹层（toast / 确认框 / 命令面板触发按钮），浮层首次打开时才拉取对应 chunk。
+// 常驻布局与高频弹层（toast / 确认框 / 顶栏搜索入口），浮层首次打开时才拉取对应 chunk。
 // 浮层不常驻，chunk 加载完成前的短暂等待即可接受，故不设 loading 占位。
 const SetupWizard = defineAsyncComponent(() => import("./components/common/SetupWizard.vue"));
 const DebugPanel = defineAsyncComponent(() => import("./components/DebugPanel.vue"));
@@ -31,8 +30,6 @@ const debug = useDebug();
 const updateDialog = useUpdateDialog();
 const repoImport = useRepoImport().repoImport;
 const palette = useCommandPalette();
-// 触发按钮提示随平台：macOS 为 Cmd+K（快捷键两者都收，installCommandPaletteHotkey）
-const paletteTriggerHint = /mac/i.test(navigator.userAgent) ? "⌘ K" : "Ctrl K";
 
 // 模板中嵌套在普通对象里的 ref 不会自动解包，浮层开态先解构出来
 const { visible: debugPanelVisible } = debug;
@@ -112,19 +109,8 @@ onUnmounted(() => uninstallHotkey?.());
     <!-- 更新弹窗同样全局挂载：启动/周期检查命中时任意页面都能直接弹出 -->
     <UpdateDialog v-if="updateDialogOpened" />
 
-    <!-- 命令面板：触发按钮常驻右下角（≤768px 隐藏，样式见 command-palette.css），
-         面板本体懒加载，首开由 Ctrl+K / Cmd+K 或此按钮拉取 chunk -->
-    <button
-      v-if="!state.showWizard"
-      type="button"
-      class="command-palette-trigger"
-      aria-label="打开命令面板"
-      :title="`命令面板（${paletteTriggerHint}）`"
-      @click="palette.togglePalette()"
-    >
-      <IconApp name="search" class="command-palette-trigger-icon" />
-      <kbd>{{ paletteTriggerHint }}</kbd>
-    </button>
+    <!-- 命令面板：入口统一在顶栏搜索（点击与 Ctrl+K / Cmd+K 同效），
+         面板本体懒加载，首开时才拉取 chunk -->
     <CommandPalette v-if="paletteOpened" />
 
     <!-- 鉴权引导页：无 token 且无可用秘钥/密码时全屏接管（样式见组件 scoped） -->

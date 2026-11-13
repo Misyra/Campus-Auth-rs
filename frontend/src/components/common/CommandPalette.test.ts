@@ -207,12 +207,15 @@ describe("命令过滤与执行", () => {
   });
 });
 
-describe("App.vue 触发按钮静态守卫", () => {
-  it("App.vue 渲染命令面板触发按钮并接通快捷键与懒加载", () => {
-    const src = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
-    expect(src).toContain("command-palette-trigger");
-    expect(src).toContain('aria-label="打开命令面板"');
-    expect(src).toContain("installCommandPaletteHotkey");
-    expect(src).toContain("defineAsyncComponent(() => import(\"./components/common/CommandPalette.vue\"))");
+describe("命令面板入口静态守卫", () => {
+  it("顶栏搜索入口接通命令面板，App.vue 保留快捷键与懒加载", () => {
+    const appSrc = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
+    expect(appSrc).toContain("installCommandPaletteHotkey");
+    expect(appSrc).toContain("defineAsyncComponent(() => import(\"./components/common/CommandPalette.vue\"))");
+    // 入口按钮统一在顶栏搜索（右下角常驻触发按钮已随顶栏改版移除）
+    const topbarSrc = readFileSync(resolve(process.cwd(), "src/components/common/AppTopbar.vue"), "utf8");
+    expect(topbarSrc).toContain('class="topbar-search"');
+    expect(topbarSrc).toContain("@click=\"openPalette()\"");
+    expect(appSrc).not.toContain("command-palette-trigger");
   });
 });

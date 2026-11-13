@@ -174,12 +174,27 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
 
 <template>
   <div class="page-content dashboard-page">
-    <!-- 主状态只负责展示网络结论，操作集中在下方的小卡片。 -->
+    <!-- 主状态行：网络结论 + 主操作（启动/停止检测）。
+         启动检测自顶栏迁入首页：它是页面的主行为，放在状态旁语义更近。 -->
     <div class="network-status-banner network-status-hero" :class="s.networkStatus.value">
       <div class="network-status-symbol"><IconApp :name="s.status.monitoring ? 'wifi' : 'pause'" /></div>
       <div class="network-status-copy">
         <strong class="status-text"><span class="status-dot"></span>{{ s.status.monitoring ? s.networkStatusText.value : '自动监测已停止' }}</strong>
         <span v-if="s.status.monitoring" class="status-detail">{{ s.networkStatusDetail.value }}</span>
+      </div>
+      <div class="hero-actions">
+        <button
+          class="btn"
+          :class="s.status.monitoring ? 'btn-secondary' : 'btn-primary'"
+          @click="ui.toggleMonitor()"
+          :disabled="s.busy.monitor"
+          :title="s.status.monitoring ? '停止网络检测和自动登录' : '开始检测网络，断网时自动登录'"
+          :aria-label="s.status.monitoring ? '停止检测' : '启动检测'"
+        >
+          <span v-if="s.busy.monitor" class="spinner" :class="{ 'spinner-on-accent': !s.status.monitoring }"></span>
+          <IconApp v-else class="btn-icon" :name="s.status.monitoring ? 'pause' : 'play'" />
+          <span class="monitor-action-label">{{ s.busy.monitor ? "处理中..." : (s.status.monitoring ? "停止检测" : "启动检测") }}</span>
+        </button>
       </div>
     </div>
 
@@ -264,10 +279,9 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
 
         <!-- 一键网络诊断：五项并发探测 + 结构化结论（轻量内嵌面板，不单独建页） -->
         <NetworkDiagnosticsPanel />
+      </div>
 
-        <!-- 活动概览：近 N 天事件流图表（登录成败按日 / 网络状态时间线 / 类型分布） -->
-        <ActivityOverview />
-
+      <div class="dashboard-right">
         <!-- 登录历史 -->
         <div class="card history-card">
           <div class="card-header">
@@ -312,11 +326,16 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- 实时日志 -->
-      <div class="card log-card">
-        <div class="card-header">
-          <h2>实时日志</h2>
+    <!-- 活动概览：近 N 天事件流图表（登录成败按日 / 网络状态时间线 / 类型分布）。
+         整行独占：图表需要横向空间，塞进窄列会挤压日期轴与图例。 -->
+    <ActivityOverview />
+
+    <!-- 实时日志 -->
+    <div class="card log-card">
+      <div class="card-header">
+        <h2>实时日志</h2>
           <div class="flex-row gap-sm">
             <button class="btn btn-icon-only" :class="{ 'btn-active': logs.autoScroll.value }" @click="logs.autoScroll.value = !logs.autoScroll.value" :title="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'" :aria-label="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'">
               <IconApp :name="logs.autoScroll.value ? 'arrow-up' : 'arrow-down'" />
@@ -364,6 +383,5 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           </div>
         </div>
       </div>
-    </div>
   </div>
 </template>

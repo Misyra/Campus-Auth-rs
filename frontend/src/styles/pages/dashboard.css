@@ -91,38 +91,61 @@
   color: var(--warning);
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: minmax(280px, 320px) 1fr;
-  gap: var(--space-md);
-  flex: 1;
-  min-height: 0;
+/* 主操作行（启动/停止检测）：紧邻网络状态结论，自顶栏迁入首页 */
+.hero-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-left: auto;
+  flex: none;
 }
 
-.dashboard-left {
+/* 看板双列：左列放操作与诊断，右列放登录历史；活动概览整行独占。
+   旧版 280–320px 窄列会把图表日期轴与图例挤成一团，视觉批次起加宽并改自然流。 */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
+  gap: var(--space-md);
+  align-items: start;
+}
+
+.dashboard-left,
+.dashboard-right {
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
-  min-height: 0;
+  min-width: 0;
 }
 
 .history-card {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
+.dashboard-right .history-card {
+  min-height: 360px;
+}
+
 .history-card .card-body {
-  flex: 1;
+  max-height: 520px;
   overflow-y: auto;
   min-height: 0;
+}
+
+/* 活动概览与实时日志整行排布：网格之后的自然流区块，顶部留出段距 */
+.dashboard-page > .activity-card {
+  margin-top: var(--space-md);
 }
 
 .log-card {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.dashboard-page > .log-card {
+  height: 420px;
+  margin-top: var(--space-md);
 }
 
 .log-card .card-body {

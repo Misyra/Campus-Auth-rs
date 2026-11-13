@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 顶栏（替代原 topbar.html）。
-// 展示页面标题、未保存提示、WebSocket 重连状态、通知中心、监控开关。
+// 展示页面标题、未保存提示、WebSocket 重连状态，右侧动作区固定三件套：
+// 搜索（命令面板入口）、通知中心、主题切换；监控开关已移入仪表盘首页
+// （「启动检测」按钮），顶栏只承担全局导航动作。
 
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -12,14 +14,28 @@ import { useStatus } from "../../composables/useStatus";
 import { useNotifications } from "../../composables/useNotifications";
 import { useWebSocket } from "../../composables/useWebSocket";
 import { useUi } from "../../composables/useUi";
+import { useAppearance } from "../../composables/useAppearance";
+import { useCommandPalette } from "../../composables/useCommandPalette";
 
 const route = useRoute();
 const router = useRouter();
 const { dirty } = useConfig();
-const { status, busy } = useStatus();
+const { busy } = useStatus();
 const { notifications, unreadNotifications, showNotifications } = useNotifications();
 const { wsReconnecting, wsRetryCount, wsDisconnectReason, retryNow } = useWebSocket();
-const { toggleMonitor, quitApp } = useUi();
+const { quitApp } = useUi();
+const { appearance, getEffectiveTheme } = useAppearance();
+const { openPalette } = useCommandPalette();
+
+/** 主题切换按钮展示**目标**主题图标：浅色时显示月亮（点它转深色），反之太阳 */
+const isDarkTheme = computed(() => getEffectiveTheme() === "dark");
+function toggleTheme(): void {
+  // 快捷切换写显式明/暗；「跟随系统」仍在外观设置页选择，避免快捷按钮
+  // 在 auto↔某一边之间产生第三种猜测语义
+  appearance.theme = isDarkTheme.value ? "light" : "dark";
+}
+/** 快捷键提示：mac 用 ⌘K，其余平台用 Ctrl K（与全局监听 Ctrl+K 同口径） */
+const hotkeyLabel = /mac/i.test(navigator.userAgent) ? "⌘K" : "Ctrl K";
 
 /** 重连条文案：首轮为通用重连中，连续失败后按原因给出检查/重启指引 */
 const reconnectHint = computed(() => {
@@ -69,6 +85,12 @@ function onNotifOpen(open: boolean): void {
       <button class="btn btn-xs" @click="retryNow()" title="跳过退避等待，立即以最短间隔重连">立即重试</button>
     </div>
     <div class="top-actions">
+      <!-- 搜索：命令面板入口（点击与 Ctrl/⌘+K 同效），样式对齐输入框观感 -->
+      <button type="button" class="topbar-search" title="搜索或执行命令" aria-label="搜索或执行命令" @click="openPalette()">
+        <IconApp name="search" />
+        <span class="topbar-search-text">搜索</span>
+        <kbd class="topbar-search-kbd">{{ hotkeyLabel }}</kbd>
+      </button>
       <div class="notification-wrapper">
         <AppPopover :open="showNotifications" class="notification-dropdown" aria-label="通知历史" @update:open="onNotifOpen">
           <template #trigger>
@@ -102,16 +124,13 @@ function onNotifOpen(open: boolean): void {
         </AppPopover>
       </div>
       <button
-        class="btn"
-        :class="status.monitoring ? 'btn-secondary' : 'btn-primary'"
-        @click="toggleMonitor"
-        :disabled="busy.monitor"
-        :title="status.monitoring ? '停止网络检测和自动登录' : '开始检测网络，断网时自动登录'"
-        :aria-label="status.monitoring ? '停止检测' : '启动检测'"
+        type="button"
+        class="btn btn-icon-only"
+        :title="isDarkTheme ? '切换到浅色主题' : '切换到深色主题'"
+        :aria-label="isDarkTheme ? '切换到浅色主题' : '切换到深色主题'"
+        @click="toggleTheme"
       >
-        <span v-if="busy.monitor" class="spinner" :class="{ 'spinner-on-accent': !status.monitoring }"></span>
-        <IconApp v-else class="btn-icon" :name="status.monitoring ? 'pause' : 'play'" />
-        <span class="monitor-action-label">{{ busy.monitor ? "处理中..." : (status.monitoring ? "停止检测" : "启动检测") }}</span>
+        <IconApp :name="isDarkTheme ? 'sun' : 'moon'" />
       </button>
       <button type="button" class="btn btn-icon-only mobile-quit" @click="quitApp" :disabled="busy.monitor" title="退出应用" aria-label="退出应用"><IconApp name="log-out" /></button>
     </div>

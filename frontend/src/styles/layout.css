@@ -134,6 +134,57 @@
   grid-column: 3;
 }
 
+/* 顶栏搜索（命令面板入口）：观感对齐输入框，点击与 Ctrl/⌘+K 同效 */
+.topbar-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  min-width: 168px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+
+.topbar-search:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-card-elevated);
+  color: var(--text-primary);
+}
+
+.topbar-search svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.topbar-search-text {
+  font-size: var(--text-md);
+  line-height: 1;
+}
+
+.topbar-search-kbd {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .topbar-search { min-width: 0; }
+  .topbar-search-text,
+  .topbar-search-kbd { display: none; }
+}
+
 .top-title-area {
   display: flex;
   align-items: baseline;
@@ -198,8 +249,10 @@
   animation: pageEnter var(--dur-slow) var(--ease-out);
 }
 
-/* 仪表板页面：填满 content-wrapper，不产生外层滚动 */
+/* 仪表板页面：组件化卡片按内容流排布，滚动交给 content-wrapper
+   （旧版内部定高栅格会在窄列里挤压活动图表，视觉批次起改为自然流） */
 .content-wrapper > .page-content:has(.stats-grid) {
-  height: 100%;
-  overflow: hidden;
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
 }

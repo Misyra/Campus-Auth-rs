@@ -3,8 +3,8 @@
  * 命令面板（Ctrl+K）。焦点陷阱 / Esc / 遮罩点击 / 滚动锁 / 关闭后焦点归还
  * 全部由 reka Dialog 承担（与 Modal.vue 同一迁移口径）；本组件只做搜索过滤
  * 与键盘选择。开合状态与快捷键见 useCommandPalette（首屏只含这一层），
- * 命令集构建见 commandRegistry（随本组件一起懒加载）；触发按钮常驻 App.vue
- * （command-palette-trigger），本组件由 App.vue defineAsyncComponent 懒加载，
+ * 命令集构建见 commandRegistry（随本组件一起懒加载）；入口为顶栏搜索按钮
+ * （AppTopbar 的 .topbar-search），本组件由 App.vue defineAsyncComponent 懒加载，
  * 不进首屏 chunk。样式见 styles/components/command-palette.css。
  */
 import { computed, nextTick, ref, watch } from "vue";

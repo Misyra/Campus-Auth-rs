@@ -1,55 +1,7 @@
 /* command-palette.css — 命令面板（Ctrl+K）：
-   触发按钮常驻 App.vue（command-palette-trigger），面板本体 CommandPalette.vue
-   经 defineAsyncComponent 懒加载。颜色全部引用 token，深浅主题自动跟随；
-   不在此改写任何既有 token 值。 */
-
-/* 触发按钮：右下角悬浮 pill，与面板同源外观；移动端（≤768px，底部导航出现）
-   隐藏——快捷键本就是桌面场景，触屏不占这个角落 */
-.command-palette-trigger {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: var(--z-dropdown);
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-full);
-  background: var(--bg-card);
-  color: var(--content-text-secondary);
-  cursor: pointer;
-  box-shadow: var(--shadow-float);
-  backdrop-filter: var(--card-blur);
-  transition: color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
-}
-
-.command-palette-trigger:hover {
-  color: var(--content-text-primary);
-  border-color: var(--border-hover);
-}
-
-.command-palette-trigger-icon {
-  width: 15px;
-  height: 15px;
-  color: var(--accent);
-}
-
-.command-palette-trigger kbd {
-  font-family: inherit;
-  font-size: var(--text-2xs);
-  color: var(--content-text-muted);
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xs);
-  padding: 1px 6px;
-}
-
-@media (max-width: 768px) {
-  .command-palette-trigger {
-    display: none;
-  }
-}
+   入口为顶栏搜索按钮（AppTopbar 的 .topbar-search），面板本体
+   CommandPalette.vue 经 defineAsyncComponent 懒加载。颜色全部引用 token，
+   深浅主题自动跟随；不在此改写任何既有 token 值。 */
 
 /* 面板：顶部悬停式（区别于 .modal-overlay 的垂直居中），搜索框承担全部输入 */
 .command-palette-overlay {
