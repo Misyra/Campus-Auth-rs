@@ -94,12 +94,43 @@ async function fetchBundleWithTimeout(url: string, init: RequestInit): Promise<B
 
 export { ApiError, extractApiError } from "./client";
 
+/**
+ * PATCH /api/config/{section} 的合法段名（T5-3）。
+ *
+ * 与后端 `CONFIG_PATCH_SECTIONS` 对齐的全局设置子集——前端保存载荷只含全局
+ * 段（凭证域段归方案页 /api/profiles 编辑），故此处不导出后端也接受的其他段。
+ * 类型暂放本文件：types.ts 强类型化批次收敛时随 SaveConfigPayload 一并迁入。
+ */
+export type ConfigSectionKey =
+  | "browser"
+  | "worker"
+  | "monitor"
+  | "pause"
+  | "logging"
+  | "retry"
+  | "app_settings"
+  | "updater"
+  | "notification";
+
 /** 配置相关 */
 export const configApi = {
   fetch: () => http.get<ConfigResponse>("/api/config"),
   // B4：原 PUT /api/config 全量保存方法已删除（全库零调用，且扁平整体替换
   // 的载荷形状容易在后端演变为清空配置的地雷）；保存统一走 patch 增量语义
   patch: (payload: SaveConfigPayload, opts?: RequestOptions) => http.patch<MutationResult>("/api/config", payload, opts),
+  /**
+   * 单 section 局部更新（PATCH /api/config/{section}，T5-3）。
+   *
+   * 请求体即该段的局部对象，后端包装回单键全量 PATCH 走同一条合并链——
+   * 原子性 / 校验语义与全量 PATCH 完全一致；响应为与 GET 同形的完整扁平
+   * 快照。useConfig.saveConfig 按 dirty 所属段分组调用本方法，仅在后端
+   * 未挂载（404）时防御性回退全量 patch。
+   */
+  patchSection: <S extends ConfigSectionKey>(
+    section: S,
+    body: SaveConfigPayload[S],
+    opts?: RequestOptions,
+  ) => http.patch<MutationResult>(`/api/config/${pathSegment(section)}`, body, opts),
   fetchLogLevels: () => http.get<{ level: string }>("/api/config/log-levels"),
   setLogLevel: (level: string) => http.put<MutationResult>("/api/config/log-level", { level }),
   fetchStealthScript: () => http.get<{ script: string }>("/api/config/default-stealth-script"),

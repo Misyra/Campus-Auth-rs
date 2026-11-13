@@ -14,6 +14,10 @@ const fetchMock = vi.fn();
 // 显式声明一个参数：否则 vi.fn(async () => ({})) 推断为零参签名，
 // 取 calls[0][0] 会触发 TS2493（类型检查此前因 tsconfig 是 solution 文件而未生效）
 const patchMock = vi.fn(async (_payload: Record<string, unknown>) => ({}));
+// T5-3：section 增量保存（patchSection(section, body)）
+const patchSectionMock = vi.fn(
+  async (_section: string, _body: Record<string, unknown>) => ({}),
+);
 const setLogLevelMock = vi.fn(async () => ({ message: "ok" }));
 const fetchLogLevelsMock = vi.fn(async () => ({ level: "INFO" }));
 const pureModeFetchMock = vi.fn(async () => ({ enabled: true }));
@@ -33,6 +37,8 @@ vi.mock("../api", () => ({
   configApi: {
     fetch: () => fetchMock(),
     patch: (...a: unknown[]) => patchMock(a[0] as Record<string, unknown>),
+    patchSection: (...a: unknown[]) =>
+      patchSectionMock(a[0] as string, a[1] as Record<string, unknown>),
     setLogLevel: (...a: unknown[]) => setLogLevelMock(...(a as [])),
     fetchLogLevels: () => fetchLogLevelsMock(),
   },
@@ -65,6 +71,7 @@ beforeEach(() => {
     logging: { level: "INFO" },
   });
   patchMock.mockClear();
+  patchSectionMock.mockClear();
   setLogLevelMock.mockClear();
   pureModeFetchMock.mockClear();
   pureModeToggleMock.mockClear();
@@ -80,9 +87,12 @@ describe("dirty 快照比对", () => {
     await flushWatch();
     expect(config.dirty.value).toBe(true);
     await config.saveConfig();
-    const payload = patchMock.mock.calls[0][0];
-    expect((payload.browser as Record<string, unknown>).redirect_test_use_proxy).toBe(true);
-    fetchMock.mockResolvedValue({ browser: payload.browser });
+    // T5-3：browser 段 dirty → section 端点只发 browser 一段
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
+    const [section, body] = patchSectionMock.mock.calls[0];
+    expect(section).toBe("browser");
+    expect((body as Record<string, unknown>).redirect_test_use_proxy).toBe(true);
+    fetchMock.mockResolvedValue({ browser: body });
     await config.fetchConfig();
     expect(config.config.browser.redirect_test_use_proxy).toBe(true);
     expect(config.dirty.value).toBe(false);
@@ -111,7 +121,8 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(true);
 
     await config.saveConfig();
-    expect(patchMock).toHaveBeenCalledTimes(1);
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
+    expect(patchSectionMock.mock.calls[0][0]).toBe("monitor");
     expect(config.dirty.value).toBe(false);
   });
 
@@ -121,10 +132,10 @@ describe("dirty 快照比对", () => {
     await flushWatch();
     expect(config.dirty.value).toBe(true);
 
-    // 让 PATCH 挂起，制造"请求在途"窗口
+    // 让 section 请求挂起，制造"请求在途"窗口
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    patchMock.mockImplementationOnce(async () => {
+    patchSectionMock.mockImplementationOnce(async () => {
       await gate;
       return {};
     });
@@ -139,12 +150,12 @@ describe("dirty 快照比对", () => {
 
     // 提交的是 false、途中改成 true 从未提交 → 必须仍显示"未保存"，
     // 否则用户既看不到脏提示、也不会再点一次保存，改动就丢了
-    expect(patchMock).toHaveBeenCalledTimes(1);
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
     expect(config.dirty.value).toBe(true);
 
     // 再保存一次应当真的把 true 提交上去
     await config.saveConfig();
-    expect(patchMock).toHaveBeenCalledTimes(2);
+    expect(patchSectionMock).toHaveBeenCalledTimes(2);
     expect(config.dirty.value).toBe(false);
   });
 
@@ -174,7 +185,7 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(true);
   });
 
-  it("设置保存载荷只含全局设置，绝不携带方案凭据字段", async () => {
+  it("设置保存只发全局 section，绝不携带方案凭据字段", async () => {
     // 回归（known-issues #23 E1）：此前载荷带着 username/auth_url/login_channel 等
     // 13 个方案字段，任意 Tab 的「立即保存」都会把活跃方案的凭据一并落盘——
     // 账号页「自动检测」填入的未确认候选地址就是这样被静默持久化的。
@@ -183,18 +194,86 @@ describe("dirty 快照比对", () => {
     await flushWatch();
     await config.saveConfig();
 
-    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
-    // 全局字段照常提交
-    expect(payload.monitor).toBeDefined();
-    expect(payload.browser).toBeDefined();
-    // 方案域字段一个都不能出现
+    // T5-3：全局保存只经 section 端点，段名必须是全局设置段
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
+    expect(patchSectionMock.mock.calls[0][0]).toBe("monitor");
+    // 全量 PATCH 不得被走到（它会原样接受方案域顶层键）
+    expect(patchMock).not.toHaveBeenCalled();
+    const body = patchSectionMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(body.enable_tcp_check).toBe(false);
+    // section 载荷是 monitor 段自身，方案域字段无从出现
     const profileKeys = [
       "username", "password", "auth_url", "trigger_url", "isp",
       "active_task", "login_channel", "active_http_task", "clear_password",
     ];
     for (const key of profileKeys) {
-      expect(payload, `保存载荷不得包含方案字段 ${key}`).not.toHaveProperty(key);
+      expect(body, `section 载荷不得包含方案字段 ${key}`).not.toHaveProperty(key);
     }
+  });
+
+  it("多段同时 dirty 时按段分组逐段提交，未改动的段不发送", async () => {
+    await config.fetchConfig();
+    config.config.monitor.enable_tcp_check = false;
+    config.config.updater.auto_check_enabled = false;
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+
+    await config.saveConfig();
+    // 只发 monitor / updater 两段；browser 等未改动段不得出现在载荷里
+    const sections = patchSectionMock.mock.calls.map(([s]) => s).sort();
+    expect(sections).toEqual(["monitor", "updater"]);
+    const updaterBody = patchSectionMock.mock.calls.find(([s]) => s === "updater")![1] as Record<string, unknown>;
+    expect(updaterBody.auto_check_enabled).toBe(false);
+    // 全量 PATCH 不参与
+    expect(patchMock).not.toHaveBeenCalled();
+  });
+
+  it("改动不在任何 section 内时回退全量 PATCH（顶层 management_password 无对应段）", async () => {
+    await config.fetchConfig();
+    // 管理凭据是顶层标量字段，后端 section 集合中没有对应段：
+    // 走既有全量 PATCH 保持行为面（后端对该顶层键本就无存储映射）
+    config.config.management_password = "bootstrap-pass";
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+
+    await config.saveConfig();
+    expect(patchSectionMock).not.toHaveBeenCalled();
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.management_password).toBe("bootstrap-pass");
+    expect(config.dirty.value).toBe(false);
+  });
+
+  it("section 端点 404 时防御性回退全量 PATCH 一次", async () => {
+    await config.fetchConfig();
+    config.config.monitor.enable_tcp_check = false;
+    await flushWatch();
+
+    // 过渡期后端未挂载 section 路由（理论上不该发生）：一次性回退全量保存
+    patchSectionMock.mockRejectedValueOnce(new ApiError("not found", 404));
+    await config.saveConfig();
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
+    expect((payload.monitor as Record<string, unknown>).enable_tcp_check).toBe(false);
+    // 回退成功视同保存成功
+    expect(config.saveFailed.value).toBe(false);
+    expect(config.dirty.value).toBe(false);
+  });
+
+  it("section 保存失败（非 404）不回退全量，保留 dirty 与失败标记", async () => {
+    await config.fetchConfig();
+    config.config.monitor.enable_tcp_check = false;
+    await flushWatch();
+
+    // 400 = 载荷本身被拒：全量载荷同样会被拒，回退只会掩盖出错的段
+    patchSectionMock.mockRejectedValueOnce(new ApiError("monitor 配置无效", 400));
+    await config.saveConfig();
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
+    expect(patchMock).not.toHaveBeenCalled();
+    expect(config.saveFailed.value).toBe(true);
+    // 快照未前移：dirty 保持，用户可修正后重试
+    expect(config.dirty.value).toBe(true);
   });
 
   it("后端仍在扁平响应里回传方案凭据时，本 composable 不接收", async () => {
@@ -235,14 +314,23 @@ describe("dirty 快照比对", () => {
     await flushWatch();
     expect(config.dirty.value).toBe(false);
 
-    // 随后任意一次普通保存，载荷里的值必须是关闭态
-    // （默认 enable_tcp_check 为 false，这里改为 true 以制造真实的未保存变更）
+    // 随后任意一次普通保存不再触碰 browser 段（T5-3 按段分组：开关值已同步进
+    // 模型与快照，browser 未 dirty）——旧值覆盖回退的路径被分组结构性地消除
     config.config.monitor.enable_tcp_check = true;
     await flushWatch();
     await config.saveConfig();
-    expect(patchMock).toHaveBeenCalledTimes(1);
-    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
-    expect((payload.browser as Record<string, unknown>).pure_mode).toBe(false);
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
+    expect(patchSectionMock.mock.calls[0][0]).toBe("monitor");
+
+    // 但当 browser 段因任何原因再次 dirty 时，载荷必须携带关闭态（回写机制的
+    // 回归锚点：模型里若是旧值 true，这里就会把它翻回去）。
+    // （headless 默认 true，翻转成 false 才是真实变更）
+    config.config.browser.headless = false;
+    await flushWatch();
+    await config.saveConfig();
+    const browserCall = patchSectionMock.mock.calls.find(([s]) => s === "browser");
+    expect(browserCall).toBeDefined();
+    expect((browserCall![1] as Record<string, unknown>).pure_mode).toBe(false);
   });
 
   it("fetchPureMode 拉取到的权威值同样回写表单模型", async () => {

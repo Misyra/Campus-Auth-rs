@@ -160,6 +160,45 @@ function rangeValuesFromConfig(): Record<string, unknown> {
 
 const { toastOnly } = useToast();
 
+/**
+ * saveConfig 载荷的 section 键（T5-3 autosave 增量化）。
+ *
+ * 与后端 PATCH /api/config/{section} 的全局设置段对齐（`ConfigSectionKey`，
+ * 后端另接受凭证域段与 active_profile_id，但那些属 Profile 域，不在本
+ * composable 的保存边界内）。管理凭据 management_password 是顶层标量、
+ * 后端无对应 section，不属于本集合（见 saveConfig 内注释）。
+ */
+const SAVE_SECTIONS = [
+  "browser",
+  "worker",
+  "monitor",
+  "pause",
+  "logging",
+  "retry",
+  "app_settings",
+  "updater",
+  "notification",
+] as const;
+type SaveSection = (typeof SAVE_SECTIONS)[number];
+
+/**
+ * 计算与已保存快照相比发生变化的 section。
+ *
+ * savedSnapshot 是整表 JSON 串：解析后逐段 stringify 比对（配置体量小，
+ * 一次 parse 开销可忽略；段内键序与快照一致——两者同源于本模块的赋值路径）。
+ * 快照解析失败属异常路径，保守返回全量段以免漏存。
+ */
+function changedSections(snapshot: string): SaveSection[] {
+  let before: Partial<Record<SaveSection, unknown>>;
+  try {
+    before = JSON.parse(snapshot) as Partial<Record<SaveSection, unknown>>;
+  } catch {
+    return [...SAVE_SECTIONS];
+  }
+  const bag = config as unknown as Record<SaveSection, unknown>;
+  return SAVE_SECTIONS.filter((s) => JSON.stringify(bag[s]) !== JSON.stringify(before[s]));
+}
+
 /** 保存配置：校验硬错误阻断、警示仅提示；成功后以表单当前值刷新 dirty 快照 */
 async function saveConfig(force = false): Promise<void> {
   if (!dirty.value && !force) return;
@@ -190,10 +229,11 @@ async function saveConfig(force = false): Promise<void> {
 
   busy.save = true;
   saveFailed.value = false;
+  // 全量载荷（回退与兜底路径专用）：与既有全量 PATCH 字节同形。
   // 载荷只含全局设置：凭据/直连字段一律不提交（它们属 Profile，见文件头边界说明）。
   // 此前这里带着 username/auth_url/login_channel 等 13 个方案字段，等于让任意
   // 全局保存都能改写活跃方案的凭据——检测候选被静默落盘正是由此而来。
-  const payload: SaveConfigPayload = {
+  const fullPayload: SaveConfigPayload = {
     browser: config.browser,
     worker: config.worker,
     monitor: config.monitor,
@@ -207,18 +247,52 @@ async function saveConfig(force = false): Promise<void> {
   };
 
   // ⚠ 快照必须在 `await` **之前**取。
-  // 这里等的是本次 PATCH 的载荷（payload 在上面已经构造好），所以"已提交的基准"
+  // 这里等的是本次 PATCH 的载荷（载荷在下面由各段构造），所以"已提交的基准"
   // 就是此刻的 config；PATCH 在途期间用户继续编辑产生的改动**不属于**这次提交。
   // 原实现在 await 之后才用"当前 config"当快照，于是途中的编辑被当成已保存基准、
   // dirty 被置 false —— 实际从未提交，属静默丢改动。
   const submittedSnapshot = JSON.stringify(config);
 
   try {
-    await configApi.patch(payload, { signal: controller.signal });
+    // T5-3：按 dirty 所属 section 分组，逐段走 PATCH /api/config/{section}
+    //（多段同时 dirty 按列表顺序逐个发送；本保存入口是按钮触发、无防抖合并
+    // 节奏可继承，顺序发送即最小改法）。
+    const sections = force ? [...SAVE_SECTIONS] : changedSections(savedSnapshot);
+    if (sections.length === 0) {
+      // 改动落在任何 section 之外（现存仅顶层 management_password：后端扁平
+      // PATCH 对该顶层键无存储映射，发与不发均无效果，历史行为即如此）——
+      // 走既有全量 PATCH 保持行为面不变
+      await configApi.patch(fullPayload, { signal: controller.signal });
+    } else {
+      let fellBack = false;
+      for (const section of sections) {
+        try {
+          await configApi.patchSection(section, config[section], {
+            signal: controller.signal,
+          });
+        } catch (error) {
+          // 防御性回退：404 = 端点未挂载（过渡期理论上不该发生，见
+          // patchSection 注释）。一次性回退全量 PATCH——语义与改动前完全
+          // 一致，且对已成功的段是同值幂等合并。非 404（400 校验拒绝等）
+          // 不回退：全量载荷同样会被拒，只会掩盖出错的段。
+          if (error instanceof ApiError && error.status === 404) {
+            frontendLogger.warn("config", `section 端点不可用（${section}），回退全量保存`);
+            fellBack = true;
+            break;
+          }
+          throw error;
+        }
+      }
+      if (fellBack) {
+        await configApi.patch(fullPayload, { signal: controller.signal });
+      }
+    }
     suppressDirty = true;
     try {
       await nextTick();
-      // 以**已提交值**为新快照：用户把值改回原样时 dirty 自动消失
+      // 以**已提交值**为新快照：用户把值改回原样时 dirty 自动消失。
+      // 部分段失败时快照不前移（走 catch），已落盘的段下次保存按同值幂等
+      // 合并重发，无副作用。
       savedSnapshot = submittedSnapshot;
       // 只有"当前值与已提交值一致"才清 dirty。在途编辑必须保留未保存标记，
       // 否则用户看不到脏提示、也不会再点一次保存（suppressDirty 窗口内被抑制的
