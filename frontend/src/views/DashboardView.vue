@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
-import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch, defineAsyncComponent } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
 import { useEnvironment } from "@/composables/useEnvironment";
@@ -16,10 +16,6 @@ import CustomSelect from "@/components/common/CustomSelect.vue";
 import NetworkDiagnosticsPanel from "@/components/NetworkDiagnosticsPanel.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import type { LoginChannel } from "@/api/types";
-
-// 活动概览：异步分包（T8-4 懒加载范式）——图表聚合与渲染逻辑独立成 chunk，
-// 首屏主包不承担；Dashboard 挂载即拉取（内容卡片，无需浮层的 onceOpened 门控）
-const ActivityOverview = defineAsyncComponent(() => import("@/components/ActivityOverview.vue"));
 
 const s = useStatus();
 const logs = useLogs();
@@ -327,10 +323,6 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         </div>
       </div>
     </div>
-
-    <!-- 活动概览：近 N 天事件流图表（登录成败按日 / 网络状态时间线 / 类型分布）。
-         整行独占：图表需要横向空间，塞进窄列会挤压日期轴与图例。 -->
-    <ActivityOverview />
 
     <!-- 实时日志 -->
     <div class="card log-card">

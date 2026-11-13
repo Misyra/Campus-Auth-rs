@@ -21,7 +21,6 @@ import type {
   DebugSession,
   DiagnosticReport,
   EnvironmentStatus,
-  EventsResponse,
   HealthInfo,
   HttpLoginTestResult,
   HttpTaskTestPayload,
@@ -534,11 +533,6 @@ export const aiApi = {
 export const historyApi = {
   fetch: (limit: number) => http.get<LoginHistoryItem[]>(`/api/history?limit=${limit}`),
   clear: () => http.delete<MutationResult>("/api/history"),
-};
-
-/** 事件流：Dashboard 活动概览数据源（后端 days 钳制 1..=30，载荷已脱敏） */
-export const eventsApi = {
-  fetch: (days: number) => http.get<EventsResponse>(`/api/events?days=${days}`),
 };
 
 /** 浏览器 */

@@ -132,11 +132,7 @@
   min-height: 0;
 }
 
-/* 活动概览与实时日志整行排布：网格之后的自然流区块，顶部留出段距 */
-.dashboard-page > .activity-card {
-  margin-top: var(--space-md);
-}
-
+/* 实时日志：网格之后的整行自然流区块，顶部留出段距 */
 .log-card {
   display: flex;
   flex-direction: column;
