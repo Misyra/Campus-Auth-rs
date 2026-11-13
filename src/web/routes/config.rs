@@ -143,10 +143,6 @@ pub async fn patch_settings(
 /// - active_profile_id（settings 顶层键）。
 ///
 /// 历史字段 carrier_custom 不在列：后端已无对应存储，全量 PATCH 亦显式忽略。
-///
-/// dead_code 豁免：本端点暂不挂路由表（openapi 契约测试要求路径先行进入
-/// openapi.json），由集成批统一注册后连同本豁免一并移除。
-#[allow(dead_code)]
 const CONFIG_PATCH_SECTIONS: [&str; 22] = [
     "browser",
     "monitor",
@@ -185,9 +181,6 @@ const CONFIG_PATCH_SECTIONS: [&str; 22] = [
 ///
 /// 契约注解：请求体为宽松 `Value`（形状随段而异，与全量 PATCH 同口径），
 /// 响应同 [`patch_settings`]，均待强类型化批次收敛。
-///
-/// dead_code 豁免：同 [`CONFIG_PATCH_SECTIONS`]——集成批注册路由表后移除。
-#[allow(dead_code)]
 #[utoipa::path(
     patch,
     path = "/api/config/{section}",

@@ -495,7 +495,7 @@ onMounted(() => {
           <div class="management-password-row">
             <input
               id="settings-management-password"
-              v-model="config.config.management_password"
+              v-model="config.config.app_settings.management_password"
               :type="showManagementPassword ? 'text' : 'password'"
               placeholder="留空表示未设置"
               autocomplete="new-password"

@@ -458,6 +458,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/config/{section}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * PATCH /api/config/{section} — 单设置段局部更新（T5-3）
+         * @description 请求体即该段的局部对象（如 `PATCH /api/config/monitor` 的 body 为 monitor
+         *     段自己的 JSON），实现上把 body 包装成 `{"<section>": body}` 后走
+         *     [`apply_flat_settings_patch`] 全链——原子性（拒绝即整体不落盘）、字段校验
+         *     与合并语义全部继承自既有全量 PATCH，本端点不重写任何合并逻辑。
+         *
+         *     未知 section 返回 404；响应与全量 PATCH 同形（重载后回读的完整扁平设置
+         *     快照，与 GET /api/config 字节一致），保证客户端可以像全量 PATCH 一样用
+         *     响应整体刷新本地状态。
+         *
+         *     契约注解：请求体为宽松 `Value`（形状随段而异，与全量 PATCH 同口径），
+         *     响应同 [`patch_settings`]，均待强类型化批次收敛。
+         */
+        patch: operations["patch_api_config_section"];
+        trace?: never;
+    };
     "/api/debug/feedback-bundle": {
         parameters: {
             query?: never;
@@ -5341,6 +5371,61 @@ export interface operations {
                 };
             };
             /** @description 配置重载失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    patch_api_config_section: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 设置段名：全局段 browser/monitor/pause/logging/retry/app_settings/worker/updater/notification（含别名 retry_settings/app）；凭证域段 network/username/password/auth_url/trigger_url/isp/active_task/login_channel/active_http_task/active_script_task；或 active_profile_id */
+                section: string;
+            };
+            cookie?: never;
+        };
+        /** @description 该段的局部对象（凭证域段为标量字段值，如 username 的 body 为字符串；password 三态：null 保留、空串清除、非空字符串加密更新） */
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            /** @description 合并保存并重载后回读的扁平设置（与 GET / PATCH /api/config 同形） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description 段名合法但字段类型或取值非法（同全量 PATCH 口径：monitor patch 未知字段、端口越界、悬空 active_profile_id、渠道任务绑定缺失、推送通知校验失败等） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 未知设置段（合法段名见 path 参数说明） */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 配置事务提交或重载失败 */
             500: {
                 headers: {
                     [name: string]: unknown;

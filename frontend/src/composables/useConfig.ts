@@ -89,8 +89,8 @@ async function fetchConfig(): Promise<void> {
     // 推送通知：旧后端不下发时整体取默认值；通道列表以后端下发为准（不能与
     // 默认值浅合并——那会把后端的通道列表和默认空数组拼错）
     config.notification = { ...DEFAULT_CONFIG.notification, ...(data.notification || {}) };
-    // 远程访问引导凭据：GET 扁平响应的可选顶层字段，旧后端不下发时以空串兜底
-    config.management_password = typeof data.management_password === "string" ? data.management_password : "";
+    // 管理密码在 app_settings 段内（后端 global.app.management_password），
+    // 与上面的段合并一起完成——GET 响应无顶层 management_password 字段
     // 旧配置只有 proxy_port（可能非默认值）：派生完整地址，
     // 保证输入框显示与后端 resolved_proxy_url 实际使用一致
     if (!config.updater.proxy_url && config.updater.proxy_port > 0) {
@@ -165,8 +165,8 @@ const { toastOnly } = useToast();
  *
  * 与后端 PATCH /api/config/{section} 的全局设置段对齐（`ConfigSectionKey`，
  * 后端另接受凭证域段与 active_profile_id，但那些属 Profile 域，不在本
- * composable 的保存边界内）。管理凭据 management_password 是顶层标量、
- * 后端无对应 section，不属于本集合（见 saveConfig 内注释）。
+ * composable 的保存边界内）。管理密码在 app_settings 段内（后端
+ * `global.app.management_password`），随段一起提交。
  */
 const SAVE_SECTIONS = [
   "browser",
@@ -243,7 +243,6 @@ async function saveConfig(force = false): Promise<void> {
     app_settings: config.app_settings,
     updater: config.updater,
     notification: config.notification,
-    management_password: config.management_password,
   };
 
   // ⚠ 快照必须在 `await` **之前**取。
@@ -259,9 +258,8 @@ async function saveConfig(force = false): Promise<void> {
     // 节奏可继承，顺序发送即最小改法）。
     const sections = force ? [...SAVE_SECTIONS] : changedSections(savedSnapshot);
     if (sections.length === 0) {
-      // 改动落在任何 section 之外（现存仅顶层 management_password：后端扁平
-      // PATCH 对该顶层键无存储映射，发与不发均无效果，历史行为即如此）——
-      // 走既有全量 PATCH 保持行为面不变
+      // 防御路径：dirty 但所有段与快照一致（理论上仅在 config 混入非段字段时
+      // 出现——目前 FormState 全部字段都已归属某个段）——走全量 PATCH 兜底
       await configApi.patch(fullPayload, { signal: controller.signal });
     } else {
       let fellBack = false;

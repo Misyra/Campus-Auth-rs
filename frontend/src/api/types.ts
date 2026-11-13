@@ -454,6 +454,12 @@ export interface AppSettings {
   show_tray: boolean;
   /** 定时自重启间隔（小时，0 = 不启用） */
   auto_restart_hours: number;
+  /**
+   * 管理密码（远程访问引导凭据）：GET /api/config 经 app_settings 段下发，
+   * PATCH /api/config/app_settings 落盘 `global.app.management_password`。
+   * 空串 = 未配置；明文存储，暴露面由 token 鉴权兜底
+   */
+  management_password: string;
 }
 
 /** 更新通道（正式版 / 测试版 / 全通道最新版） */
@@ -618,8 +624,6 @@ export interface Config {
   app_settings: AppSettings;
   updater: UpdaterConfig;
   notification: NotificationConfig;
-  /** 远程访问引导凭据（管理密码）：仅服务端非回环监听时用于界面引导换取 token */
-  management_password: string;
 }
 
 /** GET /api/config 返回结构（凭据平铺在顶层） */
@@ -646,8 +650,6 @@ export interface ConfigResponse {
   active_http_task: string;
   /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本正文在任务里，不在本响应里） */
   active_script_task: string;
-  /** 远程访问引导凭据（管理密码，serde 默认空串）：旧后端可能不下发，按可选处理 */
-  management_password?: string;
 }
 
 /**
@@ -672,11 +674,6 @@ export interface SaveConfigPayload {
    * SaveConfigPayload 构造点不携带（它们不编辑推送配置）。
    */
   notification?: NotificationConfig;
-  /**
-   * 远程访问引导凭据（管理密码）：PATCH 为局部合并语义，缺省 = 保持不变；
-   * 全局设置保存（useConfig.saveConfig）显式携带它（空串 = 清除）。
-   */
-  management_password?: string;
 }
 
 /** 登录渠道与HTTP 登录方法 */

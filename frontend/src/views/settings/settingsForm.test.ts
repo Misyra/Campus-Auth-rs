@@ -83,10 +83,12 @@ describe("管理凭据设置项（远程访问引导密码）", () => {
    * 远程（非回环）访问的界面引导依赖它。此处静态锁定三要素——绑定字段、
    * 密文展示与显隐切换（切换按钮缺 type 会被上面的通用守卫拦下，这里锁语义）。
    */
-  it("密码输入框绑定 management_password 且带显隐切换", () => {
+  it("密码输入框绑定 app_settings.management_password 且带显隐切换", () => {
     const src = readFileSync(new URL("./SystemSettings.vue", import.meta.url), "utf8");
     expect(src).toContain('id="settings-management-password"');
-    expect(src).toContain('v-model="config.config.management_password"');
+    // 绑定必须落在 app_settings 段内（后端 global.app.management_password）：
+    // 顶层字段绑定是 5.2.0 战役修复的断链缺陷（输入从不落盘）
+    expect(src).toContain('v-model="config.config.app_settings.management_password"');
     // 密文展示：type 由显隐状态驱动，默认 password
     expect(src).toContain(":type=\"showManagementPassword ? 'text' : 'password'\"");
     const toggle = src.match(/<button[^>]*@click="showManagementPassword = !showManagementPassword"[^>]*>/);

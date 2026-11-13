@@ -101,6 +101,7 @@ pub mod schemas {
         // ---- config 域（T5-1a）----
         crate::web::routes::config::get_settings,
         crate::web::routes::config::patch_settings,
+        crate::web::routes::config::patch_settings_section,
         crate::web::routes::config::reload_settings,
         crate::web::routes::config::get_log_levels,
         crate::web::routes::config::set_log_level,

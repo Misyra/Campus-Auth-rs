@@ -329,6 +329,9 @@ export const DEFAULT_CONFIG: Config = {
     task_notification: true,
     show_tray: true,
     auto_restart_hours: 24,
+    // 远程访问引导凭据（管理密码）：与后端 AppSettings::default 一致（空串 =
+    // 未配置），随 app_settings 段经 GET/PATCH /api/config 往返
+    management_password: "",
   },
   updater: {
     check_on_startup: true,
@@ -356,9 +359,6 @@ export const DEFAULT_CONFIG: Config = {
     retry_max_attempts: 3,
     retry_base_interval_seconds: 2,
   },
-  // 远程访问引导凭据（管理密码）：与后端 GlobalConfig.management_password 的
-  // serde 默认值（空串）一致；Docker 场景可经环境变量注入，界面留空即可
-  management_password: "",
 };
 
 /**

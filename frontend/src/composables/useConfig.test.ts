@@ -228,20 +228,31 @@ describe("dirty 快照比对", () => {
     expect(patchMock).not.toHaveBeenCalled();
   });
 
-  it("改动不在任何 section 内时回退全量 PATCH（顶层 management_password 无对应段）", async () => {
+  it("管理密码改动归属 app_settings 段（不再有段外顶层字段）", async () => {
     await config.fetchConfig();
-    // 管理凭据是顶层标量字段，后端 section 集合中没有对应段：
-    // 走既有全量 PATCH 保持行为面（后端对该顶层键本就无存储映射）
-    config.config.management_password = "bootstrap-pass";
+    // 管理密码是 app_settings 段内字段（后端 global.app.management_password）：
+    // 改动只发该段，全量 PATCH 不得被走到
+    config.config.app_settings.management_password = "bootstrap-pass";
     await flushWatch();
     expect(config.dirty.value).toBe(true);
 
     await config.saveConfig();
-    expect(patchSectionMock).not.toHaveBeenCalled();
-    expect(patchMock).toHaveBeenCalledTimes(1);
-    const payload = patchMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(payload.management_password).toBe("bootstrap-pass");
+    expect(patchMock).not.toHaveBeenCalled();
+    expect(patchSectionMock).toHaveBeenCalledTimes(1);
+    const [section, body] = patchSectionMock.mock.calls[0] as [string, Record<string, unknown>];
+    expect(section).toBe("app_settings");
+    expect(body.management_password).toBe("bootstrap-pass");
     expect(config.dirty.value).toBe(false);
+  });
+
+  it("GET 响应的 app_settings.management_password 加载进表单（断链回归）", async () => {
+    // 回归：此前前端读顶层 data.management_password（后端从不下发该字段），
+    // 密码框恒为空且编辑不落盘——读取必须走 app_settings 段
+    fetchMock.mockResolvedValue({
+      app_settings: { management_password: "from-server" },
+    });
+    await config.fetchConfig();
+    expect(config.config.app_settings.management_password).toBe("from-server");
   });
 
   it("section 端点 404 时防御性回退全量 PATCH 一次", async () => {

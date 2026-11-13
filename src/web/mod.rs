@@ -89,6 +89,11 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("PATCH", "/api/config", || {
             patch(routes::config::patch_settings)
         }),
+        // 单设置段局部更新（前端自动保存按 dirty 段增量提交）：请求体即该段
+        // 自身对象，后端包一层复用全量 PATCH 的原子链；未知段 404
+        ("PATCH", "/api/config/{section}", || {
+            patch(routes::config::patch_settings_section)
+        }),
         ("POST", "/api/config/reload", || {
             post(routes::config::reload_settings)
         }),
