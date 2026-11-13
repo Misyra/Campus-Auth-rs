@@ -1497,3 +1497,70 @@ export interface AiGenerateResult {
   model: string;
   base_url: string;
 }
+
+/** 应用事件类型标识（后端 `crate::events::AppEvent` 九变体，snake_case） */
+export type AppEventType =
+  | "login_succeeded"
+  | "login_failed"
+  | "network_down"
+  | "network_up"
+  | "task_finished"
+  | "task_failed"
+  | "update_available"
+  | "environment_ready"
+  | "profile_switched";
+
+/**
+ * 事件封装（GET /api/events 条目）。
+ *
+ * `type` 为判别字段，与载荷摘要字段平铺在同一对象；载荷为后端白名单式脱敏
+ * 结构（凭据 / token / URL 查询串在结构上不存在对应字段），字段随 type 可选：
+ * 登录类带 profile_id/channel/reason/attempt，网络类带 profile_id/reason，
+ * 任务类带 task_id/task_kind/reason，更新类带 version/current_version，
+ * 环境类带 python_ready/uv_ready，切换类带 from_profile_id/to_profile_id。
+ */
+export interface EventEnvelope {
+  /** 事件唯一 id（uuid） */
+  id: string;
+  /** 发生时间（UTC，RFC3339 字符串） */
+  timestamp: string;
+  /** 事件类型判别字段 */
+  type: AppEventType;
+  /** 关联档案 id（登录/网络/切换类事件） */
+  profile_id?: string;
+  /** 登录渠道标识（browser / http / script） */
+  channel?: string;
+  /** 失败原因码或短语（登录/任务/网络失败类，已脱敏） */
+  reason?: string;
+  /** 登录第几次尝试（从 1 起） */
+  attempt?: number;
+  /** 任务 id（任务类事件） */
+  task_id?: string;
+  /** 任务类型标识（browser / script / http） */
+  task_kind?: string;
+  /** 新版本号（更新类） */
+  version?: string;
+  /** 当前版本号（更新类） */
+  current_version?: string;
+  /** Python 环境是否可用（环境类） */
+  python_ready?: boolean;
+  /** uv 是否可用（环境类） */
+  uv_ready?: boolean;
+  /** 切换前档案 id（切换类） */
+  from_profile_id?: string;
+  /** 切换后档案 id（切换类） */
+  to_profile_id?: string;
+  [key: string]: unknown;
+}
+
+/** GET /api/events 响应载荷（client.ts 已解包 data 信封） */
+export interface EventsResponse {
+  /** 事件封装数组（时间升序；缺失文件与损坏行已由后端跳过） */
+  events: EventEnvelope[];
+  /** 实际生效的回看天数（缺省 7，钳制 1..=30） */
+  days: number;
+  /** 返回的事件条数 */
+  total: number;
+  /** 是否发生单文件行数截断（true 时更早的行未读入） */
+  truncated: boolean;
+}
