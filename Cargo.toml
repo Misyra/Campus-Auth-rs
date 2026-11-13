@@ -63,6 +63,9 @@ arc-swap = "1"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive", "alloc", "serde"] }
 rand = "0.8"
+# 发布清单 ed25519 离线签名（T6-4）：release 流水线签清单 + 客户端嵌公钥严格校验。
+# 纯 Rust 实现（无 C 依赖）；密钥生成直接用 rand 的 OsRng 填 32 字节种子，无需 rand_core 特性
+ed25519-dalek = "2"
 
 # CLI & 日志
 clap = { version = "4", features = ["derive", "env"] }

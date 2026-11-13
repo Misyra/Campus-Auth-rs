@@ -1,9 +1,10 @@
-//! 嵌入 Windows 程序版本资源，并为 MSVC 助手启用现代公共控件。
+//! 嵌入 Windows 程序版本资源、发布清单签名公钥（可选），并为 MSVC 助手启用现代公共控件。
 
 fn main() {
     println!("cargo:rerun-if-changed=resources/windows/helper.manifest");
     println!("cargo:rerun-if-changed=resources/icons/app.ico");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    embed_manifest_pubkey();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // 字符串版本保留预发布标识，不能只依赖固定资源中的四段数字。
         // 版本资源按包级编译、随链接进入主程序与 helper 两个二进制，
@@ -36,4 +37,34 @@ fn main() {
             manifest.display()
         );
     }
+}
+
+/// 发布清单签名公钥嵌入（T6-4，机制见 `src/updater/signature.rs` 模块 doc）
+///
+/// release 流程在启用清单签名（GitHub Secret `MANIFEST_SIGNING_KEY` 存在）时以
+/// `CAMPUS_MANIFEST_SIGNING=1` 调用构建，此处读取仓内 `resources/manifest-pubkey`
+/// 经 `rustc-env` 常量注入二进制；普通开发/CI 构建不设置该开关，二进制不嵌公钥，
+/// 更新器对清单不做签名校验（与历史未签名清单兼容）。
+/// 安全语义：公钥嵌入与清单签名必须同源同批——两者要么同时开启，要么都不做。
+fn embed_manifest_pubkey() {
+    println!("cargo:rerun-if-env-changed=CAMPUS_MANIFEST_SIGNING");
+    println!("cargo:rerun-if-changed=resources/manifest-pubkey");
+    if std::env::var("CAMPUS_MANIFEST_SIGNING").as_deref() != Ok("1") {
+        return;
+    }
+    let key_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/manifest-pubkey");
+    let key = std::fs::read_to_string(&key_path)
+        .unwrap_or_else(|e| panic!("启用清单签名但缺少公钥文件 {}: {e}", key_path.display()));
+    let key = key.trim();
+    // base64（标准字母表带填充）的 32 字节 ed25519 公钥恒为 44 字符；此处快速
+    // 拦截格式错误的仓内文件，让问题在构建期暴露而非运行期静默失效
+    let valid = key.len() == 44
+        && key
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/' || c == b'=');
+    if !valid {
+        panic!("resources/manifest-pubkey 不是合法的 ed25519 公钥 base64（预期 44 字符）");
+    }
+    println!("cargo:rustc-env=CAMPUS_MANIFEST_PUBKEY_B64={key}");
 }

@@ -12,6 +12,11 @@
 //! 通过同一摘要校验，故不影响离线可用性与既有安全模型。手动「选择安装包」（上传）
 //! 信任口径不同：不比对远程摘要、不拉取远程清单，版本闸门以解压产物 exe 中的
 //! 真实版本（见 [`version_info`]）为准。
+//!
+//! 清单信任与版本单调（T6-4）：清单在接受前经过 ed25519 签名严格校验（嵌公钥
+//! 构建；见 [`signature`] 模块 doc），并受版本回滚保护约束——同一更新通道内
+//! 已见过的最高清单版本记录在 `update/last_check.json`（[`LastCheckState`]），
+//! 可能驱动降级安装的更低版本清单被拒绝（[`ensure_manifest_not_rollback`]）。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +38,7 @@ pub(crate) mod download;
 pub mod error;
 pub(crate) mod local;
 mod operation;
+pub mod signature;
 pub mod version_info;
 
 pub use apply::PendingUpdate;
@@ -75,7 +81,9 @@ fn self_update_worker_dir(base_path: &Path) -> Result<PathBuf, UpdaterError> {
 /// 上次更新检查结果（`update/last_check.json`，跨重启持久）
 ///
 /// 手动"立即检查"与后台自动检查共用一份记录：成功时写 `latest_version` /
-/// `has_update`，失败时仅写 `error`（时间照常刷新）。
+/// `has_update`，失败时仅写 `error`（时间照常刷新）。`highest_seen_*` 字段
+/// 承载版本回滚保护的跨重启记忆，检查失败时保留不抹（见
+/// [`failed_check_state`]）。
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LastCheckState {
     /// 上次检查时间（UTC RFC3339，前端转本地时区展示）
@@ -91,6 +99,16 @@ pub struct LastCheckState {
     /// 远程发布是否缺少当前平台的安装包（区分"已是最新"与"无本平台包"）
     #[serde(default)]
     pub platform_unavailable: bool,
+    /// 已见过的最高清单版本（版本回滚保护，T6-4）
+    ///
+    /// 与 [`Self::highest_seen_channel`] 配对：仅同一更新通道内做单调比较，
+    /// 用户切换更新通道（主动降级）不受影响。空串表示尚无记录；旧状态文件
+    /// 缺字段时反序列化默认为空（兼容）。
+    #[serde(default)]
+    pub highest_seen_version: String,
+    /// [`Self::highest_seen_version`] 对应的更新通道键（"stable"/"prerelease"/"all"）
+    #[serde(default)]
+    pub highest_seen_channel: String,
 }
 
 /// 将检查结果写入状态文件（best-effort：失败仅 warn，不影响检查流程本身）
@@ -114,6 +132,114 @@ fn last_check_now() -> LastCheckState {
     LastCheckState {
         last_check_at: chrono::Utc::now().to_rfc3339(),
         ..Default::default()
+    }
+}
+
+/// 构造携带既有回滚保护记录的检查失败态
+///
+/// 检查失败（网络 / 解析 / 签名 / 回滚闸门）只刷新时间与错误原因，**不得抹掉**
+/// `highest_seen_*` 单调记录——否则攻击者诱导一次检查失败即可清除回滚保护
+/// 记忆，随后重放旧签名清单绕过版本单调闸门。
+fn failed_check_state(stored: Option<&LastCheckState>, error: &str) -> LastCheckState {
+    LastCheckState {
+        error: error.to_string(),
+        highest_seen_version: stored
+            .map(|s| s.highest_seen_version.clone())
+            .unwrap_or_default(),
+        highest_seen_channel: stored
+            .map(|s| s.highest_seen_channel.clone())
+            .unwrap_or_default(),
+        ..last_check_now()
+    }
+}
+
+/// 更新通道的稳定记录键（与 [`LastCheckState::highest_seen_channel`] 配对）
+///
+/// 取值与 `UpdateChannel` 的 serde snake_case 表示一致，作为状态文件中的
+/// 字符串通道标识（通道枚举类型不落盘，保持状态文件结构稳定）。
+fn channel_key(channel: crate::config::UpdateChannel) -> &'static str {
+    match channel {
+        crate::config::UpdateChannel::Stable => "stable",
+        crate::config::UpdateChannel::Prerelease => "prerelease",
+        crate::config::UpdateChannel::All => "all",
+    }
+}
+
+/// 版本回滚保护闸门（纯函数，便于单测）
+///
+/// 仅当「清单版本可能驱动一次降级安装」时拒绝：`manifest > current`
+/// （低于当前版本的清单不构成任何可执行动作——`compare_versions` 已把
+/// "不感兴趣"挡在更新之外，拒绝它们只会把正常的"已是最新"检查变成报错）
+/// 且 `manifest < seen`（同一通道内已见过更高版本；攻击者重放旧签名清单可
+/// 把用户降到已知有缺陷的旧版，这正是本闸门封死的通道）。
+///
+/// 降级通道边界：记录按通道隔离——用户切换更新通道（主动降级）后按新通道
+/// 重建记录，不受其他通道历史版本压制；同一通道内"清单版本 < 已见最高但 >
+/// 当前"的窄窗口（如 All 通道候选回退落到更低完好候选）会被拒绝，恢复依赖
+/// 更新的正常发布，属已知取舍（见 `docs` 后续说明）。
+fn ensure_manifest_not_rollback(
+    stored: Option<&LastCheckState>,
+    channel: &str,
+    current: &Version,
+    manifest_version: &Version,
+) -> Result<(), UpdaterError> {
+    if !check::compare_versions(current, manifest_version) {
+        return Ok(());
+    }
+    let Some(state) = stored else {
+        return Ok(());
+    };
+    if state.highest_seen_channel != channel {
+        return Ok(());
+    }
+    let Ok(seen) = Version::parse(&state.highest_seen_version) else {
+        // 记录缺失/损坏按无保护处理（状态文件是本机数据，不在清单攻击面内）
+        return Ok(());
+    };
+    if *manifest_version < seen {
+        return Err(UpdaterError::VersionRollbackRejected {
+            seen: seen.to_string(),
+            manifest: manifest_version.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// 清单接受后计算回滚保护记录的新值（纯函数）
+///
+/// 同通道且清单更高 → 上推记录；通道切换 → 以新通道当前清单重建记录；
+/// 其余（同通道不更高，如等版本重复检查）→ 保持原记录（幂等）。
+fn next_highest_seen(
+    stored: Option<&LastCheckState>,
+    channel: &str,
+    manifest_version: &Version,
+) -> (String, String) {
+    let current = (manifest_version.to_string(), channel.to_string());
+    let Some(state) = stored else {
+        return current;
+    };
+    if state.highest_seen_channel != channel {
+        return current;
+    }
+    match Version::parse(&state.highest_seen_version) {
+        Ok(seen) if *manifest_version > seen => current,
+        _ => (
+            state.highest_seen_version.clone(),
+            state.highest_seen_channel.clone(),
+        ),
+    }
+}
+
+/// 读取上次检查状态文件（缺失/损坏返回 `None`）——手动与后台检查共用
+fn read_last_check_state_file(base_path: &std::path::Path) -> Option<LastCheckState> {
+    let path = base_path.join(LAST_CHECK_FILE_NAME);
+    let content = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str(&content) {
+        Ok(state) => Some(state),
+        Err(e) => {
+            tracing::warn!("上次检查状态文件解析失败，忽略: {e}");
+            None
+        }
     }
 }
 
@@ -367,12 +493,11 @@ impl UpdaterService {
                     };
                     if let Err(error) = result {
                         log_check_failure("自动", &error);
+                        // 失败态保留既有回滚保护记录（不得抹掉单调记忆）
+                        let stored = read_last_check_state_file(&service.base_path);
                         record_last_check(
                             &service.base_path,
-                            &LastCheckState {
-                                error: error.to_string(),
-                                ..last_check_now()
-                            },
+                            &failed_check_state(stored.as_ref(), &error.to_string()),
                         )
                         .await;
                     }
@@ -406,6 +531,8 @@ impl UpdaterService {
     pub async fn check_update(&self) -> Result<Option<UpdateInfo>, UpdaterError> {
         let settings = self.config.runtime().load().updater.clone();
         let client = self.effective_client();
+        // 既有回滚保护记录：检查失败时保留（不抹记忆），清单接受后据此更新
+        let stored = self.last_check_state();
         let manifest = match check::fetch_manifest_for_channel(
             &client,
             &settings.release_source_url,
@@ -417,15 +544,32 @@ impl UpdaterService {
             Err(e) => {
                 record_last_check(
                     &self.base_path,
-                    &LastCheckState {
-                        error: e.to_string(),
-                        ..last_check_now()
-                    },
+                    &failed_check_state(stored.as_ref(), &e.to_string()),
                 )
                 .await;
                 return Err(e);
             }
         };
+
+        // T6-4 版本回滚保护：清单接受前先过单调闸门（记录按通道隔离，
+        // 通过后由 next_highest_seen 决定本次检查写入的新记录值）
+        let channel = channel_key(settings.channel);
+        if let Err(e) = ensure_manifest_not_rollback(
+            stored.as_ref(),
+            channel,
+            &self.current_version,
+            &manifest.version,
+        ) {
+            tracing::warn!("更新检查（手动）：{e}");
+            record_last_check(
+                &self.base_path,
+                &failed_check_state(stored.as_ref(), &e.to_string()),
+            )
+            .await;
+            return Err(e);
+        }
+        let (highest_seen_version, highest_seen_channel) =
+            next_highest_seen(stored.as_ref(), channel, &manifest.version);
 
         let pkg = match check::select_platform(&manifest) {
             Some(p) => p,
@@ -437,6 +581,8 @@ impl UpdaterService {
                     &LastCheckState {
                         latest_version: manifest.version.to_string(),
                         platform_unavailable: true,
+                        highest_seen_version,
+                        highest_seen_channel,
                         ..last_check_now()
                     },
                 )
@@ -476,6 +622,8 @@ impl UpdaterService {
             &LastCheckState {
                 has_update,
                 latest_version: manifest.version.to_string(),
+                highest_seen_version,
+                highest_seen_channel,
                 ..last_check_now()
             },
         )
@@ -597,15 +745,7 @@ impl UpdaterService {
 
     /// 读取上次检查状态（`update/last_check.json`；缺失/损坏返回 `None`）
     pub fn last_check_state(&self) -> Option<LastCheckState> {
-        let path = self.base_path.join(LAST_CHECK_FILE_NAME);
-        let content = std::fs::read_to_string(path).ok()?;
-        match serde_json::from_str(&content) {
-            Ok(state) => Some(state),
-            Err(e) => {
-                tracing::warn!("上次检查状态文件解析失败，忽略: {e}");
-                None
-            }
-        }
+        read_last_check_state_file(&self.base_path)
     }
 
     /// 暂存新二进制并触发助手进程
@@ -1429,6 +1569,13 @@ async fn perform_update_check(
         settings.channel,
     )
     .await?;
+    // T6-4 版本回滚保护：清单接受前先过单调闸门；拒绝时向上返回 Err，
+    // 由调用方写失败态（failed_check_state 保留既有单调记录不抹）
+    let stored = read_last_check_state_file(base_path);
+    let channel = channel_key(settings.channel);
+    ensure_manifest_not_rollback(stored.as_ref(), channel, current_version, &manifest.version)?;
+    let (highest_seen_version, highest_seen_channel) =
+        next_highest_seen(stored.as_ref(), channel, &manifest.version);
     let platform_available = check::select_platform(&manifest).is_some();
     let has_update =
         platform_available && check::compare_versions(current_version, &manifest.version);
@@ -1438,6 +1585,8 @@ async fn perform_update_check(
             has_update,
             latest_version: manifest.version.to_string(),
             platform_unavailable: !platform_available,
+            highest_seen_version,
+            highest_seen_channel,
             ..last_check_now()
         },
     )
@@ -2392,5 +2541,202 @@ mod tests {
             base.path(),
             &current_exe
         ));
+    }
+
+    // ============ T6-4：版本回滚保护（单调闸门与记录维护） ============
+
+    fn v(s: &str) -> Version {
+        Version::parse(s).expect("测试用合法版本号")
+    }
+
+    fn state_with_seen(channel: &str, version: &str) -> LastCheckState {
+        LastCheckState {
+            highest_seen_channel: channel.to_string(),
+            highest_seen_version: version.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// 回滚闸门：清单高于当前但低于已见最高 → 拒绝（攻击者重放旧签名清单的通道）
+    #[test]
+    fn rollback_gate_replays_are_rejected() {
+        let stored = state_with_seen("stable", "5.6.0");
+        // 清单 5.2.0 > 当前 5.0.0 但 < 已见 5.6.0 → 可能驱动降级安装，拒绝
+        assert!(matches!(
+            ensure_manifest_not_rollback(Some(&stored), "stable", &v("5.0.0"), &v("5.2.0")),
+            Err(UpdaterError::VersionRollbackRejected { seen, manifest })
+                if seen == "5.6.0" && manifest == "5.2.0"
+        ));
+    }
+
+    /// 回滚闸门放行四态：等版本幂等、低于当前（不构成动作）、无记录、记录损坏
+    #[test]
+    fn rollback_gate_passes_inert_and_unprotected_cases() {
+        let stored = state_with_seen("stable", "5.6.0");
+        // 等于已见最高（重复检查）→ 放行
+        assert!(
+            ensure_manifest_not_rollback(Some(&stored), "stable", &v("5.0.0"), &v("5.6.0")).is_ok()
+        );
+        // 高于已见最高 → 放行（正常升级）
+        assert!(
+            ensure_manifest_not_rollback(Some(&stored), "stable", &v("5.0.0"), &v("5.7.0")).is_ok()
+        );
+        // 低于当前版本 → 放行（不构成任何可执行动作，compare_versions 已挡住更新）
+        assert!(
+            ensure_manifest_not_rollback(Some(&stored), "stable", &v("5.8.0"), &v("5.2.0")).is_ok()
+        );
+        // 无记录（首次检查）→ 放行
+        assert!(ensure_manifest_not_rollback(None, "stable", &v("5.0.0"), &v("5.2.0")).is_ok());
+        // 记录损坏（版本无法解析）→ 放行（本机状态不在清单攻击面内）
+        let broken = state_with_seen("stable", "not-a-version");
+        assert!(
+            ensure_manifest_not_rollback(Some(&broken), "stable", &v("5.0.0"), &v("5.2.0")).is_ok()
+        );
+    }
+
+    /// 回滚闸门按通道隔离：用户切换更新通道（主动降级）不受其他通道历史压制
+    #[test]
+    fn rollback_gate_is_channel_scoped() {
+        let stored = state_with_seen("prerelease", "5.6.0-beta.2");
+        // 预发布通道见过 5.6.0-beta.2，切到正式版通道后清单 5.4.0 > 当前 → 放行
+        assert!(
+            ensure_manifest_not_rollback(Some(&stored), "stable", &v("5.0.0"), &v("5.4.0")).is_ok()
+        );
+        // 同通道（预发布）内更低版本清单 → 拒绝
+        assert!(matches!(
+            ensure_manifest_not_rollback(
+                Some(&stored),
+                "prerelease",
+                &v("5.0.0"),
+                &v("5.4.0-beta.1")
+            ),
+            Err(UpdaterError::VersionRollbackRejected { .. })
+        ));
+    }
+
+    /// 记录维护：同通道上推、通道切换重建、等版本保持（幂等）
+    #[test]
+    fn next_highest_seen_updates_monotonically() {
+        let stored = state_with_seen("stable", "5.5.0");
+        // 同通道更高 → 上推
+        assert_eq!(
+            next_highest_seen(Some(&stored), "stable", &v("5.6.0")),
+            ("5.6.0".to_owned(), "stable".to_owned())
+        );
+        // 同通道等版本/更低 → 保持
+        assert_eq!(
+            next_highest_seen(Some(&stored), "stable", &v("5.5.0")),
+            ("5.5.0".to_owned(), "stable".to_owned())
+        );
+        assert_eq!(
+            next_highest_seen(Some(&stored), "stable", &v("5.4.0")),
+            ("5.5.0".to_owned(), "stable".to_owned())
+        );
+        // 通道切换 → 以新通道当前清单重建
+        assert_eq!(
+            next_highest_seen(Some(&stored), "prerelease", &v("5.4.0-beta.1")),
+            ("5.4.0-beta.1".to_owned(), "prerelease".to_owned())
+        );
+        // 无记录 → 建立
+        assert_eq!(
+            next_highest_seen(None, "all", &v("5.1.0")),
+            ("5.1.0".to_owned(), "all".to_owned())
+        );
+    }
+
+    /// 失败态保留单调记录：检查失败（含被回滚闸门拒绝）不得抹掉 highest_seen_*
+    #[test]
+    fn failed_check_state_preserves_rollback_memory() {
+        let stored = state_with_seen("stable", "5.6.0");
+        let failed = failed_check_state(Some(&stored), "清单签名校验失败");
+        assert_eq!(failed.highest_seen_version, "5.6.0");
+        assert_eq!(failed.highest_seen_channel, "stable");
+        assert_eq!(failed.error, "清单签名校验失败");
+        // 无既有记录时字段为空（serde default 兼容）
+        let failed = failed_check_state(None, "网络错误");
+        assert_eq!(failed.highest_seen_version, "");
+        assert_eq!(failed.highest_seen_channel, "");
+    }
+
+    /// 通道键与 UpdateChannel 的 serde snake_case 表示一致
+    #[test]
+    fn channel_keys_match_serde_representation() {
+        assert_eq!(channel_key(crate::config::UpdateChannel::Stable), "stable");
+        assert_eq!(
+            channel_key(crate::config::UpdateChannel::Prerelease),
+            "prerelease"
+        );
+        assert_eq!(channel_key(crate::config::UpdateChannel::All), "all");
+        for channel in [
+            crate::config::UpdateChannel::Stable,
+            crate::config::UpdateChannel::Prerelease,
+            crate::config::UpdateChannel::All,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&channel).unwrap().trim_matches('"'),
+                channel_key(channel)
+            );
+        }
+    }
+
+    /// 状态文件兼容：旧格式（无 highest_seen_* 字段）反序列化默认为空
+    #[test]
+    fn last_check_state_legacy_json_defaults() {
+        let legacy = r#"{"last_check_at":"2026-01-01T00:00:00Z","has_update":false}"#;
+        let state: LastCheckState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(state.highest_seen_version, "");
+        assert_eq!(state.highest_seen_channel, "");
+        // 新格式往返
+        let state = state_with_seen("all", "9.9.9");
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: LastCheckState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.highest_seen_version, "9.9.9");
+        assert_eq!(parsed.highest_seen_channel, "all");
+    }
+
+    /// 端到端（回环清单）：重放更低版本清单被单调闸门拒绝，等版本幂等放行
+    #[tokio::test]
+    async fn manual_check_rejects_manifest_version_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _bus) = make_service_with_events(dir.path()).await;
+        let mut service = (*service).clone();
+        service.http_client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        // 第一次检查命中 999.0.0 → 记录 highest_seen=999.0.0/stable
+        let url = spawn_manifest_server(hit_manifest_body()).await;
+        point_release_source(&service, &url).await;
+        service.check_update().await.unwrap().expect("应有新版本");
+        let state = service.last_check_state().expect("应已写入检查记录");
+        assert_eq!(state.highest_seen_version, "999.0.0");
+        assert_eq!(state.highest_seen_channel, "stable");
+
+        // 重放更低版本清单 500.0.0（仍 > 当前版本，会驱动降级安装）→ 拒绝
+        let rollback_body = format!(
+            r#"{{"version":"500.0.0","platforms":{{"{}":{{"url":"https://example.invalid/pkg.zip","sha256":"{}"}}}}}}"#,
+            check::CURRENT_PLATFORM_KEY,
+            "a".repeat(64)
+        );
+        let url = spawn_manifest_server(rollback_body).await;
+        point_release_source(&service, &url).await;
+        let err = service.check_update().await.expect_err("回滚清单应被拒绝");
+        assert!(
+            matches!(err, UpdaterError::VersionRollbackRejected { .. }),
+            "{err}"
+        );
+        // 拒绝后单调记录保留（失败态不抹记忆）
+        let state = service.last_check_state().expect("失败态也应落盘");
+        assert_eq!(state.highest_seen_version, "999.0.0");
+        assert!(!state.error.is_empty());
+
+        // 等版本重复检查（999.0.0 == 已见最高）→ 幂等放行
+        let url = spawn_manifest_server(hit_manifest_body()).await;
+        point_release_source(&service, &url).await;
+        service
+            .check_update()
+            .await
+            .unwrap()
+            .expect("等版本清单应放行");
+        let state = service.last_check_state().unwrap();
+        assert_eq!(state.highest_seen_version, "999.0.0");
     }
 }

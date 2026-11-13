@@ -36,12 +36,20 @@ const RESULT_DIALOG_TIMEOUT_SECS: u64 = 120;
 
 /// campus-auth 更新助手进程
 ///
-/// 两种模式，互斥：
+/// 运行模式，互斥：
 /// - `--apply-update`：等待主进程退出 → 替换 exe → 重启新版本（见 `run_apply_update`）
 /// - `--uninstall`：等待主进程退出 → 删除安装目录（+ 可选保留用户数据）→ 系统提示框
 ///
-/// 合并进同一个 binary 而不是再加一个可执行文件：两者共用"等 PID 退出""路径守卫"
-/// "best-effort 日志"三块逻辑，且发布包少一个文件就少一处需要同步的版本管理。
+/// 发布签名辅助模式（T6-4，离线工具，与更新/卸载流程无关；签名算法与客户端
+/// 校验共用 `updater::signature` 同一套实现）：
+/// - `--gen-signing-key`：生成发布清单签名密钥对（发布方一次性操作）
+/// - `--sign-manifest <清单>`：就地为清单 JSON 注入 signature 字段（私钥取
+///   环境变量 `MANIFEST_SIGNING_KEY`）
+/// - `--verify-manifest <清单>`：用仓内公钥复核清单签名（发布流水线一致性闸门）
+///
+/// 合并进同一个 binary 而不是再加一个可执行文件：更新/卸载共用"等 PID 退出"
+/// "路径守卫""best-effort 日志"三块逻辑；签名辅助复用同一依赖与算法实现，
+/// 发布包少一个文件就少一处需要同步的版本管理。
 #[derive(Parser)]
 #[command(name = "campus-auth-helper", version, about = "Campus-Auth 更新助手")]
 struct HelperCli {
@@ -53,9 +61,42 @@ struct HelperCli {
     #[arg(long, conflicts_with = "apply_update")]
     uninstall: bool,
 
-    /// 主进程 PID（等待其退出后执行替换）
-    #[arg(long)]
-    pid: u32,
+    /// 主进程 PID（等待其退出后执行替换；签名辅助模式无需）
+    #[arg(
+        long,
+        required_unless_present_any = ["gen_signing_key", "sign_manifest", "verify_manifest"]
+    )]
+    pid: Option<u32>,
+
+    /// 生成发布清单签名密钥对：输出私钥（配 GitHub Secret MANIFEST_SIGNING_KEY）
+    /// 与公钥（提交入仓 resources/manifest-pubkey）；与其他模式互斥
+    #[arg(
+        long,
+        conflicts_with_all = ["apply_update", "uninstall", "sign_manifest", "verify_manifest"]
+    )]
+    gen_signing_key: bool,
+
+    /// 就地为清单 JSON 注入 signature 字段（私钥取环境变量
+    /// MANIFEST_SIGNING_KEY）；与其他模式互斥
+    #[arg(
+        long,
+        value_name = "MANIFEST_JSON",
+        conflicts_with_all = ["apply_update", "uninstall", "gen_signing_key", "verify_manifest"]
+    )]
+    sign_manifest: Option<PathBuf>,
+
+    /// 用仓内公钥复核清单签名（发布流水线一致性闸门：私钥与提交入仓的公钥
+    /// 不匹配即失败，防止带病发布）；与其他模式互斥
+    #[arg(
+        long,
+        value_name = "MANIFEST_JSON",
+        conflicts_with_all = ["apply_update", "uninstall", "gen_signing_key", "sign_manifest"]
+    )]
+    verify_manifest: Option<PathBuf>,
+
+    /// 清单签名复核用的公钥文件（默认仓内 resources/manifest-pubkey）
+    #[arg(long, value_name = "PUBKEY_FILE", requires = "verify_manifest")]
+    pubkey_file: Option<PathBuf>,
 
     /// staging 目录路径（可选，默认从 pending.json 读取）
     #[arg(long)]
@@ -163,6 +204,20 @@ impl HelperLog {
 fn main() {
     let cli = HelperCli::parse();
 
+    // 发布签名辅助模式（离线工具，先于更新/卸载分发）
+    if cli.gen_signing_key {
+        run_gen_signing_key();
+        return;
+    }
+    if let Some(path) = cli.sign_manifest.as_deref() {
+        run_sign_manifest(path);
+        return;
+    }
+    if let Some(path) = cli.verify_manifest.as_deref() {
+        run_verify_manifest(path, cli.pubkey_file.as_deref());
+        return;
+    }
+
     if cli.uninstall {
         run_uninstall(&cli);
         return;
@@ -176,8 +231,90 @@ fn main() {
     run_apply_update(&cli);
 }
 
+// ═══ 发布签名辅助模式 ═══
+
+/// 生成发布清单签名密钥对
+///
+/// 私钥输出给维护者配置 GitHub Secret `MANIFEST_SIGNING_KEY`（绝不入仓，
+/// stdout 只显示这一次）；公钥提交入仓 `resources/manifest-pubkey`（release
+/// 构建经 build.rs 编译进二进制，见 `updater::signature` 模块 doc）。
+fn run_gen_signing_key() {
+    let (secret, pubkey) = campus_auth::updater::signature::generate_signing_keypair();
+    println!(
+        "私钥（配置为 GitHub Secret MANIFEST_SIGNING_KEY；仅本次显示，请立即妥善保存，丢失只能换钥重发）:"
+    );
+    println!("{secret}");
+    println!();
+    println!("公钥（base64，写入仓库 resources/manifest-pubkey，随版本提交）:");
+    println!("{pubkey}");
+}
+
+/// 就地为清单 JSON 注入 signature 字段（私钥取环境变量 MANIFEST_SIGNING_KEY）
+fn run_sign_manifest(path: &Path) {
+    let Ok(secret) = std::env::var("MANIFEST_SIGNING_KEY") else {
+        eprintln!("缺少环境变量 MANIFEST_SIGNING_KEY（发布方私钥，base64）");
+        std::process::exit(1);
+    };
+    let document = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("读取清单失败（{}）: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    match campus_auth::updater::signature::sign_manifest_document(&document, &secret) {
+        Ok(signed) => {
+            if let Err(e) = std::fs::write(path, signed) {
+                eprintln!("写回签名清单失败（{}）: {e}", path.display());
+                std::process::exit(1);
+            }
+            println!("已签名并写回 {}", path.display());
+        }
+        Err(e) => {
+            eprintln!("清单签名失败: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// 用公钥文件复核清单签名（发布流水线一致性闸门 / 本地校验）
+///
+/// 公钥默认取仓内 `resources/manifest-pubkey`（`--pubkey-file` 可指定）。
+/// 失败即退出码 1：release 流程中这意味着 Secret 私钥与提交入仓的公钥不匹配，
+/// 必须中止发布。
+fn run_verify_manifest(path: &Path, pubkey_file: Option<&Path>) {
+    let pubkey_path = pubkey_file.unwrap_or_else(|| Path::new("resources/manifest-pubkey"));
+    let document = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("读取清单失败（{}）: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    let pubkey = match std::fs::read_to_string(pubkey_path) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("读取公钥文件失败（{}）: {e}", pubkey_path.display());
+            std::process::exit(1);
+        }
+    };
+    match campus_auth::updater::signature::verify_manifest_document(&document, pubkey.trim()) {
+        Ok(()) => println!("清单签名校验通过（{}）", path.display()),
+        Err(e) => {
+            eprintln!("清单签名校验失败: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// 更新模式主体：等待主进程退出 -> 替换 exe -> 启动新 exe -> 清理
 fn run_apply_update(cli: &HelperCli) {
+    // clap 的 required_unless_present_any 已保证更新/卸载模式携带 --pid；
+    // 此处显式解包保持非 panic 的防御分支
+    let Some(pid) = cli.pid else {
+        eprintln!("更新模式需要 --pid（主进程 PID）");
+        std::process::exit(2);
+    };
     // 0. 计算基准路径并初始化 best-effort 落盘日志
     // （GUI 子系统下 stdout/stderr 不可见，更新失败必须可从 helper.log 诊断）
     let base_path = cli.base_path.clone().unwrap_or_else(|| {
@@ -195,8 +332,8 @@ fn run_apply_update(cli: &HelperCli) {
     let _helper_lock = acquire_helper_lock(&base_path.join("update").join("helper.lock"), &mut log);
 
     // 1. 等待主进程退出
-    log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
-    if !wait_for_process_exit(cli.pid, &mut log) {
+    log.info(&format!("等待主进程 (PID {pid}) 退出..."));
+    if !wait_for_process_exit(pid, &mut log) {
         // 主进程未退出：中止更新，保留 staging 与 pending.json，待主进程下次启动
         // 时由 apply_pending_on_startup 应用（不执行 cleanup，避免摧毁待应用更新）
         std::process::exit(1);
@@ -507,6 +644,12 @@ const UNINSTALL_TEMP_PREFIX: &str = "campus-auth-uninst-";
 /// 一律来自 `campus_auth::uninstall`（**单一事实源**）：界面上列的清单与这里删的东西
 /// 必须逐字对应，两处各写一份必然漂移。
 fn run_uninstall(cli: &HelperCli) {
+    // clap 的 required_unless_present_any 已保证更新/卸载模式携带 --pid；
+    // 此处显式解包保持非 panic 的防御分支
+    let Some(pid) = cli.pid else {
+        eprintln!("卸载模式需要 --pid（主进程 PID）");
+        std::process::exit(2);
+    };
     // 日志必须落在系统临时目录：安装目录（含 logs/）正在被删
     let mut log = HelperLog::open_at(&std::env::temp_dir().join("campus-auth-uninstall.log"));
 
@@ -531,8 +674,8 @@ fn run_uninstall(cli: &HelperCli) {
     }
 
     // 1. 等待主进程退出
-    log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
-    if !wait_for_process_exit(cli.pid, &mut log) {
+    log.info(&format!("等待主进程 (PID {pid}) 退出..."));
+    if !wait_for_process_exit(pid, &mut log) {
         uninstall_abort(
             &mut log,
             "卸载已中止",

@@ -1,7 +1,11 @@
 //! 版本检查：latest.json 拉取 + semver 比较 + 平台选择
 //!
 //! 负责从配置的发布源拉取 `latest.json`，按当前平台（`target_os`/`target_arch`）
-//! 选择下载包，并通过 `semver` 比较判断是否存在可用更新。
+//! 选择下载包，并通过 `semver` 比较判断是否存在可用更新。清单在接受前经过
+//! ed25519 签名严格校验（嵌公钥构建；见 [`super::signature`] 模块 doc）：
+//! 自定清单文件直接校验随文件携带的 `signature` 字段，GitHub Release 路径
+//! 优先使用发布方随发布上传的已签名 `latest.json` 资产，缺失时回退逐资产
+//! 合成清单（合成清单无签名，嵌公钥构建下同样被拒绝）。
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::UpdateChannel;
 use crate::updater::error::UpdaterError;
+use crate::updater::signature;
 
 /// 更新源 URL 白名单：`https` 任意主机放行（拒绝 userinfo）；`http` 仅精确回环主机
 ///
@@ -173,6 +178,9 @@ pub(crate) async fn fetch_manifest(
 
     // 格式 1：自定 latest.json（含 version 字段）
     if body.get("version").is_some() {
+        // T6-4：清单接受前的签名严格校验（嵌公钥构建；未嵌公钥构建为直通）。
+        // 校验先于结构解析：真实性优先，损坏的伪造清单不进入后续任何分支
+        signature::verify_manifest_value(&body)?;
         let manifest: ReleaseManifest =
             serde_json::from_value(body).map_err(UpdaterError::ManifestParseFailed)?;
         // UPD-5：自定义清单与 GitHub 路径同口径——命中平台包必须携带非空
@@ -230,6 +238,19 @@ async fn manifest_from_github_release(
         .flatten()
         .cloned()
         .collect();
+    // T6-4：优先使用发布方随发布上传的已签名清单 latest.json（对完整清单的
+    // 整体签名，含全平台包信息）。取不到可用签名文件时回退逐资产合成清单：
+    // 合成清单无签名，嵌公钥构建下会在统一校验点被拒绝（fail-closed），未嵌
+    // 公钥构建保持现状语义。签名校验失败（文件存在但签名不匹配）不回退——
+    // 那是篡改信号，直接拒绝整个清单。
+    if let Some(url) = latest_json_asset_url(&assets) {
+        match fetch_latest_json_manifest(client, &url).await {
+            Ok(manifest) => return Ok(manifest),
+            Err(e) => {
+                tracing::warn!("随发布上传的已签名清单不可用（{e}），回退逐资产合成清单")
+            }
+        }
+    }
     let mut platforms: HashMap<String, PlatformPackage> = HashMap::new();
     // 仅拉取当前平台的校验信息：检查失败一条日志足够，且避免多平台全拉的刷屏与
     // 额外 sha256 伴随文件请求（旧逻辑遍历全部平台，每平台还重试一次）。
@@ -263,6 +284,73 @@ async fn manifest_from_github_release(
         changelog,
         platforms,
     })
+}
+
+/// 从发布资产中定位发布方签名的清单文件 `latest.json`（T6-4）
+///
+/// 文件名精确匹配（忽略大小写）；返回其下载 URL。URL 未通过更新源白名单时
+/// 按缺失处理（与 `.sha256` 伴随文件同口径：URL 完全由清单侧资产清单控制，
+/// 不通过即不追）。
+fn latest_json_asset_url(assets: &[serde_json::Value]) -> Option<String> {
+    let asset = assets.iter().find(|a| {
+        a.get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| n.eq_ignore_ascii_case("latest.json"))
+            .unwrap_or(false)
+    })?;
+    let url = asset
+        .get("browser_download_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if url.is_empty() {
+        return None;
+    }
+    if !is_allowed_update_url(url) {
+        // 只记 host：该 URL 完全由清单控制，可能携带 query/userinfo，勿整串进日志
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        tracing::warn!(host, "latest.json 资产 URL 未通过更新源白名单，按缺失处理");
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// 拉取并校验发布方签名的清单文件 `latest.json`（T6-4）
+///
+/// 链路：下载 → ed25519 签名严格校验（嵌公钥构建；未嵌公钥构建为直通）→
+/// 反序列化为 [`ReleaseManifest`] → 当前平台包存在性校验（缺失按
+/// [`UpdaterError::PlatformNotAvailable`] 报告，保持既有候选回退语义：
+/// 该候选被视为"发布缺当前平台资产"，通道枚举时继续尝试更低候选）。
+async fn fetch_latest_json_manifest(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<ReleaseManifest, UpdaterError> {
+    let response = client
+        .get(url)
+        .timeout(MANIFEST_FETCH_TIMEOUT)
+        .header("Accept", "application/json")
+        .header("User-Agent", "campus-auth-updater")
+        .send()
+        .await
+        .map_err(UpdaterError::ManifestFetchFailed)?;
+    let response = response
+        .error_for_status()
+        .map_err(UpdaterError::ManifestFetchFailed)?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(UpdaterError::ManifestFetchFailed)?;
+    signature::verify_manifest_value(&body)?;
+    let manifest: ReleaseManifest =
+        serde_json::from_value(body).map_err(UpdaterError::ManifestParseFailed)?;
+    if !manifest.platforms.contains_key(CURRENT_PLATFORM_KEY) {
+        return Err(UpdaterError::PlatformNotAvailable(
+            "latest.json 清单中无当前平台的下载包".into(),
+        ));
+    }
+    Ok(manifest)
 }
 
 /// 从发布源 URL 推导 GitHub Releases 列表 API 地址（通道枚举用）
@@ -1190,6 +1278,98 @@ mod tests {
         assert!(
             sha.is_empty(),
             "非白名单伴随 URL 应按缺失返回空串，实际 {sha:?}"
+        );
+    }
+
+    // ============ T6-4：发布方签名清单（latest.json 资产） ============
+
+    /// latest.json 资产定位：精确名（忽略大小写）命中，伴随文件/白名单外/缺 URL 按缺失处理
+    #[test]
+    fn test_latest_json_asset_url() {
+        let mk =
+            |name: &str, url: &str| serde_json::json!({"name": name, "browser_download_url": url});
+        // 精确命中（多资产中找出清单文件）
+        assert_eq!(
+            latest_json_asset_url(&[
+                mk("pkg.zip", "https://x/pkg.zip"),
+                mk("latest.json", "https://x/latest.json"),
+            ])
+            .as_deref(),
+            Some("https://x/latest.json")
+        );
+        // 大小写不敏感
+        assert_eq!(
+            latest_json_asset_url(&[mk("Latest.JSON", "https://x/latest.json")]).as_deref(),
+            Some("https://x/latest.json")
+        );
+        // `.sha256` 伴随文件不是清单文件本身
+        assert_eq!(
+            latest_json_asset_url(&[mk("latest.json.sha256", "https://x/latest.json.sha256")]),
+            None
+        );
+        // URL 未通过白名单（非回环 http）→ 按缺失处理
+        assert_eq!(
+            latest_json_asset_url(&[mk("latest.json", "http://example.com/latest.json")]),
+            None
+        );
+        // 缺 URL 字段 → 按缺失处理
+        assert_eq!(
+            latest_json_asset_url(&[serde_json::json!({"name": "latest.json"})]),
+            None
+        );
+        assert_eq!(latest_json_asset_url(&[]), None);
+    }
+
+    /// GitHub Release 路径优先使用已签名 latest.json 资产：
+    /// 版本与平台信息来自资产文件而非 release tag / 逐资产合成
+    #[tokio::test]
+    async fn manifest_from_github_release_prefers_signed_latest_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (secret_b64, _pubkey_b64) = signature::generate_signing_keypair();
+        // 清单版本 3.1.4 与 release tag v3.0.0 不同：命中即证明内容确实来自资产文件
+        let manifest_body = format!(
+            r#"{{"version":"3.1.4","platforms":{{"{}":{{"url":"https://example.invalid/pkg.zip","sha256":"{}"}}}}}}"#,
+            CURRENT_PLATFORM_KEY,
+            "a".repeat(64)
+        );
+        let signed = signature::sign_manifest_document(&manifest_body, &secret_b64).unwrap();
+        let latest_value: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/repo/release",
+                route_get(move || async move {
+                    axum::Json(serde_json::json!({
+                        "tag_name": "v3.0.0",
+                        "prerelease": false,
+                        "draft": false,
+                        "assets": [
+                            {
+                                "name": "latest.json",
+                                "browser_download_url": format!("http://{addr}/latest.json"),
+                            },
+                            {"name": "app.zip", "browser_download_url": "https://example.invalid/app.zip"},
+                        ],
+                    }))
+                }),
+            )
+            .route(
+                "/latest.json",
+                route_get(move || {
+                    let body = latest_value.clone();
+                    async move { axum::Json(body) }
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let manifest = fetch_manifest(&loopback_client(), &format!("http://{addr}/repo/release"))
+            .await
+            .expect("发布附带已签名清单时应直接使用");
+        assert_eq!(
+            manifest.version,
+            Version::parse("3.1.4").unwrap(),
+            "版本应来自已签名 latest.json 资产而非 release tag"
         );
     }
 }
