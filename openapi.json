@@ -450,6 +450,48 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_DiagnosticReportData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/diagnostics/run 响应载荷（DiagnosticReport 线格式镜像）",
+      "properties": {
+       "checks": {
+        "description": "逐项检查结果（顺序固定：interfaces → gateway → dns → portal → history）",
+        "items": {
+         "$ref": "#/components/schemas/DiagnosticCheckData"
+        },
+        "type": "array"
+       },
+       "conclusion": {
+        "description": "总结论一句话（面向用户直接展示）",
+        "type": "string"
+       },
+       "total_ms": {
+        "description": "整体耗时（毫秒）",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "verdict": {
+        "description": "总结论：healthy / degraded / faulty",
+        "type": "string"
+       }
+      },
+      "required": [
+       "checks",
+       "verdict",
+       "conclusion",
+       "total_ms"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_HealthData": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -1060,6 +1102,31 @@
        "scheduler_task_count",
        "probe_total",
        "login_total"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_NotificationTestData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/notification/test 响应载荷：逐通道测试回执",
+      "properties": {
+       "results": {
+        "description": "逐通道发送结果（顺序与请求通道顺序一致）",
+        "items": {
+         "$ref": "#/components/schemas/NotificationTestChannelResult"
+        },
+        "type": "array"
+       }
+      },
+      "required": [
+       "results"
       ],
       "type": "object"
      }
@@ -2250,6 +2317,84 @@
      "script"
     ],
     "type": "object"
+   },
+   "DiagnosticCheckData": {
+    "description": "单项检查结果（DiagnosticCheck 线格式镜像）",
+    "properties": {
+     "details": {
+      "description": "结构化细节（已脱敏，随检查项而异）",
+      "type": "object"
+     },
+     "elapsed_ms": {
+      "description": "耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "key": {
+      "description": "检查项标识（机器可读）：interfaces / gateway / dns / portal / history",
+      "type": "string"
+     },
+     "name": {
+      "description": "检查项中文名（前端直接展示）",
+      "type": "string"
+     },
+     "status": {
+      "description": "单项结论：ok / warn / fail / skip",
+      "type": "string"
+     },
+     "summary": {
+      "description": "一句话摘要",
+      "type": "string"
+     }
+    },
+    "required": [
+     "key",
+     "name",
+     "status",
+     "elapsed_ms",
+     "summary",
+     "details"
+    ],
+    "type": "object"
+   },
+   "DiagnosticReportData": {
+    "description": "POST /api/diagnostics/run 响应载荷（DiagnosticReport 线格式镜像）",
+    "properties": {
+     "checks": {
+      "description": "逐项检查结果（顺序固定：interfaces → gateway → dns → portal → history）",
+      "items": {
+       "$ref": "#/components/schemas/DiagnosticCheckData"
+      },
+      "type": "array"
+     },
+     "conclusion": {
+      "description": "总结论一句话（面向用户直接展示）",
+      "type": "string"
+     },
+     "total_ms": {
+      "description": "整体耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "verdict": {
+      "description": "总结论：healthy / degraded / faulty",
+      "type": "string"
+     }
+    },
+    "required": [
+     "checks",
+     "verdict",
+     "conclusion",
+     "total_ms"
+    ],
+    "type": "object"
+   },
+   "DiagnosticsBundleBody": {
+    "description": "GET /api/diagnostics/bundle 200 响应体 schema 载体\n\nwire 上是 zip 字节流（`application/zip` + `attachment` 下载头），不是\nJSON 包裹；本类型仅用于把 OpenAPI schema 声明为\n`{\"type\": \"string\", \"format\": \"binary\"}`，不参与序列化。",
+    "format": "binary",
+    "type": "string"
    },
    "EnvProgress": {
     "description": "安装进度（对齐 `crate::status::snapshot::InstallProgress` 的线格式）",
@@ -3529,6 +3674,77 @@
      "ipv4",
      "mac",
      "dns_servers"
+    ],
+    "type": "object"
+   },
+   "NotificationTestBody": {
+    "description": "POST /api/notification/test 请求体（schema 镜像，handler 按 Value 解析）\n\n`channels`（草稿通道配置，优先）与 `channel_id`（已保存通道）二选一，\n两者均缺省时 400。",
+    "properties": {
+     "channel_id": {
+      "description": "已保存通道唯一 id（`channels` 缺省时按 id 从已保存设置查找，不存在为\n404；空串按未提供处理）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "channels": {
+      "description": "待测试的草稿通道配置数组（1..=3 个；数组项为 serde tagged 对象，`type`\n为判别字段：webhook / bark / serverchan / telegram / os，字段级形状同\nGET /api/config 的 `notification.channels` 数组项——契约快照在\n`crate::config::schema` 且未接入 ToSchema 体系，故以对象数组标注）",
+      "type": "object"
+     }
+    },
+    "required": [
+     "channels"
+    ],
+    "type": "object"
+   },
+   "NotificationTestChannelResult": {
+    "description": "单通道测试发送回执（不回显任何凭据字段，错误摘要经脱敏）",
+    "properties": {
+     "error": {
+      "description": "失败原因摘要（已脱敏：URL 去 query/userinfo 等）；成功时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "id": {
+      "description": "通道唯一 id（草稿通道取配置内 id，已保存通道为其保存 id）",
+      "type": "string"
+     },
+     "name": {
+      "description": "通道显示名（`name` 留空时回退类型中文名，如「Server酱」）",
+      "type": "string"
+     },
+     "success": {
+      "description": "本通道是否发送成功",
+      "type": "boolean"
+     },
+     "type": {
+      "description": "通道类型：webhook / bark / serverchan / telegram / os",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "type",
+     "success"
+    ],
+    "type": "object"
+   },
+   "NotificationTestData": {
+    "description": "POST /api/notification/test 响应载荷：逐通道测试回执",
+    "properties": {
+     "results": {
+      "description": "逐通道发送结果（顺序与请求通道顺序一致）",
+      "items": {
+       "$ref": "#/components/schemas/NotificationTestChannelResult"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "results"
     ],
     "type": "object"
    },
@@ -6553,59 +6769,66 @@
   },
   "/api/diagnostics/bundle": {
    "get": {
-    "operationId": "get___api_diagnostics_bundle",
+    "description": "包内容与信任边界见 `monitor::diagnostics::build_diagnostics_bundle`：\nmanifest + 深度脱敏配置快照 + 事件流 JSONL（30 天）+ 运行日志（7 天）+\n环境观测文本，白名单式收集、总量 20MB 软上限。收集为阻塞 I/O，整体放\nspawn_blocking；分项失败写 manifest 说明而非整包报错。",
+    "operationId": "get_api_diagnostics_bundle",
     "responses": {
      "200": {
       "content": {
        "application/zip": {
         "schema": {
-         "format": "binary",
-         "type": "string"
+         "$ref": "#/components/schemas/DiagnosticsBundleBody"
         }
        }
       },
-      "description": "OK"
+      "description": "诊断包 zip 附件（Content-Disposition 指定下载文件名 campus-auth-diagnostics-<时间戳>.zip）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "诊断包收集失败（阻塞任务异常或打包错误）"
      }
-    }
+    },
+    "summary": "GET /api/diagnostics/bundle — 一键导出诊断包（zip 附件下载）",
+    "tags": [
+     "diagnostics"
+    ]
    }
   },
   "/api/diagnostics/run": {
    "post": {
-    "operationId": "post___api_diagnostics_run",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "description": "五项检查并发执行（本机网卡 / 默认网关 / DNS / 认证门户 / 近期登录失败\n归因），整体受 15s 总限时约束；结果已脱敏（不含凭据 / token / 带查询串的\nURL），失败项以结构化明细返回而非 HTTP 错误——诊断失败是「数据」不是\n「请求出错」。",
+    "operationId": "post_api_diagnostics_run",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_DiagnosticReportData"
+        }
        }
       },
-      "description": "OK"
+      "description": "诊断报告（单项 fail/warn 以结构化 details 返回，不改变 HTTP 状态码）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "报告序列化失败"
      }
-    }
+    },
+    "summary": "POST /api/diagnostics/run — 一键网络诊断",
+    "tags": [
+     "diagnostics"
+    ]
    }
   },
   "/api/docs/http-login-guide": {
@@ -7471,49 +7694,55 @@
   },
   "/api/notification/test": {
    "post": {
-    "operationId": "post___api_notification_test",
+    "description": "测试发送不受推送总开关（`notification.enabled`）限制——用户在开启总开关\n前就要能验证通道；单次最多 3 个通道、单通道超时截断到 15s（快速反馈）。",
+    "operationId": "post_api_notification_test",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/NotificationTestBody"
+       }
       }
      },
+     "description": "草稿通道配置数组（channels，优先）或已保存通道 id（channel_id）二选一",
      "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_NotificationTestData"
+        }
        }
       },
-      "description": "OK"
+      "description": "逐通道测试回执（success=false 的通道 error 携带脱敏摘要）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "请求体不是对象 / 缺少二选一字段 / channels 为空或超过 3 个 / 通道结构非法（如 URL 非 http/https）"
      },
      "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Not Found"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "channel_id 指定的已保存通道不存在"
      }
-    }
+    },
+    "summary": "POST /api/notification/test — 用测试消息实际发送一次，返回逐通道结果",
+    "tags": [
+     "notification"
+    ]
    }
   },
   "/api/ocr/install": {

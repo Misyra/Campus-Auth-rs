@@ -14,17 +14,70 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use utoipa::ToSchema;
 
 use crate::config::{ConfigApi, NotificationChannel, NotificationSettings};
 use crate::notification::{sender, template};
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 
 /// 单次测试请求的通道数上限（通道间串行发送，限制端点最坏耗时）
 const TEST_MAX_CHANNELS: usize = 3;
 /// 测试发送的单通道超时上限（秒）：真实发送用通道配置值（上限 60s），
 /// 测试要求快速反馈，超出部分截断——超时在测试里同样判失败
 const TEST_TIMEOUT_CAP_SECONDS: u32 = 15;
+
+// ---- 契约 DTO（T5-1 收口 notification 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。请求体 handler 仍按
+// `Value` 解析——「二选一字段 + 逐字段中文 400 错误」的统一错误信封语义
+// 依赖手工解析（typed 提取会把形状错误变成 422 文本拒绝），schema 以镜像
+// DTO 声明；响应回执是 handler 内 `json!` 组装字段的线格式镜像。
+
+/// POST /api/notification/test 请求体（schema 镜像，handler 按 Value 解析）
+///
+/// `channels`（草稿通道配置，优先）与 `channel_id`（已保存通道）二选一，
+/// 两者均缺省时 400。
+#[derive(Debug, Deserialize, ToSchema)]
+// 纯 schema 载体：字段值仅被 utoipa 生成时引用（handler 保持 Value 解析以
+// 维持统一错误信封），无运行时读点，dead_code 属预期
+#[allow(dead_code)]
+pub struct NotificationTestBody {
+    /// 待测试的草稿通道配置数组（1..=3 个；数组项为 serde tagged 对象，`type`
+    /// 为判别字段：webhook / bark / serverchan / telegram / os，字段级形状同
+    /// GET /api/config 的 `notification.channels` 数组项——契约快照在
+    /// `crate::config::schema` 且未接入 ToSchema 体系，故以对象数组标注）
+    #[schema(value_type = Array<Object>)]
+    pub channels: Option<Vec<serde_json::Value>>,
+    /// 已保存通道唯一 id（`channels` 缺省时按 id 从已保存设置查找，不存在为
+    /// 404；空串按未提供处理）
+    pub channel_id: Option<String>,
+}
+
+/// POST /api/notification/test 响应载荷：逐通道测试回执
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NotificationTestData {
+    /// 逐通道发送结果（顺序与请求通道顺序一致）
+    pub results: Vec<NotificationTestChannelResult>,
+}
+
+/// 单通道测试发送回执（不回显任何凭据字段，错误摘要经脱敏）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NotificationTestChannelResult {
+    /// 通道唯一 id（草稿通道取配置内 id，已保存通道为其保存 id）
+    pub id: String,
+    /// 通道显示名（`name` 留空时回退类型中文名，如「Server酱」）
+    pub name: String,
+    /// 通道类型：webhook / bark / serverchan / telegram / os
+    #[serde(rename = "type")]
+    pub channel_kind: String,
+    /// 本通道是否发送成功
+    pub success: bool,
+    /// 失败原因摘要（已脱敏：URL 去 query/userinfo 等）；成功时为 null
+    pub error: Option<String>,
+}
 
 /// 解析测试请求：`channels`（草稿配置，优先）或 `channel_id`（已保存通道）二选一
 async fn parse_test_body(
@@ -77,6 +130,24 @@ async fn parse_test_body(
 }
 
 /// POST /api/notification/test — 用测试消息实际发送一次，返回逐通道结果
+///
+/// 测试发送不受推送总开关（`notification.enabled`）限制——用户在开启总开关
+/// 前就要能验证通道；单次最多 3 个通道、单通道超时截断到 15s（快速反馈）。
+#[utoipa::path(
+    post,
+    path = "/api/notification/test",
+    operation_id = "post_api_notification_test",
+    tag = "notification",
+    request_body(
+        content = NotificationTestBody,
+        description = "草稿通道配置数组（channels，优先）或已保存通道 id（channel_id）二选一",
+    ),
+    responses(
+        (status = 200, description = "逐通道测试回执（success=false 的通道 error 携带脱敏摘要）", body = DataEnvelope<NotificationTestData>),
+        (status = 400, description = "请求体不是对象 / 缺少二选一字段 / channels 为空或超过 3 个 / 通道结构非法（如 URL 非 http/https）", body = ErrorResponse),
+        (status = 404, description = "channel_id 指定的已保存通道不存在", body = ErrorResponse),
+    )
+)]
 pub async fn test_notification(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<Value>,

@@ -11,7 +11,9 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
+use serde::Serialize;
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::config::ConfigApi;
 use crate::environment::EnvironmentApi;
@@ -20,6 +22,57 @@ use crate::monitor::diagnostics::{self, DiagnosticInputs};
 use crate::network::egress::PreparedEgress;
 use crate::utils::metrics::Metrics;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1 收口 diagnostics 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。诊断报告是
+// `crate::monitor::diagnostics::DiagnosticReport`（Serialize-only 类型）的
+// 线格式镜像，handler 仍走 `data(serde_json::to_value(..))` 不改返回类型；
+// bundle 为 zip 二进制附件响应（范式同 background 域）。
+
+/// POST /api/diagnostics/run 响应载荷（DiagnosticReport 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticReportData {
+    /// 逐项检查结果（顺序固定：interfaces → gateway → dns → portal → history）
+    pub checks: Vec<DiagnosticCheckData>,
+    /// 总结论：healthy / degraded / faulty
+    pub verdict: String,
+    /// 总结论一句话（面向用户直接展示）
+    pub conclusion: String,
+    /// 整体耗时（毫秒）
+    pub total_ms: u64,
+}
+
+/// 单项检查结果（DiagnosticCheck 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticCheckData {
+    /// 检查项标识（机器可读）：interfaces / gateway / dns / portal / history
+    pub key: String,
+    /// 检查项中文名（前端直接展示）
+    pub name: String,
+    /// 单项结论：ok / warn / fail / skip
+    pub status: String,
+    /// 耗时（毫秒）
+    pub elapsed_ms: u64,
+    /// 一句话摘要
+    pub summary: String,
+    /// 结构化细节（已脱敏，随检查项而异）
+    #[schema(value_type = Object)]
+    pub details: serde_json::Value,
+}
+
+/// GET /api/diagnostics/bundle 200 响应体 schema 载体
+///
+/// wire 上是 zip 字节流（`application/zip` + `attachment` 下载头），不是
+/// JSON 包裹；本类型仅用于把 OpenAPI schema 声明为
+/// `{"type": "string", "format": "binary"}`，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：仅在 OpenAPI 生成时被 utoipa 引用，字段值不参与任何
+// 运行时路径（handler 直接下发字节流），dead_code 属预期
+#[allow(dead_code)]
+pub struct DiagnosticsBundleBody(Vec<u8>);
 
 /// POST /api/diagnostics/run — 一键网络诊断
 ///
@@ -27,6 +80,16 @@ use crate::web::error::{ApiError, data};
 /// 归因），整体受 15s 总限时约束；结果已脱敏（不含凭据 / token / 带查询串的
 /// URL），失败项以结构化明细返回而非 HTTP 错误——诊断失败是「数据」不是
 /// 「请求出错」。
+#[utoipa::path(
+    post,
+    path = "/api/diagnostics/run",
+    operation_id = "post_api_diagnostics_run",
+    tag = "diagnostics",
+    responses(
+        (status = 200, description = "诊断报告（单项 fail/warn 以结构化 details 返回，不改变 HTTP 状态码）", body = DataEnvelope<DiagnosticReportData>),
+        (status = 500, description = "报告序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn run_diagnostics(
     State(config): State<Arc<dyn ConfigApi>>,
     State(history): State<Arc<dyn HistoryStore>>,
@@ -73,6 +136,18 @@ pub async fn run_diagnostics(
 /// manifest + 深度脱敏配置快照 + 事件流 JSONL（30 天）+ 运行日志（7 天）+
 /// 环境观测文本，白名单式收集、总量 20MB 软上限。收集为阻塞 I/O，整体放
 /// spawn_blocking；分项失败写 manifest 说明而非整包报错。
+#[utoipa::path(
+    get,
+    path = "/api/diagnostics/bundle",
+    operation_id = "get_api_diagnostics_bundle",
+    tag = "diagnostics",
+    responses(
+        (status = 200, description = "诊断包 zip 附件（Content-Disposition 指定下载文件名 campus-auth-diagnostics-<时间戳>.zip）",
+            content((DiagnosticsBundleBody = "application/zip")),
+        ),
+        (status = 500, description = "诊断包收集失败（阻塞任务异常或打包错误）", body = ErrorResponse),
+    )
+)]
 pub async fn export_bundle(
     State(config): State<Arc<dyn ConfigApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,

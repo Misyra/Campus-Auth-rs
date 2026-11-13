@@ -9,6 +9,11 @@
 //! 3. [`merged_openapi_json`]：生成管线——utoipa 生成 spec 与手写 baseline
 //!    （根目录 `openapi.json` 的未注解域条目）按路径合并，产出最终文档。
 //!
+//! T5-1 挂载进度：system 样板 + T5-1a 三域 + T5-1b 五域 + 批三九域 +
+//! T5-1 收口 notification/diagnostics 两域均已接入生成源；system 域尚有
+//! 日志导出 / 更新 / 浏览器列表等零散 handler 与 events、browsers 等
+//! 维持手写条目。
+//!
 //! 过渡期共存策略：**已注解域的路径条目以生成源为准**（整体替换手写条目），
 //! 其余域维持手写条目；后续批次逐域补 `#[utoipa::path]` 注解，全量切换后
 //! 手写 baseline 退役、本函数退化为纯生成。根目录 `openapi.json` 的重写由
@@ -68,9 +73,9 @@ pub mod schemas {
 /// `info`/`servers` 由本骨架权威持有；`paths` 随域批次逐个挂载
 /// `#[utoipa::path]` 注解处理器（已挂载：system 样板、config/profiles/login
 /// （T5-1a）、tasks/http_tasks/scheduler/scripts/repo（T5-1b）、批三九域
-/// monitor/debug/history/uninstall/autostart/ocr/ai/background/tools，
-/// 见 `routes` 各文件注解；diagnostics/notification/auth/browsers 等剩余域
-/// 随后续批次接入）。
+/// monitor/debug/history/uninstall/autostart/ocr/ai/background/tools、
+/// T5-1 收口 notification/diagnostics，见 `routes` 各文件注解；
+/// events/browsers 等剩余域与 system 域零散 handler 随后续批次接入）。
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -199,6 +204,11 @@ pub mod schemas {
         crate::web::routes::background::delete_background,
         // ---- tools 域（批三）----
         crate::web::routes::tools::task_recorder,
+        // ---- notification 域（T5-1 收口）----
+        crate::web::routes::notification::test_notification,
+        // ---- diagnostics 域（T5-1 收口）----
+        crate::web::routes::diagnostics::run_diagnostics,
+        crate::web::routes::diagnostics::export_bundle,
     ),
     components(schemas(
         schemas::ErrorDetail,
@@ -368,6 +378,18 @@ pub mod schemas {
         crate::web::routes::background::BackgroundUploadData,
         crate::web::routes::background::BackgroundFetchBody,
         // ---- tools 域（批三；200 为 application/javascript 文本原文，无本地 DTO）----
+        // ---- notification 域（T5-1 收口；通道配置草稿数组项为 config 持久化树
+        //      形状（serde tagged），未接入 ToSchema 体系，以对象数组标注）----
+        schemas::DataEnvelope<crate::web::routes::notification::NotificationTestData>,
+        crate::web::routes::notification::NotificationTestData,
+        crate::web::routes::notification::NotificationTestChannelResult,
+        crate::web::routes::notification::NotificationTestBody,
+        // ---- diagnostics 域（T5-1 收口；报告为 DiagnosticReport 线格式镜像，
+        //      bundle 为 zip 二进制附件）----
+        schemas::DataEnvelope<crate::web::routes::diagnostics::DiagnosticReportData>,
+        crate::web::routes::diagnostics::DiagnosticReportData,
+        crate::web::routes::diagnostics::DiagnosticCheckData,
+        crate::web::routes::diagnostics::DiagnosticsBundleBody,
     )),
 )]
 pub struct ApiDoc;
