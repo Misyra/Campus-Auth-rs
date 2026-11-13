@@ -4,6 +4,7 @@
 
 pub mod archive_guard;
 pub mod io;
+pub mod io_human;
 pub mod lock;
 pub mod metrics;
 pub mod paths;

@@ -2706,21 +2706,22 @@ mod tests {
     #[test]
     fn test_io_kind_label_covers_common_file_kinds() {
         use std::io::ErrorKind;
+        // io_kind_label 已下沉至 utils::io_human（T9-1），标签全集在此钉住
         assert_eq!(
-            crate::tasks::io_kind_label(ErrorKind::NotFound),
+            crate::utils::io_human::io_kind_label(ErrorKind::NotFound),
             "文件或目录不存在"
         );
         assert_eq!(
-            crate::tasks::io_kind_label(ErrorKind::PermissionDenied),
+            crate::utils::io_human::io_kind_label(ErrorKind::PermissionDenied),
             "没有访问权限"
         );
         assert_eq!(
-            crate::tasks::io_kind_label(ErrorKind::IsADirectory),
+            crate::utils::io_human::io_kind_label(ErrorKind::IsADirectory),
             "目标是目录而非文件"
         );
         // 未逐一列出的类别走兜底
         assert_eq!(
-            crate::tasks::io_kind_label(ErrorKind::Other),
+            crate::utils::io_human::io_kind_label(ErrorKind::Other),
             "系统 IO 异常"
         );
     }

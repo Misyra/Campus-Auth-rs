@@ -16,58 +16,11 @@ pub use executor::{TaskExecutor, TaskResult};
 pub use loader::{DEFAULT_TASK_ID, OrderData, TaskDetail, TaskManager, TaskSummary};
 pub use models::*;
 
-use std::path::Path;
-
 use thiserror::Error;
 
-/// IO 失败类别 → 中文短语（供 [`io_error_at`] / [`io_error`] 拼接用户可读文案）
-///
-/// 只覆盖文件/进程场景会真实出现的类别，未列出的走兜底「系统 IO 异常」；原始
-/// 错误文本始终追加在文案末尾，按 `ErrorKind` 编程分支的调用方不受影响。
-fn io_kind_label(kind: std::io::ErrorKind) -> &'static str {
-    use std::io::ErrorKind as K;
-    match kind {
-        K::NotFound => "文件或目录不存在",
-        K::PermissionDenied => "没有访问权限",
-        K::AlreadyExists => "目标已存在",
-        K::InvalidInput => "路径或参数不合法",
-        K::InvalidData => "数据格式不合法",
-        K::UnexpectedEof => "数据意外截断",
-        K::WriteZero => "写入失败",
-        K::Interrupted => "操作被中断",
-        K::TimedOut => "操作超时",
-        K::StorageFull => "磁盘空间不足",
-        K::ReadOnlyFilesystem => "存储介质只读",
-        K::IsADirectory => "目标是目录而非文件",
-        K::NotADirectory => "路径中混有非目录项",
-        K::DirectoryNotEmpty => "目录非空",
-        _ => "系统 IO 异常",
-    }
-}
-
-/// 把底层 IO 错误包装成用户可读文案：动作 + 路径 + 失败类别 + 原始错误
-///
-/// `ErrorKind` 原样保留（按类别分支的代码不受影响），原始错误文本追加在末尾
-/// （日志/调试链路仍能拿到 `std::io` 原文）。所有 `TaskError::IoError` 的构造点
-/// 必须经本函数或 [`io_error`]，不得把裸 `std::io` 原文直接抛给用户。
-pub(crate) fn io_error_at(action: &str, path: &Path, e: std::io::Error) -> std::io::Error {
-    std::io::Error::new(
-        e.kind(),
-        format!(
-            "{action}失败（{}）：{}（{e}）",
-            path.display(),
-            io_kind_label(e.kind())
-        ),
-    )
-}
-
-/// 同 [`io_error_at`]，用于无固定路径的场景（临时文件、子进程管道等）
-pub(crate) fn io_error(action: &str, e: std::io::Error) -> std::io::Error {
-    std::io::Error::new(
-        e.kind(),
-        format!("{action}失败：{}（{e}）", io_kind_label(e.kind())),
-    )
-}
+// IO 人话化文案助手已下沉至 `utils::io_human`（T9-1 全域错误文案统一），此处
+// 转出保持 `crate::tasks::io_error_at` 等既有调用点不变。
+pub(crate) use crate::utils::io_human::{io_error, io_error_at};
 
 /// 脚本执行能力抽象（登录脚本渠道注入用）
 ///
