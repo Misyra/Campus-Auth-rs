@@ -12,6 +12,8 @@ use serde::Serialize;
 use tokio::net::TcpStream;
 use tracing::instrument;
 
+use crate::utils::io_human::io_error;
+
 /// 解析 "host:port" 为 (host, port)；非法格式返回 None
 ///
 /// 裸 IPv6 字面量（未加方括号、含 ≥2 个冒号）无法与 `host:port` 区分，
@@ -121,7 +123,7 @@ async fn tcp_connect(
         Ok(Err(e)) => Err(e),
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            "tcp connect timeout",
+            "TCP 连接超时",
         )),
     }
 }
@@ -158,7 +160,8 @@ impl TcpProbe {
                         Some((host, port)) => {
                             match tcp_connect(&host, port, timeout, egress.as_deref()).await {
                                 Ok(()) => (true, None),
-                                Err(e) => (false, Some(e.to_string())),
+                                // 人话化：动作 + 失败类别 + std::io 原文（排障仍可比对）
+                                Err(e) => (false, Some(io_error("TCP 连接", e).to_string())),
                             }
                         }
                         None => (false, Some("非法地址格式".to_string())),
@@ -266,7 +269,14 @@ async fn probe_http_one(
         }
         Err(e) => (
             ProbeOutcome::Fail,
-            PerProbeDetail::new(url.to_string(), false, start, None, Some(e.to_string())),
+            // 人话化：中文动作 + reqwest 原文（不吞掉原始错误信息）
+            PerProbeDetail::new(
+                url.to_string(),
+                false,
+                start,
+                None,
+                Some(format!("请求探测目标失败：{e}")),
+            ),
         ),
     }
 }
@@ -370,7 +380,14 @@ async fn probe_url_one(
         }
         Err(e) => (
             ProbeOutcome::Fail,
-            PerProbeDetail::new(url.to_string(), false, start, None, Some(e.to_string())),
+            // 人话化：中文动作 + reqwest 原文（不吞掉原始错误信息）
+            PerProbeDetail::new(
+                url.to_string(),
+                false,
+                start,
+                None,
+                Some(format!("请求探测目标失败：{e}")),
+            ),
         ),
     }
 }

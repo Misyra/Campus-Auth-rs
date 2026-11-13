@@ -2280,7 +2280,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // 今天 + 窗口内旧文件收；31 天前超窗；非 .jsonl 与非日期命名不收；空文件照收
         write_file(
-            &tmp.path().join("events").join(&events_file_name(0)),
+            &tmp.path().join("events").join(events_file_name(0)),
             b"{\"id\":\"a\"}\n",
         );
         write_file(
@@ -2328,11 +2328,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_file(&tmp.path().join("logs").join("app.log"), b"current\n");
         write_file(
-            &tmp.path().join("logs").join(&logs_file_name(3)),
+            &tmp.path().join("logs").join(logs_file_name(3)),
             b"three days ago\n",
         );
         write_file(
-            &tmp.path().join("logs").join(&logs_file_name(10)),
+            &tmp.path().join("logs").join(logs_file_name(10)),
             b"ten days ago\n",
         );
         // 无关文件不进包
@@ -2355,14 +2355,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // events 两份：新文件 800B 收入后仅剩 200B，旧文件 900B 超限截断
         write_file(
-            &tmp.path().join("events").join(&events_file_name(0)),
+            &tmp.path().join("events").join(events_file_name(0)),
             &vec![b'a'; 800],
         );
         write_file(
             &tmp.path().join("events").join(events_file_name(1)),
             &vec![b'b'; 900],
         );
-        write_file(&tmp.path().join("logs").join("app.log"), &vec![b'c'; 100]);
+        write_file(&tmp.path().join("logs").join("app.log"), &[b'c'; 100]);
 
         let out = collect_bundle_data_files(tmp.path(), 1000);
         assert_eq!(out.events.files, 1, "仅最新的事件文件入包");
@@ -2377,7 +2377,7 @@ mod tests {
     async fn 诊断包_端到端条目齐全且manifest注明截断与排除项() {
         let tmp = tempfile::tempdir().unwrap();
         write_file(
-            &tmp.path().join("events").join(&events_file_name(0)),
+            &tmp.path().join("events").join(events_file_name(0)),
             b"{\"id\":\"e1\"}\n",
         );
         write_file(&tmp.path().join("logs").join("app.log"), b"log line\n");

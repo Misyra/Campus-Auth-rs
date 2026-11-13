@@ -44,8 +44,8 @@ const INTERFACE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// 监测相关错误
 #[derive(Debug, thiserror::Error)]
 pub enum MonitorError {
-    /// reqwest 客户端构建失败
-    #[error("reqwest 客户端构建失败: {0}")]
+    /// 网络监测客户端构建失败（含出口准备失败时的错误透传）
+    #[error("网络监测客户端构建失败：{0}")]
     ClientBuild(String),
 }
 
