@@ -11,12 +11,74 @@ use axum::extract::{Query, State};
 use chrono::{Duration, Local};
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::login::{HistoryResult, HistoryStore};
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1c history 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。条目是 `LoginHistoryEntry`
+// 的线格式镜像 + handler 附加的 `success` 计算字段；分页与裸数组两种 200 形态
+// 以 untagged 枚举声明为 oneOf（handler 仍按查询参数动态二选一）。
+
+/// GET /api/history 条目（`LoginHistoryEntry` 线格式镜像 + `success` 计算字段）
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct HistoryItemData {
+    /// 记录时间戳（本地时区 ISO 8601）
+    pub timestamp: String,
+    /// 登录来源：auto / manual / login_once / browser
+    pub source: String,
+    /// 实际执行的登录渠道：browser / http / script；旧记录与执行前失败的记录不含该字段（null）
+    pub channel: Option<String>,
+    /// 关联 Profile ID
+    pub profile_id: String,
+    /// 结果分类：success / failed / cancelled
+    pub result: String,
+    /// 结果消息
+    pub message: String,
+    /// 耗时（秒，浮点）
+    pub duration_secs: f64,
+    /// 计算字段：`result == "success"`（前端显示成功/失败状态用）
+    pub success: bool,
+}
+
+/// GET /api/history 分页形态（传 `page` 时的 200 载荷）
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct HistoryPageData {
+    /// 总条数（在 limit 截断之后取值，与可翻页条目数一致）
+    pub total: usize,
+    /// 页码（从 1 开始）
+    pub page: usize,
+    /// 每页条数（钳制 1..=200，默认 50）
+    pub page_size: usize,
+    /// 当前页条目
+    pub items: Vec<HistoryItemData>,
+}
+
+/// GET /api/history 200 响应 data 形状（schema 载体）：不传 `page` 时为裸数组
+/// （向后兼容），传 `page` 时为分页对象；以 untagged 枚举声明为 oneOf。
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(ToSchema)]
+#[serde(untagged)]
+pub enum HistoryResponseData {
+    /// 裸数组形态（不传 page）
+    Items(Vec<HistoryItemData>),
+    /// 分页对象形态（传 page）
+    Page(HistoryPageData),
+}
 
 /// 查询参数：可选 limit 截断 / page+page_size 分页
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, IntoParams)]
 pub struct HistoryQuery {
     /// 返回最近 N 条记录（None 表示不限制）
     pub limit: Option<usize>,
@@ -34,6 +96,17 @@ pub struct HistoryQuery {
 /// 响应格式：
 /// - 不传 `page` 时：返回裸数组 `LoginHistoryItem[]`（向后兼容）
 /// - 传 `page` 时：返回 `{ total, page, page_size, items }` 分页结构
+#[utoipa::path(
+    get,
+    path = "/api/history",
+    operation_id = "get_api_history",
+    tag = "history",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "最近 30 天登录历史（两种形态见 data schema 的 oneOf；分页从最新一页开始）", body = DataEnvelope<HistoryResponseData>),
+        (status = 500, description = "历史文件读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_history(
     State(history): State<Arc<dyn HistoryStore>>,
     Query(params): Query<HistoryQuery>,
@@ -109,6 +182,16 @@ pub async fn get_history(
 }
 
 /// DELETE /api/history — 清除登录历史
+#[utoipa::path(
+    delete,
+    path = "/api/history",
+    operation_id = "delete_api_history",
+    tag = "history",
+    responses(
+        (status = 200, description = "已清空全部登录历史（不可恢复，data 为 \"ok\"）", body = DataEnvelope<String>),
+        (status = 500, description = "历史文件清理失败", body = ErrorResponse),
+    )
+)]
 pub async fn clear_history(
     State(history): State<Arc<dyn HistoryStore>>,
 ) -> Result<Json<Value>, ApiError> {

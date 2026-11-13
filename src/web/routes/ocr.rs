@@ -9,12 +9,71 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::bridge::BridgeApi;
 use crate::config::ConfigApi;
 use crate::environment::EnvironmentApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::operations::{OperationRegistry, RegisterError, WebOperations};
+
+// ---- 契约 DTO（T5-1c ocr 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。识别请求/结果形状与
+// Python Worker `ocr_recognize` 契约一致（`python_worker/ocr_commands.py`）；
+// handler 仍接收 `Json<Value>` 原样透传（未声明键交由 Worker 忽略）。
+
+/// POST /api/ocr/recognize 请求体
+///
+/// 除声明字段外其余键原样透传 Worker（Worker 当前只消费下列两键与
+/// 服务端注入的 `cancel_id`）。
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct OcrRecognizeBody {
+    /// 待识别图片的 base64 编码（原图 ≤ ~1.5 MiB 时请求体才不触 15 MiB 上限）
+    pub image_base64: String,
+    /// 是否使用 ddddocr 旧版识别模式（透传 Worker，缺省 false）
+    pub old: Option<bool>,
+}
+
+/// POST /api/ocr/recognize 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct OcrRecognizeData {
+    /// 识别出的文本
+    pub text: String,
+}
+
+/// GET /api/ocr/status 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct OcrStatusData {
+    /// OCR 依赖（ddddocr）是否已实际装入 venv（不依赖浏览器就绪）
+    pub installed: bool,
+    /// Worker 工程是否支持 OCR（按需 add/remove，不等于已安装）
+    pub declared: bool,
+    /// Worker 最近一次健康检查上报的运行时 OCR 能力；Worker 未存活/未上报时为 null
+    pub runtime_ocr: Option<bool>,
+    /// environment 目录估算体积（MB，四舍五入）
+    pub size_mb: f64,
+}
+
+/// POST /api/ocr/install 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct OcrInstallData {
+    /// 面向用户的提示消息
+    pub message: String,
+}
 
 /// recognize 请求体上限：Worker 的 NDJSON stdin 单行上限为 16 MiB，这里预留 1 MiB
 /// 给 IPC 外壳与 JSON 字段，保证 Web 已接受的请求一定能完整送达 Worker。
@@ -29,6 +88,20 @@ const OCR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// - success=true：提取 `result.data`（形如 `{"text": "..."}`）作为业务负载返回；
 /// - success=false：把 worker 的 error 消息转为 HTTP 错误（否则错误被埋在 200
 ///   响应体里，前端既不显示识别结果也不提示失败）。
+#[utoipa::path(
+    post,
+    path = "/api/ocr/recognize",
+    operation_id = "post_api_ocr_recognize",
+    tag = "ocr",
+    request_body = OcrRecognizeBody,
+    responses(
+        (status = 200, description = "识别文本", body = DataEnvelope<OcrRecognizeData>),
+        (status = 409, description = "OCR 正在卸载、并发识别已达上限或 Worker 忙（调试会话占用）", body = ErrorResponse),
+        (status = 413, description = "请求体超过 15 MiB（IPC 单行安全上限；axum 请求体上限拒绝，响应为纯文本非统一信封）"),
+        (status = 500, description = "识别失败（模型加载/图片解码/推理失败或超时，消息透传 Worker）", body = ErrorResponse),
+        (status = 503, description = "Worker 未安装、启动超时或网络出口受限", body = ErrorResponse),
+    )
+)]
 pub async fn ocr_recognize(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(operations): State<Arc<WebOperations>>,
@@ -80,6 +153,15 @@ pub async fn ocr_recognize(
 /// - `runtime_ocr`（任务 10，向后兼容新增）：Worker 存活时最近一次健康检查
 ///   上报的运行时 OCR 能力（`capabilities.ocr`）；Worker 未存活/未上报时为
 ///   `null`，前端未消费该字段前不破坏既有契约。
+#[utoipa::path(
+    get,
+    path = "/api/ocr/status",
+    operation_id = "get_api_ocr_status",
+    tag = "ocr",
+    responses(
+        (status = 200, description = "OCR 依赖安装状态与 environment 目录体积", body = DataEnvelope<OcrStatusData>),
+    )
+)]
 pub async fn ocr_status(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
@@ -158,6 +240,18 @@ fn dir_size_inner(path: &std::path::Path, depth: u8) -> u64 {
 /// 照样回收：卸载必须在 Windows 上释放 onnxruntime DLL，`recycle_if_running`
 /// 是无条件强杀，会把对方的在途执行连带取消为 `Cancelled`（用户可见
 /// 「请求已取消」，看起来像自己取消的），根因却在 OCR 路径上。
+#[utoipa::path(
+    post,
+    path = "/api/ocr/uninstall",
+    operation_id = "post_api_ocr_uninstall",
+    tag = "ocr",
+    responses(
+        (status = 200, description = "OCR 依赖已卸载", body = DataEnvelope<String>),
+        (status = 400, description = "当前平台不支持依赖移除", body = ErrorResponse),
+        (status = 409, description = "有任务正在执行（定时浏览器任务 / 登录 / 调试在途）", body = ErrorResponse),
+        (status = 500, description = "uv remove 依赖移除失败", body = ErrorResponse),
+    )
+)]
 pub async fn ocr_uninstall(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,
@@ -193,6 +287,15 @@ async fn uninstall_ocr_with_registry(
 ///
 /// 后台只准备 Python/Worker 核心（不要求浏览器二进制）并 `uv add` ddddocr，
 /// 进度通过 StatusManager 推送。
+#[utoipa::path(
+    post,
+    path = "/api/ocr/install",
+    operation_id = "post_api_ocr_install",
+    tag = "ocr",
+    responses(
+        (status = 200, description = "安装已在后台启动（失败不抛 HTTP 错误，可通过再次点击重试）", body = DataEnvelope<OcrInstallData>),
+    )
+)]
 pub async fn ocr_install(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(environment): State<Arc<dyn EnvironmentApi>>,

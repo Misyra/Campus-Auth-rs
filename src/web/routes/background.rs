@@ -9,21 +9,62 @@ use axum::response::IntoResponse;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use std::sync::Arc;
 
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 
 /// 背景图文件最大字节数（上传与远程下载统一）。
 pub(crate) const MAX_BACKGROUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 /// multipart 请求体需要为边界与字段头预留少量空间。
 pub(crate) const BACKGROUND_UPLOAD_BODY_LIMIT: usize = MAX_BACKGROUND_IMAGE_BYTES + 64 * 1024;
 
+// ---- 契约 DTO（T5-1c background 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。背景图读取是二进制图片
+// 响应（非 JSON），按真实下发的七种 MIME 逐一声明 binary 内容（范式同
+// repo 域 `RepoImageBody`）。
+
+/// GET /api/background/{filename} 200 响应体 schema 载体
+///
+/// wire 上是原始图片字节流（按存储扩展名对应的 MIME 下发），不是 JSON 包裹；
+/// 本类型仅用于把 OpenAPI schema 声明为
+/// `{"type": "string", "format": "binary"}`，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：仅在 OpenAPI 生成时被 utoipa 引用，字段值不参与任何
+// 运行时路径（handler 直接下发字节流），dead_code 属预期
+#[allow(dead_code)]
+pub struct BackgroundImageBody(Vec<u8>);
+
+/// POST /api/background/upload multipart `file` 字段的 schema 载体
+///
+/// `multipart/form-data` 单字段 `file`；字段值是图片字节，schema 声明为 binary。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：同 [`BackgroundImageBody`]，dead_code 属预期
+#[allow(dead_code)]
+pub struct BackgroundUploadFile(Vec<u8>);
+
+/// POST /api/background/upload 与 /api/background/fetch-url 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct BackgroundUploadData {
+    /// 落盘文件名（`bg-<stem>-<uuid>.<ext>`，已做 Windows 设备名/ADS 消毒）
+    pub filename: String,
+    /// 可直接引用的相对 URL（`/api/background/<filename>`）
+    pub url: String,
+}
+
 // ---- 背景图管理 ----
 
 /// POST /api/background/fetch-url 请求体：待拉取的远程图片地址（仅允许 HTTPS，走 SSRF 防护通道）
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct BackgroundFetchBody {
     /// 图片 URL
     pub url: String,
@@ -169,6 +210,31 @@ async fn read_response_limited(
 /// GET /api/background/{filename} — 获取背景图
 ///
 /// 返回原始图片字节 + 正确 Content-Type，供前端 CSS url() 直接引用。
+#[utoipa::path(
+    get,
+    path = "/api/background/{filename}",
+    operation_id = "get_api_background_filename",
+    tag = "background",
+    params(("filename" = String, Path, description = "背景图文件名（拒绝路径穿越）")),
+    responses(
+        // 图片端点：200 是二进制图片而非 JSON 信封，按真实下发的七种 MIME
+        // 逐一声明 binary 内容（错误路径仍是统一 JSON 错误信封）
+        (status = 200, description = "背景图原始字节（MIME 按存储扩展名下发，非 JSON 信封）",
+            content(
+                (BackgroundImageBody = "image/png"),
+                (BackgroundImageBody = "image/jpeg"),
+                (BackgroundImageBody = "image/gif"),
+                (BackgroundImageBody = "image/webp"),
+                (BackgroundImageBody = "image/bmp"),
+                (BackgroundImageBody = "image/x-icon"),
+                (BackgroundImageBody = "application/octet-stream"),
+            ),
+        ),
+        (status = 400, description = "文件名非法或 SVG 背景图", body = ErrorResponse),
+        (status = 404, description = "背景图不存在", body = ErrorResponse),
+        (status = 500, description = "文件读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_background(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
@@ -209,6 +275,22 @@ pub async fn get_background(
 }
 
 /// POST /api/background/upload — 上传背景图（multipart/form-data，字段名 file）
+#[utoipa::path(
+    post,
+    path = "/api/background/upload",
+    operation_id = "post_api_background_upload",
+    tag = "background",
+    request_body(
+        content = BackgroundUploadFile,
+        content_type = "multipart/form-data",
+        description = "字段名 file：图片文件（PNG/JPEG/GIF/WebP/BMP/ICO，≤10 MiB，拒绝 SVG，声明类型须与 magic bytes 一致）",
+    ),
+    responses(
+        (status = 200, description = "已落盘并返回可访问 URL", body = DataEnvelope<BackgroundUploadData>),
+        (status = 400, description = "multipart 解析失败、缺 file 字段、文件为空、超过 10 MiB、SVG、格式无法识别或声明类型与实际内容不一致", body = ErrorResponse),
+        (status = 500, description = "文件落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn upload_background(
     State(config): State<Arc<dyn ConfigApi>>,
     mut multipart: axum::extract::Multipart,
@@ -245,6 +327,18 @@ pub async fn upload_background(
 }
 
 /// POST /api/background/fetch-url — 从 URL 获取背景图
+#[utoipa::path(
+    post,
+    path = "/api/background/fetch-url",
+    operation_id = "post_api_background_fetch_url",
+    tag = "background",
+    request_body = BackgroundFetchBody,
+    responses(
+        (status = 200, description = "图片已落盘并返回可访问 URL", body = DataEnvelope<BackgroundUploadData>),
+        (status = 400, description = "URL 非法 / 非 HTTPS、SSRF 防护拒绝、返回非图片 Content-Type、超过 10 MiB、SVG 或声明类型与实际内容不一致", body = ErrorResponse),
+        (status = 500, description = "图片字节读取或落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn fetch_url_background(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<BackgroundFetchBody>,
@@ -302,6 +396,19 @@ pub async fn fetch_url_background(
 }
 
 /// DELETE /api/background/{filename} — 删除背景图
+#[utoipa::path(
+    delete,
+    path = "/api/background/{filename}",
+    operation_id = "delete_api_background_filename",
+    tag = "background",
+    params(("filename" = String, Path, description = "背景图文件名（拒绝路径穿越）")),
+    responses(
+        (status = 200, description = "已删除（data 为 \"ok\"）", body = DataEnvelope<String>),
+        (status = 400, description = "文件名非法", body = ErrorResponse),
+        (status = 404, description = "背景图不存在", body = ErrorResponse),
+        (status = 500, description = "文件删除失败", body = ErrorResponse),
+    )
+)]
 pub async fn delete_background(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,

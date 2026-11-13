@@ -8,11 +8,51 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1c autostart 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。状态查询的 Windows/macOS
+// 系统观测字段经 `serde_json` merge **平铺**进响应顶层且随平台而异，不便收敛
+// 单一 DTO，以 `DataEnvelope<Value>` + 响应说明诚实标注；开关响应形状本地可定。
+
+/// POST /api/autostart/enable 与 /api/autostart/disable 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct AutostartToggleData {
+    /// 操作结果提示
+    pub message: String,
+    /// 配置缓存保存失败时的告警（系统状态已生效，不反向覆盖用户选择）；
+    /// 仅 Windows/macOS 携带该字段（其他平台缓存失败按 400 报错并回滚系统注册）
+    pub warning: Option<String>,
+}
 
 /// GET /api/autostart/status — 获取自启动状态
+#[utoipa::path(
+    get,
+    path = "/api/autostart/status",
+    operation_id = "get_api_autostart_status",
+    tag = "autostart",
+    responses(
+        // 平台条件字段经 merge 平铺进 data 顶层，形状因平台而异，暂以 Value +
+        // 本说明承载（强类型化批次再收敛）。公共字段：platform / enabled /
+        // method / location / runtime_mode；Windows/macOS 另并入 source("system")
+        // 与 cached_enabled 及系统观测字段——Windows：registered / path_match /
+        // base_path_match / target_exists / blocked_by_windows / expected_path /
+        // expected_base_path / registry_path / registry_command / startup_approved /
+        // state；macOS：registered / path_match / base_path_match / target_exists /
+        // run_at_load / loaded / job_pid / expected_path / expected_base_path /
+        // plist_path / state；其他平台 source 为 system（openwrt=procd）或 config。
+        (status = 200, description = "自启动状态（Windows/macOS 的 enabled 以系统观测为准，配置位仅为 cached_enabled）", body = DataEnvelope<Value>),
+        (status = 500, description = "系统自启动状态读取失败（Windows/macOS 观测路径）", body = ErrorResponse),
+    )
+)]
 pub async fn get_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -142,6 +182,17 @@ pub(super) async fn diagnostic_status(_base: std::path::PathBuf) -> Value {
 }
 
 /// POST /api/autostart/enable — 启用自启动
+#[utoipa::path(
+    post,
+    path = "/api/autostart/enable",
+    operation_id = "post_api_autostart_enable",
+    tag = "autostart",
+    responses(
+        (status = 200, description = "已启用并通过系统状态复核（Windows/macOS 配置缓存保存失败时附 warning，仍为 200）", body = DataEnvelope<AutostartToggleData>),
+        (status = 400, description = "配置落盘校验失败（非 Windows/macOS；系统注册已回滚）", body = ErrorResponse),
+        (status = 500, description = "系统注册失败（配置未改动）或注册任务异常", body = ErrorResponse),
+    )
+)]
 pub async fn enable_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -176,6 +227,17 @@ pub async fn enable_autostart(
 }
 
 /// POST /api/autostart/disable — 禁用自启动
+#[utoipa::path(
+    post,
+    path = "/api/autostart/disable",
+    operation_id = "post_api_autostart_disable",
+    tag = "autostart",
+    responses(
+        (status = 200, description = "已取消并通过系统状态复核（Windows/macOS 配置缓存保存失败时附 warning，仍为 200）", body = DataEnvelope<AutostartToggleData>),
+        (status = 400, description = "配置落盘校验失败（非 Windows/macOS；系统注册已回滚）", body = ErrorResponse),
+        (status = 500, description = "取消系统注册失败（配置未改动）或注册任务异常", body = ErrorResponse),
+    )
+)]
 pub async fn disable_autostart(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {

@@ -22,10 +22,145 @@ use axum::Json;
 use axum::extract::State;
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::state::AppState;
+
+// ---- 契约 DTO（T5-1c uninstall 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。检测/清理/卸载响应均为
+// handler 内 `json!` 组装形状的镜像 DTO（handler 仍返回 `Json<Value>`）。
+
+/// GET /api/uninstall/detect 的单项系统残留
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct UninstallDetectItem {
+    /// 项标识：user_data / playwright / autostart
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 是否存在（自启动项为是否已注册）
+    pub exists: bool,
+    /// 补充说明（路径或状态描述）
+    pub description: String,
+}
+
+/// 程序目录 / 卸载助手条目
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct UninstallEntryData {
+    /// 展示名称（"程序目录" / "卸载助手"）
+    pub label: String,
+    /// 完整路径
+    pub path: String,
+    /// 是否存在
+    pub exists: bool,
+}
+
+/// base_path 下的用户数据目录条目
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct UninstallDataDirData {
+    /// 目录标识（`crate::uninstall::DATA_DIR_NAMES` 七项之一）
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 完整路径
+    pub path: String,
+    /// 是否存在（不存在的目录如实标注）
+    pub exists: bool,
+}
+
+/// GET /api/uninstall/detect 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct UninstallDetectData {
+    /// base_path 之外的系统残留清单（用户数据目录 / Playwright 缓存 / 自启动）
+    pub items: Vec<UninstallDetectItem>,
+    /// 程序目录（保留数据时只移除程序文件）
+    pub program: UninstallEntryData,
+    /// 卸载助手是否在位（不在位时 purge 必失败，界面据此先拦下）
+    pub helper: UninstallEntryData,
+    /// base_path 下的用户数据目录（勾选「保留配置与任务」则保留）
+    pub data: Vec<UninstallDataDirData>,
+    /// 非 null 表示拒绝卸载及原因（源码仓库 / cargo 构建输出等守卫）
+    pub blocked: Option<String>,
+    /// 「保留数据」变体的拒绝原因；`blocked` 非 null 时恒为 null
+    pub keep_data_blocked: Option<String>,
+}
+
+/// POST /api/uninstall 单步结果
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct UninstallStepData {
+    /// 步骤标识：autostart / user_data / playwright
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 该步是否成功
+    pub success: bool,
+    /// 结果说明
+    pub message: String,
+}
+
+/// POST /api/uninstall 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct UninstallCleanupData {
+    /// 三步执行结果（互不阻断，逐项返回）
+    pub results: Vec<UninstallStepData>,
+    /// 汇总提示（全部成功 / 部分失败）
+    pub message: String,
+}
+
+/// POST /api/uninstall/purge 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct PurgeUninstallData {
+    /// 汇总提示（按需追加「待应用更新未能取消」与「加密密钥尚未清理」警示）
+    pub message: String,
+    /// 是否勾选了保留用户数据
+    pub kept_user_data: bool,
+    /// 实际删除的程序目录
+    pub install_dir: String,
+    /// 计划删除的用户数据目录（勾选保留时为空数组）
+    pub data_dirs: Vec<UninstallPurgeDirData>,
+    /// 待应用更新是否已成功取消
+    pub cancelled_pending_update: bool,
+    /// 取消失败时为 true（退出后更新助手仍可能把程序装回来）
+    pub pending_update_left: bool,
+}
+
+/// POST /api/uninstall/purge 计划删除的用户数据目录条目
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct UninstallPurgeDirData {
+    /// 目录标识（`crate::uninstall::DATA_DIR_NAMES` 之一）
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 完整路径
+    pub path: String,
+}
 
 /// 用户数据目录（密码加密密钥等）：`~/.campus_network_auth`
 fn user_data_dir() -> Option<PathBuf> {
@@ -172,6 +307,16 @@ fn current_install_dir() -> Result<PathBuf, ApiError> {
 /// - `data`：`base_path` 下的用户数据目录（勾选「保留配置与任务」则保留）；
 /// - `blocked`：非 `null` 表示**拒绝卸载**及原因（如该目录是源码仓库、cargo 构建输出）。
 ///   界面据此禁用卸载按钮并显示原因——守卫在这里先跑一次，用户还在界面上能看到。
+#[utoipa::path(
+    get,
+    path = "/api/uninstall/detect",
+    operation_id = "get_api_uninstall_detect",
+    tag = "uninstall",
+    responses(
+        (status = 200, description = "卸载将清理的全部内容清单（不执行任何删除）", body = DataEnvelope<UninstallDetectData>),
+        (status = 500, description = "无法确定程序所在目录", body = ErrorResponse),
+    )
+)]
 pub async fn detect_uninstall(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -242,7 +387,7 @@ pub async fn detect_uninstall(
 /// 每一步尽力而为、互不阻断，逐项返回结果。
 ///
 /// POST /api/uninstall 的请求体（可选：不带 body 时按"不保留"处理，老调用方不受影响）
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, ToSchema)]
 pub struct CleanupRequest {
     /// 与 [`PurgeRequest::keep_user_data`] 同一个开关
     ///
@@ -261,6 +406,17 @@ pub struct CleanupRequest {
 /// **不删程序本身**（那需要主进程先退出，见 [`purge_uninstall`]）。保留这个只清残留的
 /// 端点是有意的：它同时是"重置环境"的入口——清掉浏览器缓存与自启动注册后程序照常可用，
 /// 不必卸载。前端「卸载」流程会紧接着调用 `purge`。
+#[utoipa::path(
+    post,
+    path = "/api/uninstall",
+    operation_id = "post_api_uninstall",
+    tag = "uninstall",
+    request_body = Option<CleanupRequest>,
+    responses(
+        (status = 200, description = "三步清理结果（关闭自启动 → 用户数据目录 → Playwright 缓存，互不阻断；部分失败仍为 200，见各步 success）", body = DataEnvelope<UninstallCleanupData>),
+        (status = 400, description = "OpenWrt 版不支持本端点", body = ErrorResponse),
+    )
+)]
 pub async fn uninstall(
     State(config): State<Arc<dyn ConfigApi>>,
     body: Option<Json<CleanupRequest>>,
@@ -359,7 +515,7 @@ pub async fn uninstall(
 /// **本端点不处理用户数据目录（加密密钥 `~/.campus_network_auth`）**——那由第一步
 /// `POST /api/uninstall` 负责；完整卸载须先调 `POST /api/uninstall` 且两步的
 /// `keep_user_data` 传同一个值。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PurgeRequest {
     /// 保留用户数据（`config` / `tasks` / `logs` / `environment` / `update`）
     ///
@@ -401,6 +557,18 @@ fn purge_message(pending_update_left: bool, user_data_left: bool) -> String {
 ///
 /// 响应在关闭信号发出前构造：watch 的 `send` 只做通知，Axum 的优雅关闭会把这一个
 /// 响应发完再停（与 `restart_app` 同一模式）。
+#[utoipa::path(
+    post,
+    path = "/api/uninstall/purge",
+    operation_id = "post_api_uninstall_purge",
+    tag = "uninstall",
+    request_body = PurgeRequest,
+    responses(
+        (status = 200, description = "卸载助手已启动，本进程即将退出以放行删除", body = DataEnvelope<PurgeUninstallData>),
+        (status = 400, description = "OpenWrt 版不支持、目录守卫拒绝（源码仓库 / cargo 构建输出）或卸载助手缺失", body = ErrorResponse),
+        (status = 500, description = "卸载助手启动失败（程序文件未被删除，更新入口已恢复）", body = ErrorResponse),
+    )
+)]
 pub async fn purge_uninstall(
     State(state): State<AppState>,
     Json(body): Json<PurgeRequest>,

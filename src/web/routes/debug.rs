@@ -12,12 +12,56 @@ use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
 use serde_json::{Value, json};
+use utoipa::ToSchema;
 
 use crate::bridge::BridgeApi;
 use crate::config::{ConfigApi, DEFAULT_TRIGGER_URL};
 use crate::monitor::{MonitorConfig, PortalDetectStatus};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1c debug 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。start/step/stop/run-all 的
+// 请求与响应均为 Worker 调试会话协议透传（形状由 Python Worker `debug_*` 命令
+// 定义），以 Value + 诚实注释标注；本文件只定义本地可定形的 status 载荷与
+// 二进制产物载体（范式同 repo 域 `RepoImageBody`）。
+
+/// GET /api/debug/status 响应载荷
+// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
+// #[utoipa::path] 注解引用，运行时未构造）
+#[allow(dead_code)]
+#[derive(Debug, ToSchema)]
+pub struct DebugStatusData {
+    /// 是否存在活跃调试会话
+    pub active: bool,
+    /// 最近一次调试截图的免鉴权 URL（`/api/debug/screenshot/<filename>`）；尚无截图时为 null
+    pub screenshot_url: Option<String>,
+    /// 会话详情（步骤列表/执行结果，形状由 Worker 定义）；会话不活跃或 Worker 查询失败时缺省/null
+    pub session: Option<Value>,
+}
+
+/// GET /api/debug/screenshot/{filename} 200 响应体 schema 载体
+///
+/// wire 上是原始图片字节流（按 magic bytes 以 image/png 或 image/jpeg 下发），
+/// 不是 JSON 包裹；本类型仅用于把 OpenAPI schema 声明为
+/// `{"type": "string", "format": "binary"}`，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：仅在 OpenAPI 生成时被 utoipa 引用，字段值不参与任何
+// 运行时路径（handler 直接下发字节流），dead_code 属预期
+#[allow(dead_code)]
+pub struct DebugScreenshotBody(Vec<u8>);
+
+/// POST /api/debug/feedback-bundle 200 响应体 schema 载体（zip 字节流）
+///
+/// 同 [`DebugScreenshotBody`] 的二进制载体范式，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：dead_code 属预期
+#[allow(dead_code)]
+pub struct FeedbackBundleBody(Vec<u8>);
 
 /// 调试启动"已联网"预检的超时上限：各探测目标并行，正常为百毫秒级的 204/内容探测，
 /// 收紧到 3s 是因为它只是一次咨询性判定，不该让点击"调试"明显卡顿。
@@ -32,6 +76,28 @@ const DEBUG_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 ///
 /// 未配置登录网址（走内置默认触发地址）时先做一次"已联网"预检：命中直接 409，
 /// 避免已联网状态下白拉一次只会显示探测页面的浏览器。
+#[utoipa::path(
+    post,
+    path = "/api/debug/start",
+    operation_id = "post_api_debug_start",
+    tag = "debug",
+    // 请求体为 Worker 调试协议的自由形状对象（task_id / task_config / step 等），
+    // 服务端会就缺失字段注入活跃方案凭据与设置后才下发 Worker——凭据形状如实
+    // 标注为明文字符串透传（username/password/isp/auth_url/trigger_url +
+    // browser_settings），不虚构脱敏语义。
+    request_body(
+        content = Value,
+        content_type = "application/json",
+        description = "Worker 调试启动参数（自由形状对象，至少含 task_id 或 task_config）；缺省的 username/password/isp/auth_url/trigger_url（明文字符串）与 browser_settings 由服务端按活跃方案注入",
+    ),
+    responses(
+        (status = 200, description = "调试会话已启动（data 为 Worker 会话状态，形状由 Worker debug_start 定义）", body = DataEnvelope<Value>),
+        (status = 400, description = "请求体不是 JSON 对象", body = ErrorResponse),
+        (status = 409, description = "已联网且未配置登录网址的预检拦截，或 Worker 忙（其他会话占用）", body = ErrorResponse),
+        (status = 503, description = "Python 环境未就绪、出口网络准备失败或 Worker 不可用（未安装/启动超时/网络出口受限）", body = ErrorResponse),
+        (status = 500, description = "其他 Bridge/Worker 内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn start_debug(
     State(tasks): State<Arc<dyn TaskApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -131,6 +197,23 @@ pub async fn start_debug(
 ///
 /// 透传请求体（可携带 `step` 完整配置或 `step_index`）。前端“下一步”无显式索引时，
 /// 由 Python Worker 依据会话内游标自动执行下一个尚未运行的步骤。
+#[utoipa::path(
+    post,
+    path = "/api/debug/step",
+    operation_id = "post_api_debug_step",
+    tag = "debug",
+    request_body(
+        content = Value,
+        content_type = "application/json",
+        description = "Worker 调试单步参数（可携带 step 完整配置或 step_index）；null/空体等价空对象，由 Worker 按会话内游标自动执行下一步",
+    ),
+    responses(
+        (status = 200, description = "单步执行结果（形状由 Worker debug_step 定义）", body = DataEnvelope<Value>),
+        (status = 409, description = "Worker 忙（其他会话占用）", body = ErrorResponse),
+        (status = 503, description = "Worker 不可用（未安装/启动超时/网络出口受限）", body = ErrorResponse),
+        (status = 500, description = "其他 Bridge/Worker 内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn step_debug(
     State(bridge): State<Arc<dyn BridgeApi>>,
     Json(body): Json<Value>,
@@ -145,6 +228,18 @@ pub async fn step_debug(
 }
 
 /// POST /api/debug/stop — 停止调试会话
+#[utoipa::path(
+    post,
+    path = "/api/debug/stop",
+    operation_id = "post_api_debug_stop",
+    tag = "debug",
+    responses(
+        (status = 200, description = "调试会话已停止（data 为 Worker 确认负载，常为 null）", body = DataEnvelope<Value>),
+        (status = 409, description = "Worker 忙（其他会话占用）", body = ErrorResponse),
+        (status = 503, description = "Worker 不可用（未安装/启动超时/网络出口受限）", body = ErrorResponse),
+        (status = 500, description = "其他 Bridge/Worker 内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn stop_debug(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Value>, ApiError> {
     let resp = bridge.execute("debug_stop", Value::Null).await?;
     tracing::info!("调试会话已停止");
@@ -156,6 +251,15 @@ pub async fn stop_debug(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json
 /// 调试会话是 Worker 侧的持久状态：前端刷新/换页后内存状态丢失，界面上无法
 /// 停止会话，登录等命令会一直撞上"Worker 忙: 调试会话进行中"。此端点供前端
 /// 启动时恢复会话感知（配合"停止调试"入口自助解除占用）。
+#[utoipa::path(
+    get,
+    path = "/api/debug/status",
+    operation_id = "get_api_debug_status",
+    tag = "debug",
+    responses(
+        (status = 200, description = "会话感知快照（active=false 时不查询 Worker；active=true 时附 Worker 会话详情，查询失败 session 为 null）", body = DataEnvelope<DebugStatusData>),
+    )
+)]
 pub async fn debug_status(State(bridge): State<Arc<dyn BridgeApi>>) -> Json<Value> {
     let screenshot_url = bridge.last_screenshot_url();
     if !bridge.debug_session_active() {
@@ -181,6 +285,18 @@ pub async fn debug_status(State(bridge): State<Arc<dyn BridgeApi>>) -> Json<Valu
 }
 
 /// POST /api/debug/run-all — 执行调试会话中全部剩余步骤
+#[utoipa::path(
+    post,
+    path = "/api/debug/run-all",
+    operation_id = "post_api_debug_run_all",
+    tag = "debug",
+    responses(
+        (status = 200, description = "剩余步骤执行结果（形状由 Worker debug_run_all 定义）", body = DataEnvelope<Value>),
+        (status = 409, description = "Worker 忙（其他会话占用）", body = ErrorResponse),
+        (status = 503, description = "Worker 不可用（未安装/启动超时/网络出口受限）", body = ErrorResponse),
+        (status = 500, description = "其他 Bridge/Worker 内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn run_all(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Value>, ApiError> {
     let resp = bridge.execute("debug_run_all", Value::Null).await?;
     Ok(data(resp.result.data))
@@ -190,6 +306,24 @@ pub async fn run_all(State(bridge): State<Arc<dyn BridgeApi>>) -> Result<Json<Va
 ///
 /// `<img>` 引用无法携带自定义鉴权头（同背景图 GET 豁免先例），且 Worker 侧
 /// 截图落盘路径对浏览器不可达，必须经 HTTP 暴露；文件名做防穿越校验。
+#[utoipa::path(
+    get,
+    path = "/api/debug/screenshot/{filename}",
+    operation_id = "get_api_debug_screenshot_filename",
+    tag = "debug",
+    params(("filename" = String, Path, description = "调试截图文件名（拒绝路径穿越与符号链接）")),
+    responses(
+        (status = 200, description = "截图原始字节（按真实 magic bytes 以 PNG/JPEG 下发，非 JSON 信封）",
+            content(
+                (DebugScreenshotBody = "image/png"),
+                (DebugScreenshotBody = "image/jpeg"),
+            ),
+        ),
+        (status = 400, description = "文件名非法、超出大小上限、符号链接或不是有效 PNG/JPEG", body = ErrorResponse),
+        (status = 404, description = "截图不存在", body = ErrorResponse),
+        (status = 500, description = "文件读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn debug_screenshot(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
@@ -236,6 +370,20 @@ pub async fn debug_screenshot(
 /// 收集：日志尾段 + 当前活动任务 JSON + 脱敏配置快照 + 调试页 MHTML/page.html/
 /// 截图/CSS-JS 资源快照（若有会话；Chromium MHTML 不含 JS，资源由 Worker 经 CDP 补齐）。
 /// 失败项写占位 txt，不以 500 打断整包；无活跃调试会话时页面项为占位说明。
+#[utoipa::path(
+    post,
+    path = "/api/debug/feedback-bundle",
+    operation_id = "post_api_debug_feedback_bundle",
+    tag = "debug",
+    responses(
+        // 二进制诊断包：200 是 zip 字节流而非 JSON 信封；meta.json 为脱敏配置
+        // 摘要（凭据仅 has_password 布尔位，不含密码明文与加密配置原文）
+        (status = 200, description = "问题报告 zip（日志尾段 + 活动任务 JSON + 脱敏配置摘要 + 调试页面快照，随附 Content-Disposition 文件名）",
+            content((FeedbackBundleBody = "application/zip")),
+        ),
+        (status = 500, description = "压缩包写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn feedback_bundle(
     State(bridge): State<std::sync::Arc<dyn crate::bridge::BridgeApi>>,
     State(tasks): State<std::sync::Arc<dyn crate::tasks::TaskApi>>,
