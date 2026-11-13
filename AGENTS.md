@@ -4,7 +4,7 @@
 
 Campus-Auth（中文名「认证喵」）是一个校园网自动认证工具。Rust 重写版为单 binary crate + Python 子进程（浏览器自动化），便携版解压即用。Rust 侧负责控制平面（网络监测、登录状态机、调度、配置、Web API、系统托盘），Python 侧作为按需执行插件负责浏览器自动化（Playwright）和 OCR（ddddocr）。
 
-当前主程序版本：5.1.3（用户可见更新见 `docs/updatelog.md`，逐项更改见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `openapi.json` 三端同版）。Python Worker 版本独立固定为 1.0.0。
+当前主程序版本：5.2.0-beta.1（用户可见更新见 `docs/updatelog.md`，逐项更改见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `openapi.json` 三端同版）。Python Worker 版本独立固定为 1.0.0。
 
 ## 技术栈
 
@@ -23,6 +23,9 @@ Campus-Auth（中文名「认证喵」）是一个校园网自动认证工具。
 | 敏感数据清零 | zeroize |
 | 时间 / Cron | chrono + cron |
 | 系统托盘 | tray-icon |
+| 系统通知 | notify-rust（Windows toast / macOS NSNotification / Linux DBus） |
+| API 契约 | utoipa（`#[utoipa::path]` 注解 → OpenAPI 3.1.0 文档生成，见 `src/web/openapi.rs`） |
+| 属性测试 / Fuzz | proptest（512 cases 统一口径）/ cargo-fuzz（`fuzz/` 独立 crate） |
 | 前端嵌入 | rust-embed |
 | 进程管理 | tokio::process |
 | 文件锁 | fs4 |
@@ -85,7 +88,7 @@ cd frontend && npm run build
 
 ### Lint
 
-启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（含 `rust-tests-unix` 真机）/ frontend `typecheck + eslint + stylelint + build + vitest` / `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路，见 `.github/workflows/ci.yml`）。
+启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（双平台矩阵，含 `rust-tests-unix` 真机）/ frontend `typecheck + eslint + stylelint + build + vitest`（vitest 含覆盖率阈值）/ `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路（ubuntu + macOS 双平台）/ 核心域覆盖率门禁，见 `.github/workflows/ci.yml`；另有 `audit.yml` 月度供应链审计与 `fuzz.yml` cargo-fuzz 每周冒烟）。
 
 ### 前端样式
 
@@ -97,10 +100,10 @@ cd frontend && npm run build
 ```
 campus-auth/
 ├── Cargo.toml
-├── openapi.json              # Web API 路径清单（手写 baseline；无 components.schemas，字段级契约以前端 types.ts 为准）
-├── Dockerfile / docker-compose.yml / docker-compose.build.yml / .dockerignore  # GHCR 部署 + 本地源码构建
+├── openapi.json              # Web API 契约（utoipa 生成 ⊕ 手写 baseline 按路径合并的产物，OpenAPI 3.1.0；重生成 UPDATE_OPENAPI=1，详见「Web API 契约」节）
+├── Dockerfile / docker-compose.yml / docker-compose.build.yml / .dockerignore  # GHCR 部署 + 本地源码构建（entrypoint.sh root 启动修正卷属主后经 setpriv 降权 exec，主进程 / Worker / Chromium 实际以 uid 1000 campus 运行）
 ├── docker/                   # Docker 辅助（entrypoint.sh / README / override 示例）
-├── build.ps1                 # 便携版打包脚本（pwsh 7+，产物含 Docker 文件）
+├── build.ps1                 # 便携版打包脚本（pwsh 7+，产物含 Docker 文件与版本 marker）
 ├── src/
 │   ├── lib.rs                # 库入口：聚合全部模块 + 统一 ServiceHandle
 │   ├── main.rs               # CLI 解析 → 启动分发
@@ -109,44 +112,47 @@ campus-auth/
 │   │                         #   退出后删安装目录（Windows 需两段式：先复制到 %TEMP% 再删）
 │   ├── browser.rs            # 浏览器二进制探测与启动（登录侧共用）
 │   ├── app.rs                # Axum 服务器构建 + 托盘初始化
-│   ├── container.rs          # ServiceContainer: Arc 共享状态（13 服务 + Metrics/uptime 2 横切，共 15 字段）
-│   ├── launcher.rs           # 启动状态机 (full / lightweight / login-once)
+│   ├── container.rs          # ServiceContainer: Arc 共享状态（13 服务 + EventBus/Metrics/uptime 3 横切，共 16 字段）
+│   ├── launcher/             # 启动状态机（full / lightweight / login-once；cli/config/locks/modes/engine_watch/restart/shutdown 七子模块 + mod 共享状态）
 │   ├── logging.rs            # 日志子系统（初始化 / 动态级别 / WS 广播 Layer）
 │   ├── engine/               # 调度引擎（单 tokio task + select!，含 slot.rs 可替换句柄槽）
-│   ├── monitor/              # 网络监测（TCP/HTTP/URL 探测）
+│   ├── monitor/              # 网络监测（probes 三类探测 / decision 证据判定纯函数 / portal 门户重定向 / diagnostics 一键诊断，Web 层按需构造不入容器）
 │   ├── login/                # 登录编排（状态机、去重、抢占、重试；三种渠道：
 │   │                         #   浏览器=Worker / http=进程内发请求 / script=进程内起子进程）
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）— 源码模块，对应运行时 /config（.gitignore / 锚定，勿混淆）
 │   ├── uninstall/            # 卸载计划（删什么 / 拒什么 / 怎么删）——**单一事实源**：
 │   │                         #   界面据此列清单、campus-auth-helper --uninstall 据此执行
-│   ├── web/                  # Web API + WebSocket（host.rs 回环 Host 头校验防 DNS rebinding，挂载于鉴权层之前；routes/ 按域拆分：config/profiles/login/http_tasks/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai 等，细粒度 state 注入）
+│   ├── web/                  # Web API + WebSocket（host.rs 回环 Host 头校验防 DNS rebinding，挂载于鉴权层之前；auth.rs bootstrap 握手鉴权；openapi.rs utoipa 契约管线；ssrf 解析钉扎；routes/ 按域拆分 20 文件：config/profiles/login/http_tasks/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai/notification/diagnostics 等，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
 │   ├── tasks/                # 任务管理 — 源码模块，对应运行时 /tasks（.gitignore / 锚定）
 │   ├── network/              # 网络接口
-│   ├── bridge/               # Python Bridge（NDJSON IPC）— Rust 侧桥，对应 python_worker/ 执行侧
+│   ├── bridge/               # Python Bridge（NDJSON IPC）— Rust 侧桥，对应 python_worker/ 执行侧；拆分为 mod（Supervisor select! 主循环）/ api / state / session（会话互斥矩阵）/ error / debug / lifecycle（懒加载 + 空闲回收）/ test_support + ipc（NDJSON 协议）/ job（Windows Job Object）/ orphan（孤儿 chromium 清理）/ process（子进程 + 行解析）/ worker（状态机）
 │   ├── status/               # StatusManager: 状态快照 + watch 推送
-│   ├── environment/          # 环境管理器（uv/python 按需安装）— 源码模块，对应运行时 /environment（.gitignore / 锚定，空目录按需生成）
+│   ├── events/               # 事件总线（EventBus：typed AppEvent 9 变体 + broadcast 1024；sink JSONL 按日落盘 events/ 保留 30 天；载荷白名单式摘要、凭据在结构上无字段）
+│   ├── notification/         # 推送通知（订阅 EventBus：类型集合过滤 + 免打扰时段 → template 脱敏摘要渲染 → sender 五类通道 Webhook/Bark/Server酱/Telegram/os）
+│   ├── environment/          # 环境管理器（bootstrap 两阶段引导 / browser_registry 双端一致判定 / health 探测 / python venv；uv/ 子目录：download 镜像测速 / verify 实启校验 / sync / process）— 源码模块，对应运行时 /environment（.gitignore / 锚定，空目录按需生成）
 │   ├── ai/                   # AI 任务生成（LLM 配置 + 提示词 + 生成编排）
 │   ├── updater/              # 版本更新（检查 + 下载 + 应用，通道：Stable/Prerelease/All，状态落盘 update/last_check.json，见 GET /api/update-state）
 │   ├── tray/                 # 系统托盘（tray-icon）
-│   └── utils/                # 工具（PID 文件锁、平台特定代码）
-├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略），与 resources/ 职责分离
-├── python_worker/            # Python Worker 子进程（Playwright + OCR）— 执行侧，对应 Rust 侧 src/bridge/，IPC 契约见 python_worker/README.md
+│   └── utils/                # 工具（paths 运行时目录布局单一事实源 / lock PID 文件锁 / metrics / io 原子写 / io_human 人话化 IO 错误文案 / archive_guard / 平台特定代码）
+├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略）；src/api/generated/ 为 openapi-typescript 生成类型（npm run typegen 管线，切换完成前字段级契约以手写 src/api/types.ts 为准）；与 resources/ 职责分离
+├── python_worker/            # Python Worker 子进程（Playwright + OCR）— 执行侧，对应 Rust 侧 src/bridge/；worker_main.py IPC 入口 + playwright_worker.py 组装门面（COMMANDS 18 条注册表单一事实源），伴生模块 Mixin 拆分（browser_lifecycle / browser_launch / browser_detect / step_engine / step_handlers / task_runner / profile_commands / config_session / auto_login / capture_commands / capture_kit / debug_commands / debug_session / ocr_commands / ocr_runtime / cancel_registry / worker_paths / models / variable_resolver，纯逻辑层不依赖 Playwright 可直接单测），IPC 契约见 python_worker/README.md
 ├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；原 mock_portal/ 已整体搬迁至 tests/mock-servers/full-portal/
-├── docs/                     # 文档：updatelog（用户）/ changelog（开发）/ known-issues / plan-next / guides / assets（README 引用的截图）/ promo（介绍演示页）；reports/ 与 compose/ 为过程产物（.gitignore 忽略）
+├── fuzz/                     # cargo-fuzz 独立 crate（自带 lockfile，不纳入主工程口径）：fuzz_config_json / fuzz_migrate / fuzz_parse_ipc 三 target，CI fuzz.yml 每周冒烟
+├── docs/                     # 文档：updatelog（用户）/ changelog（开发）/ known-issues / plan-next / guides（含 architecture.md 架构图与模块地图——依赖关系与数据流权威参照）/ assets（README 引用的截图）/ promo（介绍演示页）；reports/ 与 compose/ 为过程产物（.gitignore 忽略）
 ├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入，区别于 frontend/public 与 frontend/dist）
-└── .github/workflows/        # CI（fmt + clippy + test（含 e2e-login-chain + rust-tests-unix）+ 前端构建 + vitest + pytest）
+└── .github/workflows/        # ci.yml（fmt + clippy + test 双平台（含 e2e-login-chain + rust-tests-unix）+ 前端构建 + vitest + 覆盖率门禁 + pytest）+ audit.yml（月度供应链审计）+ fuzz.yml（每周冒烟）+ release.yml + openwrt.yml
 ```
 
 ## 架构要点
 
-### ServiceContainer（13 服务 + 2 横切，共 15 字段拓扑排序）
+### ServiceContainer（13 服务 + 3 横切，共 16 字段拓扑排序）
 
-所有服务通过 `Arc` 构造注入，无延迟绑定、无全局变量。构造顺序（见 `src/container.rs`，文件头与 `new()` 注释均为 15）：
+所有服务通过 `Arc` 构造注入，无延迟绑定、无全局变量。`EventBus` 最先构造（登录 / 监测 / 任务 / 更新 / 环境等所有潜在发布方都排在它之后，消费方与发布方互不感知），其后按依赖拓扑排序（见 `src/container.rs`，文件头与 `new()` 注释均为 16）：
 
-ConfigService → ProfileService → LoginHistoryService → StatusManager → TaskManager → BridgeSupervisor → EnvironmentManager → TaskExecutor → MonitorService → LoginOrchestrator → SchedulerService → UpdaterService → Engine
+ConfigService → ProfileService → LoginHistoryService → StatusManager → TaskManager → BridgeSupervisor → EnvironmentManager → TaskExecutor → MonitorService → LoginOrchestrator → SchedulerService → UpdaterService → Engine（EngineSlot）
 
-另有横切组件：`Metrics`（运行指标，`Arc<Metrics>`）与 uptime 定时器（`CancellationToken` child）。二者与 13 服务合计 15 字段，即 `src/container.rs:1` 的“15 服务拓扑排序”口径。AutoStartService / DebugSessionManager / TaskRegistry / TaskHistoryStore / WebSocketManager 未独立成服务，相关功能由 TrayManager / Scheduler / Bridge 内聚实现。
+横切组件 3 个：`EventBus`（类型化事件总线，`Arc<EventBus>`——typed `AppEvent` 9 变体：登录成败 / 网络翻转 / 任务成败 / UpdateAvailable / EnvironmentReady / ProfileSwitched；tokio broadcast 容量 1024、Lagged 仅 warn 后继续；载荷为白名单式摘要，凭据 / token / URL 查询串在结构上不存在对应字段；订阅方 = EventSink JSONL 落盘（`events/` 按日 30 天保留）+ 推送通知服务 + 诊断/Dashboard）、`Metrics`（运行指标，`Arc<Metrics>`）与 uptime 定时器（`CancellationToken` child）。三者与 13 服务合计 16 字段，即 `src/container.rs:1` 的“16 字段拓扑排序”口径。`startup()` 另行启动 4 个后台任务（EventSink 落盘 / 推送通知 / Scheduler 循环 / Bridge 主循环），句柄经 `StartupHandles` 交 Launcher 统一管理。AutoStartService / DebugSessionManager / TaskRegistry / TaskHistoryStore / WebSocketManager 未独立成服务，相关功能由 TrayManager / Scheduler / Bridge 内聚实现。
 
 新增服务时在链中插入 `Arc::new(...)` 即可。
 
@@ -161,7 +167,7 @@ struct ServiceHandle {
 }
 ```
 
-`BridgeSupervisor` / `SchedulerService` / `TrayManager` 使用 `ServiceHandle`（`stop_tx: watch` + `stop_with_timeout`）。`Engine` 为可崩溃重启特例，使用 `EngineSlot(Arc<ArcSwapOption<EngineHandle>>)` + `EngineHandle { engine: Arc<Engine>, join_handle, completed: CancellationToken }`，命令经 `slot.dispatch/try_dispatch` 派发（见 `src/engine/slot.rs` 与 `src/engine/mod.rs`），`ServiceHandle` 的 `watch` 语义不适用于 Engine。
+`BridgeSupervisor` / `SchedulerService` / `TrayManager` 使用 `ServiceHandle`（`stop_tx: watch` + `stop_with_timeout`）。`EventSink`（`events::spawn_event_sink`）与推送通知服务（`notification::spawn_notification_service`）同样返回 `ServiceHandle`，经 `container.startup()` 的 `StartupHandles`（scheduler / bridge / event_sink / notification 四字段）交 Launcher 统一 stop；EventSink 同时受应用关闭令牌驱动（令牌取消即排空退出，句柄保留供显式停用）。`Engine` 为可崩溃重启特例，使用 `EngineSlot(Arc<ArcSwapOption<EngineHandle>>)` + `EngineHandle { engine: Arc<Engine>, join_handle, completed: CancellationToken }`，命令经 `slot.dispatch/try_dispatch` 派发（见 `src/engine/slot.rs` 与 `src/engine/mod.rs`），`ServiceHandle` 的 `watch` 语义不适用于 Engine。
 
 服务主循环用 `tokio::select!` 同时等待业务逻辑和停止信号。
 
@@ -183,6 +189,8 @@ struct ServiceHandle {
 
 NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果。Bridge Supervisor 懒加载 Worker，空闲超时后关闭释放内存。Worker 崩溃不影响 Rust 控制平面。
 
+命令并发由 `check_session_compat` 互斥矩阵裁决（`bridge/session.rs`，统一执行入口内检查）：OCR 轻量请求与任意会话并发、不占单会话槽位；浏览器登录共享同一会话槽位且互不排斥（渠道内去重/抢占在登录编排层）。持久会话类命令（`profile_session_start/stop` / `profile_auto_login`）归会话通道，各带命令级超时预算（如 `profile_auto_login` 300s）。
+
 ### Updater（更新器）
 
 - 通道：`UpdateChannel::{Stable,Prerelease,All}`（`src/config/schema.rs`），`All` 下正式/预发布一起按 semver 取最高；`Prerelease` 枚举为空时回退正式版清单（单包口径），`All` 无回退——列表为空即 `NoMatchingRelease`（默认 GitHub 源下 releases 列表为空意味着 releases/latest 同样不可用，回退无意义）
@@ -195,10 +203,16 @@ NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果
   - 共同点：落盘均走 `finalize_staged_package`（解压产物 → exe 摘要 → `pending.json`），无旁路；`UpdaterError::PackageNotNewer` / `ExtractFailed` 映射 400（用户可纠正），`LoginInProgress` / `UpdateInProgress` / `Cancelled` 映射 409。
   - **取消语义**：`cancel_pending_update()`（卸载流程调用）先在状态临界区置 `update_cancelled` 标记，等待独立任务持有的操作互斥释放，再清 `pending.json` + staging；最终 pending 提交、助手唤醒与取消标记共用临界区，阻止在途操作于取消完成后重新提交。调用方中断不提前释放正在执行的阻塞 I/O 所有权；失败卸载的恢复只复位取消标记。返回值是"**确实**取消掉了"（存在 pending 且清理后复查 pending 与 staging 均消失），不是仅"此前有 pending"。
   - 清单声明的 `size` 为咨询性字段（同 UPD-7），不符仅告警、以摘要为准
+- 版本探测（`src/updater/version_info.rs`）：Windows 读 PE VERSIONINFO 资源（手写最小解析器，零新依赖）；非 Windows（Mach-O / ELF 无等价机制）读发布包组装产物**版本 marker 文件 `campus-auth.version`**（与 exe 同目录，单行纯 semver，release.yml / build.ps1 组装时写入），缺失或损坏回退链与"无版本资源"一致——上传路径以 `VersionUnrecognized` 明确拒绝（fail-closed）
+- **ed25519 清单签名【进行中】**（T6-4 在编，落库前本条不作为实现依据）：设计口径为签名 gated（CI 仅在 `MANIFEST_SIGNING_KEY` secret 存在时签名）、验证公钥与签名同批嵌入二进制；marker 格式已预留伴随签名文件 / 键值结构两条扩展路径（见 `version_info.rs` 模块 doc）
 
 ### 前端嵌入
 
 Vite 构建产物通过 `rust-embed` 编译进二进制。开发时可用 `--features no-embed` 跳过嵌入。
+
+### Web API 契约（openapi.json）
+
+根目录 `openapi.json` 是 **utoipa 生成 ⊕ 手写 baseline 按路径合并**的产物（`src/web/openapi.rs` 的 `merged_openapi_json`）：已注解域（`#[utoipa::path]`，目前 18/20 域，notification / diagnostics 尚未注解）的路径条目以生成源为准（整体替换手写条目），未注解条目维持手写；`components.schemas` 由生成管线产出（错误信封 `Error*` / 包装 `DataEnvelope<T>` 等跨域形状收口在 `web::openapi::schemas`，各 route 文件不得重复定义）。OpenAPI 版本 3.1.0，`info.version` 随 `CARGO_PKG_VERSION` 自动同步（三端同版少一处手工项）。重生成：`UPDATE_OPENAPI=1 cargo test`（生成测试重写文件；BTreeMap 键序 + 固定缩进保证重复生成零 diff）。前端经 `npm run typegen`（openapi-typescript）产出 `src/api/generated/api.d.ts`；切换到生成类型前，字段级契约的权威来源仍是手写 `frontend/src/api/types.ts`（边界见 `frontend/src/api/generated/README.md`）。
 
 ## 测试规范
 
@@ -219,6 +233,12 @@ cargo test -- --nocapture
 - `src/` 内 `#[cfg(test)] mod tests` 放单元测试
 - 临时目录用 `tempfile`
 - 异步测试用 `#[tokio::test]`，时间控制用 `tokio::time::pause()`
+- **属性测试（proptest）**：统一 512 cases 口径（CI 亲和，随机失败必可 shrink 复现），六组——bridge IPC 行解析（`bridge/process.rs`）、去重/抢占决策矩阵组合空间（`login/preemption.rs`）、会话结果分类（`login/session.rs`、`login/mod.rs`）、迁移幂等（`config/migration.rs`）、`PATCH /api/config` 载荷归一（`web/routes/config.rs`）
+- **Fuzz**：`fuzz/` 独立 crate 三 target——`fuzz_config_json`（SettingsData / ProfileData 任意 JSON 不 panic）、`fuzz_migrate`（迁移管线）、`fuzz_parse_ipc`（NDJSON 解析链全反序列化面）；CI `fuzz.yml` 每周冒烟
+- **覆盖率门禁**：CI 按域断言 `src/{config,login,engine,updater}` 行覆盖率阈值（= 实测基线 - 4pp，调整流程见 ci.yml job 注释）；前端 vitest coverage thresholds（lines 38.7 / statements 36.5 / functions 29 / branches 28.6，基线 - 5pp，见 `frontend/vite.config.ts`）
+- **E2E 双平台**：`e2e-login-chain`（mock 门户 → 真实二进制 → Worker Playwright + OCR → success_condition → 历史落盘）与 Rust 测试矩阵均跑 ubuntu + macOS
+- **真浏览器 pytest**：`python_worker/tests/test_auto_login_browser.py` 真 chromium 驱动持久上下文自动登录回放；chromium 可执行文件缺失时整文件 skip（环境守卫），本地全量跑前先 `uv run playwright install chromium`
+- **供应链审计**：release 构建接 `cargo-auditable`；`audit.yml` 月度 `cargo audit`（失败即拦 + artifact）与 `npm audit`（runtime 严格 / dev 仅报告分级）
 
 ## Git 规范
 
@@ -287,11 +307,17 @@ Conventional Commits，中文描述：
 - debug 构建（未开 `debug-embed`）下 rust-embed **运行时读盘**：改前端只需 `npm run build`，不必重编 Rust。但二进制本身若被 no-embed 构建替换过，仍须 `cargo build` 重建；且实例在跑时 exe 被锁，跑测试/构建前先停实例
 - Python Worker 的 **stdout 是 IPC 通道**，不能用于日志输出（用 stderr）
 
+### 契约与生成物
+
+- `openapi.json` 变更后必须 `cd frontend && npm run typegen` 重新生成并提交 `src/api/generated/api.d.ts`——`npm run typegen:check` 对生成物做逐字节比对，忘跑会让前端类型停留在旧契约上（生成是确定性的：同一输入恒产出同一文件）
+- 改 `openapi.json` / 契约注解时先重跑 `UPDATE_OPENAPI=1 cargo test` 让生成与手写两源合并落盘，不要手编 openapi.json 中已注解域的条目（会被下次生成整体替换）
+
 ### Python Worker 依赖
 
 - `ddddocr` 是按需能力，源码 `python_worker/pyproject.toml` 不得默认声明；用户安装/卸载时必须分别通过 `uv add "ddddocr>=1.6.1"` / `uv remove ddddocr` 改写部署副本的 `pyproject.toml` + `uv.lock`
 - 禁止用 `uv pip install` / `pip install` 绕过项目声明与锁文件；基础环境用 `uv sync`，开发环境用 `uv sync --group dev`
 - E2E 准备为 `uv sync --dev --frozen`、`uv add "ddddocr==1.6.1"`、`uv run playwright install chromium`，再预热 OCR 模型
+- **模块化补丁纪律**：`playwright_worker.py` 是 Mixin 组装门面，测试 monkeypatch 一律打在**属主模块**上（如 `step_handlers.run_step_async`、`worker_paths._debug_screenshot_dir`、`browser_lifecycle._WORKER_KEEP_ALIVE`）——门面的再导出只保证导入面兼容，不保证可替换语义（`python_worker/README.md` 约定）
 
 ### 卸载与更新助手
 
@@ -309,16 +335,22 @@ Conventional Commits，中文描述：
 - **成败判定是退出码**：`0` 视为本次尝试成功，但 `worker_config` 必须是 `{}`——这样 `has_explicit_success_condition()` 恒为 false，登录后网络验证兜底才生效（"脚本说成功但没登上"不会被记成成功）。`2` 为 `ManualRequired`、`3` 为 `InvalidCredential`，两者终态停止；其他非 0 为 `AssertionFailed`（可重试、**不**回收 Worker）
 - 脚本失败**不得**触发 Worker 回收：`should_force_recycle` 的判定点必须同时受 `uses_bridge` 保护，否则一次脚本失败会去杀另一条在跑的浏览器登录
 - 三条保存路径（`POST` / `PUT /api/profiles/{id}`、`PATCH /api/config`）共用 `validate_login_task_binding`：直连与脚本渠道都**没有内置兜底任务**，未绑定或绑错类型必须在保存时拦下（放过去等于把配置错误伪装成运行错误）
+- **持久会话语义**（方案级 `persistent_session_enabled`）：启用后浏览器使用持久目录 `<base>/browser_profiles/<profile_id>/`（门户「记住密码」等凭据跨进程留存），登录先走 `profile_auto_login` 回放（门户凭据回填 + 录制动作回放；命令级预算 300s）。**Worker 回放返回 `Success` ≠ 登录成功**：沉降窗口均为 best-effort，登录成败恒由 Rust 侧登录后网络验证兜底判定（`has_explicit_success_condition` 对持久模式恒 false）——排障以登录历史的网络验证结论为准，勿以 Worker 消息定性（known-issues #31）。删除方案联动清理对应持久目录（幂等），PUT 保存剥离 `recorded_actions` 防旧草稿覆盖录制
+- **直连渠道旧管线脱糖后的行为变化**（known-issues #30，成文取舍）：带 `steps` 流程任务的 logout 下线动作从「静默跳过」改为「第一步前执行」；旧任务形态（无 `steps` 的加密脚本 / 前置请求 / 单请求）并入流程口径——单步 `min(20s, 总预算剩余)` 超时、120s 总预算、变量预算（单变量 8KiB / 累计 128KiB）、判定文案统一为流程形态。老配置无需迁移、执行结果等价，但超时 / 文案 / 预算边界行为与旧版存在可感知差异，登录文案与排障按流程形态解读
 
 ### Web 服务安全防线
 
 - 回环绑定时 `src/web/host.rs` 强制校验 Host 头是 CORS 之外的独立防线（防 DNS rebinding——恶意域名解析到 127.0.0.1 后与本地服务「同源」，CORS 与浏览器 PNA 均失效）：只接受 `127.0.0.1` / `localhost` / `[::1]`（精确等值、端口忽略），策略按 `PreparedAxumListener` 携带的实际绑定地址推导（绑定非回环 = Docker/LAN 显式暴露，跳过校验）。新增监听入口时必须沿用该推导，不要绕过校验层；Host 缺失放行（HTTP/1.0 与 oneshot 测试基建无 Host，rebinding 路径必然携带域名）
+- **鉴权为 bootstrap 握手模型**（`src/web/auth.rs`；旧免鉴权 `GET /api/auth/token` 已删除）：托盘/launcher 打开界面时在 URL 尾拼 `#auth=<bootstrap>` fragment（fragment 不发往服务器、不进服务器日志），前端经 `POST /api/auth/exchange` 用 bootstrap 秘钥或管理密码换取 token，随后自行清除地址栏 fragment。bootstrap 秘钥落盘 `config/.auth_bootstrap`（创建即 0600，仅当前用户可读），与 token 同代——任一缺失/损坏即与 token 成对轮换
+- **非回环绑定 fail-closed 凭据门禁**（`src/app.rs` 的 `check_bind_credential_gate`，T0a-2）：远程用户拿不到 fragment，只能凭管理密码换取 token——绑定非回环 && 无生效管理密码 && 未显式豁免 → **拒绝启动**。管理密码生效优先级：CLI `--management-password` / 环境变量 `CAMPUS_AUTH_MANAGEMENT_PASSWORD` > 配置 `management_password`（exchange 每次实时读取，UI 改密码无需重启）；`--allow-unauthenticated-bind` 为显式豁免（强烈不推荐）
 - 前端 Vite dev 代理（`vite.config.ts` 的 `/api`、`/ws`）必须保留 `changeOrigin: true`——代理默认透传原始 Host（localhost:5173）会被回环校验拒绝；改动前端代理时勿删
 
 ### 配置系统
 
 - ConfigService 的 `ArcSwap<RuntimeConfig>` 是唯一的配置权威源，不要在其他服务缓存配置快照
 - 读取配置：`config_service.runtime().load()`，不要自行持有 `Arc<RuntimeConfig>`
+- 推送通知设置在 `global.notification`（`NotificationSettings`，serde default 免迁移、不 bump config_version）：五类通道 Webhook / Bark / Server酱 / Telegram / 系统通知 os，订阅 EventBus 后按事件类型集合与免打扰时段过滤投递
+- `app.management_password` 为管理密码配置值（空串 = 未配置）：bootstrap/exchange 鉴权与非回环绑定门禁共同消费，生效优先级见「Web 服务安全防线」
 
 ### 系统托盘
 
