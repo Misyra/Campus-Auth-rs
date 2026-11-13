@@ -88,7 +88,7 @@ cd frontend && npm run build
 
 ### Lint
 
-启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（双平台矩阵，含 `rust-tests-unix` 真机）/ frontend `typecheck + eslint + stylelint + build + vitest`（vitest 含覆盖率阈值）/ `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路（ubuntu + macOS 双平台）/ 核心域覆盖率门禁，见 `.github/workflows/ci.yml`；另有 `audit.yml` 月度供应链审计与 `fuzz.yml` cargo-fuzz 每周冒烟）。
+启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（双平台矩阵，含 `rust-tests-unix` 真机）/ frontend `typegen:check + typecheck + eslint + stylelint + build + vitest`（vitest 含覆盖率阈值）/ `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路（ubuntu + macOS 双平台）/ 核心域覆盖率门禁，见 `.github/workflows/ci.yml`；另有 `audit.yml` 月度供应链审计与 `fuzz.yml` cargo-fuzz 每周冒烟）。
 
 ### 前端样式
 
@@ -212,7 +212,7 @@ Vite 构建产物通过 `rust-embed` 编译进二进制。开发时可用 `--fea
 
 ### Web API 契约（openapi.json）
 
-根目录 `openapi.json` 是 **utoipa 生成 ⊕ 手写 baseline 按路径合并**的产物（`src/web/openapi.rs` 的 `merged_openapi_json`）：已注解域（`#[utoipa::path]`，目前 18/20 域，notification / diagnostics 尚未注解）的路径条目以生成源为准（整体替换手写条目），未注解条目维持手写；`components.schemas` 由生成管线产出（错误信封 `Error*` / 包装 `DataEnvelope<T>` 等跨域形状收口在 `web::openapi::schemas`，各 route 文件不得重复定义）。OpenAPI 版本 3.1.0，`info.version` 随 `CARGO_PKG_VERSION` 自动同步（三端同版少一处手工项）。重生成：`UPDATE_OPENAPI=1 cargo test`（生成测试重写文件；BTreeMap 键序 + 固定缩进保证重复生成零 diff）。前端经 `npm run typegen`（openapi-typescript）产出 `src/api/generated/api.d.ts`；切换到生成类型前，字段级契约的权威来源仍是手写 `frontend/src/api/types.ts`（边界见 `frontend/src/api/generated/README.md`）。
+根目录 `openapi.json` 是 **utoipa 生成 ⊕ 手写 baseline 按路径合并**的产物（`src/web/openapi.rs` 的 `merged_openapi_json`）：已注解域（`#[utoipa::path]`，目前 18/20 域，notification / diagnostics 尚未注解；注解须在 `src/web/openapi.rs` 的 `paths` 挂载后才进入生成管线）中已挂载域的路径条目以生成源为准（整体替换手写条目），未挂载与未注解条目维持手写；`components.schemas` 由生成管线产出（错误信封 `Error*` / 包装 `DataEnvelope<T>` 等跨域形状收口在 `web::openapi::schemas`，各 route 文件不得重复定义）。OpenAPI 版本 3.1.0，`info.version` 随 `CARGO_PKG_VERSION` 自动同步（三端同版少一处手工项）。重生成：`UPDATE_OPENAPI=1 cargo test`（生成测试重写文件；BTreeMap 键序 + 固定缩进保证重复生成零 diff）。前端经 `npm run typegen`（openapi-typescript）产出 `src/api/generated/api.d.ts`；切换到生成类型前，字段级契约的权威来源仍是手写 `frontend/src/api/types.ts`（边界见 `frontend/src/api/generated/README.md`）。
 
 ## 测试规范
 
