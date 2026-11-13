@@ -27,6 +27,7 @@ use crate::config::runtime::ConfigReloadSignal;
 use crate::events::EventBus;
 use crate::status::StatusManager;
 use crate::tasks::TaskManager;
+use crate::utils::io_human::io_error_at;
 use crate::web::error::ApiError;
 
 use self::cron_loop::RunSource;
@@ -50,8 +51,9 @@ pub enum SchedulerError {
     /// 关联的目标任务不存在。
     #[error("关联目标任务不存在: {0}")]
     TargetNotFound(String),
-    /// 文件读写失败。
-    #[error("IO 错误: {0}")]
+    /// 文件读写失败（载荷为「动作 + 路径 + 失败类别 + 原始错误」的人话化文案，
+    /// 构造点统一经 `utils::io_human` 包装；`ErrorKind` 原样保留）。
+    #[error("{0}")]
     IoError(#[from] std::io::Error),
     /// 后台阻塞任务（spawn_blocking）失败。
     #[error("后台任务失败: {0}")]
@@ -144,9 +146,14 @@ impl SchedulerService {
         let base_path = config.base_path();
         // 路径经 `utils::paths` 统一；启动已预建，此处保留幂等创建（测试直构兼容）。
         let scheduled_dir = crate::utils::paths::scheduled_dir(&base_path);
-        std::fs::create_dir_all(&scheduled_dir).map_err(SchedulerError::IoError)?;
+        // 人话化：动作 + 路径 + 失败类别 + 原始错误（下同，见 utils::io_human）
+        std::fs::create_dir_all(&scheduled_dir).map_err(|e| {
+            SchedulerError::IoError(io_error_at("创建定时任务目录", &scheduled_dir, e))
+        })?;
         let history_dir = crate::utils::paths::scheduled_history_dir(&base_path);
-        std::fs::create_dir_all(&history_dir).map_err(SchedulerError::IoError)?;
+        std::fs::create_dir_all(&history_dir).map_err(|e| {
+            SchedulerError::IoError(io_error_at("创建执行历史目录", &history_dir, e))
+        })?;
 
         let (task_change_tx, task_change_rx) = mpsc::channel(CHANGE_CHANNEL_CAPACITY);
 
@@ -340,7 +347,9 @@ impl SchedulerService {
             if !path_for_blocking.exists() {
                 return Err(SchedulerError::TaskNotFound(id_for_blocking));
             }
-            std::fs::remove_file(&path_for_blocking).map_err(SchedulerError::IoError)?;
+            std::fs::remove_file(&path_for_blocking).map_err(|e| {
+                SchedulerError::IoError(io_error_at("删除定时任务文件", &path_for_blocking, e))
+            })?;
             if let Err(error) = std::fs::remove_file(&history_path)
                 && error.kind() != std::io::ErrorKind::NotFound
             {
@@ -594,7 +603,9 @@ impl SchedulerService {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let content = tokio::fs::read_to_string(&path).await?;
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| SchedulerError::IoError(io_error_at("读取执行历史", &path, e)))?;
         let raw: serde_json::Value =
             serde_json::from_str(&content).unwrap_or(serde_json::json!({"runs": []}));
         Ok(map_history_records(&raw))

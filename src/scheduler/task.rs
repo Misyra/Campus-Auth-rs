@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::scheduler::SchedulerError;
+use crate::utils::io_human::io_error_at;
 
 // 运行时目录布局单一事实源（见 `utils::paths`）：`HISTORY_DIR_NAME` re-export 保持调用路径稳定；
 // `SCHEDULED_DIR_NAME` 已由调用方直引 `utils::paths`，此处不再转出口以避免未使用告警。
@@ -226,7 +227,8 @@ impl ScheduledTask {
 
     /// 从磁盘文件加载任务，并以文件名 stem 作为 `id`。
     pub(crate) fn load_from(path: &Path) -> Result<Self, SchedulerError> {
-        let content = std::fs::read_to_string(path).map_err(SchedulerError::IoError)?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| SchedulerError::IoError(io_error_at("读取定时任务文件", path, e)))?;
         let mut task: Self = serde_json::from_str(&content).map_err(SchedulerError::JsonError)?;
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
             task.id = stem.to_string();
@@ -251,7 +253,8 @@ impl ScheduledTask {
 
 /// 原子写入 JSON（委托给 utils::io::atomic_write_json）
 pub(crate) fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), SchedulerError> {
-    crate::utils::atomic_write_json(path, value).map_err(SchedulerError::IoError)
+    crate::utils::atomic_write_json(path, value)
+        .map_err(|e| SchedulerError::IoError(io_error_at("保存定时任务文件", path, e)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
