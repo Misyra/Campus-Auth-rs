@@ -62,6 +62,11 @@ FONTS = [
     r"C:\Windows\Fonts\arialbd.ttf",
     r"C:\Windows\Fonts\arial.ttf",
     r"C:\Windows\Fonts\segoeui.ttf",
+    # macOS：全部 truetype 候选不存在时 load_default 会退化为极小位图字体，
+    # 32pt 字号形同虚设，ddddocr 对叠加弧线/噪点的验证码直接识别为空
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ]
@@ -73,7 +78,11 @@ def _font(size):
             return ImageFont.truetype(path, size)
         except OSError:
             continue
-    return ImageFont.load_default()
+    # Pillow ≥10.1 支持按字号加载内置字体；旧版不支持时退回默认位图字体
+    try:
+        return ImageFont.load_default(size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def gen_captcha():
