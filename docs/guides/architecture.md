@@ -1,6 +1,6 @@
 # 架构总览与模块地图
 
-> **生成基准**：commit `3ae95d1`（2026-11-13，v5.2.0-beta.1）。本文记录代码的**实际**结构与依赖方向；重构后模块边界以代码为准——发现本文与 `src/` 现状不符时，以代码为准并按文末「维护约定」更新本文。
+> **生成基准**：commit `3ae95d1`（2026-11-13，v5.2.0-beta.1），A46 后收尾复核至 `0c707f1`。本文记录代码的**实际**结构与依赖方向；重构后模块边界以代码为准——发现本文与 `src/` 现状不符时，以代码为准并按文末「维护约定」更新本文。
 >
 > **与 `AGENTS.md` 的分工**：本文管**依赖关系与数据流**（谁引谁、数据怎么走）；`AGENTS.md` 项目结构节管**构建命令 / 代码规范 / 常见陷阱**，不重复此处内容。
 
@@ -188,6 +188,27 @@ graph LR
 - 共同点：落盘均走 `finalize_staged_package`，无旁路；`cancel_pending_update`（卸载流程）经状态临界区标记 + 操作互斥阻止在途操作重新提交。
 - 启动时后台 `apply_pending_on_startup`（2s 错峰）应用待定更新，与手动 apply 共用 `update_in_progress` 原子互斥。
 
+### 2.4 配置会话链（跨方案写盘防线）
+
+```mermaid
+graph LR
+    UI["前端持久会话面板"] --> START["POST /api/profiles/{id}<br/>/config-session/start"]
+    START --> MAT["Bridge 会话矩阵<br/>与登录 / 调试 / 重定向检测互斥"]
+    MAT --> W["Worker profile_session_start<br/>headed 持久浏览器 + 录制"]
+    START -->|"成功后记 (session_id, profile_id)"| REG["ConfigSessionRegistry<br/>bridge::session，仅进程内存"]
+    STOP["POST .../config-session/stop<br/>（discard 可选）"] --> OWN{"归属校验"}
+    OWN -->|"活跃会话属于别的方案"| R409["409 拒绝<br/>跨方案写盘防线"]
+    OWN -->|"属于本方案"| SETTLE["结算：profiles_lock 事务<br/>recorded_actions + 开关一次性写回"]
+    SETTLE --> TAKE["take() 清归属"]
+    W -.->|"Worker 重启 / 回收后<br/>「无活跃会话」结构化错误"| HEAL["惰性自愈：清表 + 409"]
+```
+
+- 占用互斥以 **Worker 侧为权威**（重复 start 回结构化错误 → 409）；Rust 会话矩阵把 `profile_session_start/stop` 归为持久类命令，在途登录 / 调试 / 重定向检测期间快速失败（同 `profile_auto_login` 口径）。
+- **归属注册表是跨方案写盘的唯一防线**：Worker 不感知方案 id，start 成功后 Rust 把 `(session_id, profile_id)` 记入 `ConfigSessionRegistry`（`bridge/session.rs`，BridgeSupervisor 持有）；stop 端点**先**做归属校验，「会话属于别的方案」一律 409——A 方案的录制永不写进 B 方案。
+- 非 discard 结算走与 `PUT /api/profiles/{id}` 同一 `profiles_lock` 事务（`recorded_actions + persistent_session_enabled=true` 一次性写回，并发保存不丢字段）；discard 仅关浏览器不落盘录制。
+- 陈旧归属惰性自愈：Worker 重启 / 回收后 stop 收到「无活跃会话」结构化错误 → 清表 + 409；`force_recycle` 强杀 Worker 时同步清表。
+- start 前编排侧 ensure `browser_profiles/<id>/`（`utils::paths::browser_profile_dir`），仅浏览器渠道支持（直连 / 脚本渠道无浏览器会话可录，400）。
+
 ---
 
 ## 3. 模块地图：src/
@@ -200,7 +221,7 @@ graph LR
 |------|------|---------|
 | `src/main.rs` | CLI 解析 → 启动分发（Windows release 为 GUI 子系统） | → launcher |
 | `src/lib.rs` | 库入口：聚合全部模块 + 统一 `ServiceHandle` | → 全部模块 |
-| `src/helper_main.rs` | 独立 binary `campus-auth-helper`：`--apply-update` 等主进程退出后换 exe；`--uninstall` 等退出后删安装目录（Windows 两段式经 `%TEMP%`） | → updater / uninstall |
+| `src/helper_main.rs` | 独立 binary `campus-auth-helper`：`--apply-update` 等主进程退出后换 exe；`--uninstall` 等退出后删安装目录（Windows 两段式经 `%TEMP%`） | → updater / uninstall / environment / utils |
 | `src/container.rs` | `ServiceContainer` 16 字段拓扑构造 + DI 容器 + 后台任务 spawn | → 几乎全部服务（唯一组装点） |
 | `src/app.rs` | Axum 服务器构建、端口绑定回退、按需启停 | → web / container / utils |
 | `src/browser.rs` | 浏览器可用性探测与渠道自动选择（系统渠道 + Playwright 管理渠道） | 独立（供 environment / login / web 共用） |
@@ -210,25 +231,25 @@ graph LR
 
 | 目录 | 职责（一行） | 依赖方向 |
 |------|------------|---------|
-| `launcher/` | 启动状态机：配置合并 → 锁 → 模式分发 → Engine 崩溃恢复 → 优雅关闭 | → app / container / config / utils / logging / engine / tray(desktop) |
+| `launcher/` | 启动状态机：配置合并 → 锁 → 模式分发 → Engine 崩溃恢复 → 优雅关闭 | → app / container / config / utils / logging / engine / tray(desktop) / network / status / web（auth 辅助） |
 | `engine/` | 调度引擎单 task：`commands`（EngineCommand 枚举）+ `run_loop`（select! 主循环，墙钟分界）+ `slot`（可替换句柄槽） | → login / monitor / config / status / events / network |
 | `login/` | 登录编排：`session`（尝试循环状态机）/ `preemption`（去重抢占矩阵）/ `http_login`（直连执行器）/ `script_login`（脚本渠道）/ `history`（JSONL）/ `ruijie`·`srun`（门户专用纯算法） | → bridge / tasks / config / status / events / network / environment / browser / utils |
 | `bridge/` | Python Bridge：`mod`（Supervisor select! 主循环）/ `ipc`（NDJSON 协议）/ `process`（子进程 + 行解析）/ `session`（会话互斥 + cancel 注册表）/ `state` / `api`（Web 注入的 trait）/ `lifecycle`（懒加载 spawn / 空闲回收）/ `debug`（调试会话结算）/ `job`（Windows Job Object）/ `orphan`（孤儿 chromium 清理）/ `worker`（状态机）/ `error` / `test_support` | → status / environment / config / utils |
-| `environment/` | 环境管理器：`bootstrap`（两阶段引导）/ `browser_registry`（Playwright registry 判定，与 Python 侧双端一致）/ `health`（Worker 探测 + 依赖指纹）/ `python`（venv + Playwright 安装）；子目录 `uv/`：`download`（镜像测速流式下载）/ `verify`（实启校验 + SHA256）/ `sync`（uv sync + OCR 依赖交接）/ `process`（取消超时受控子进程） | → status / events |
-| `tasks/` | 任务管理：`loader`（TaskManager，browser/scripts/http 三桶 CRUD）/ `executor`（TaskExecutor 统一入口：Browser→Bridge、Script→子进程，终态事件收敛点）/ `models`（三类任务 serde 模型） | → bridge / environment / config / status / events |
-| `monitor/` | 网络监测：`probes`（三类探测）/ `decision`（证据→状态纯函数）/ `model` / `portal`（门户重定向检测）/ `diagnostics`（一键诊断，Web 层按需构造不入容器） | → network / status / config / utils / login（diagnostics 读登录历史） |
-| `network/` | 网卡检测与出口：`detect`（三平台探测器）/ `interfaces`（虚拟网卡过滤）/ `adapters` / `egress`（按方案绑定出口，不回退）/ `settings` | 自洽（被 monitor / login / engine 消费） |
-| `config/` | 配置系统：`schema`（serde 数据模型 + JsonSchema 快照）/ `service`（ConfigService，双域互斥锁 + ArcSwap 快照）/ `runtime`（RuntimeConfig 合并快照）/ `profiles`（ProfileService）/ `migration`（v5→v10 幂等管线）/ `crypto`（AES-256-GCM） | → utils |
-| `scheduler/` | 定时任务：`cron_loop`（5→7 字段转换 + 分片睡眠抗休眠唤醒）/ `task`（ScheduledTask 模型 + 历史） | → config / tasks / status / events / web（复用 ApiError） |
+| `environment/` | 环境管理器：`bootstrap`（两阶段引导）/ `browser_registry`（Playwright registry 判定，与 Python 侧双端一致）/ `health`（Worker 探测 + 依赖指纹）/ `python`（venv + Playwright 安装）；子目录 `uv/`：`download`（镜像测速流式下载）/ `verify`（实启校验 + SHA256）/ `sync`（uv sync + OCR 依赖交接）/ `process`（取消超时受控子进程） | → status / events / utils（io_human / paths）/ browser（系统渠道就绪判定） |
+| `tasks/` | 任务管理：`loader`（TaskManager，browser/scripts/http 三桶 CRUD）/ `executor`（TaskExecutor 统一入口：Browser→Bridge、Script→子进程，终态事件收敛点）/ `models`（三类任务 serde 模型） | → bridge / environment / config / status / events / utils（io_human） |
+| `monitor/` | 网络监测：`probes`（三类探测）/ `decision`（证据→状态纯函数）/ `model` / `portal`（门户重定向检测）/ `diagnostics`（一键诊断，Web 层按需构造不入容器） | → network / status / config / utils / login（diagnostics 读登录历史）/ ai·environment·notification（diagnostics 复用 LLM 配置、环境状态与 URL 脱敏） |
+| `network/` | 网卡检测与出口：`detect`（三平台探测器）/ `interfaces`（虚拟网卡过滤）/ `adapters` / `egress`（按方案绑定出口，不回退）/ `settings` | → config（ProfileData / GlobalConfig 类型）/ utils（io_human）；被 monitor / login / engine 消费 |
+| `config/` | 配置系统：`schema`（serde 数据模型 + JsonSchema 快照）/ `service`（ConfigService，双域互斥锁 + ArcSwap 快照）/ `runtime`（RuntimeConfig 合并快照）/ `profiles`（ProfileService）/ `migration`（v5→v10 幂等管线）/ `crypto`（AES-256-GCM） | → utils / network（NetworkSettings 类型复用）/ notification（schema 示例渲染） |
+| `scheduler/` | 定时任务：`cron_loop`（5→7 字段转换 + 分片睡眠抗休眠唤醒）/ `task`（ScheduledTask 模型 + 历史） | → config / tasks / status / events / utils（io_human / paths）/ web（复用 ApiError） |
 | `status/` | 状态管理：`snapshot`（StatusSnapshot / PartialSnapshot）/ `notifier`（失败通知去重）；StatusManager watch 推送 | → monitor（快照含探测证据类型） |
 | `notification/` | 推送通知：`filter`（类型集合 + 免打扰时段纯函数）/ `template`（脱敏摘要渲染）/ `sender`（五通道发送 + 退避） | → events / config |
 | `events/` | 内部事件总线：`bus`（broadcast 1024）/ `sink`（JSONL 按日落盘 + 30 天保留）；`AppEvent` 白名单载荷 | 自洽（被 8 处发布方 / 消费方引用） |
-| `updater/` | 版本更新：`check`（清单 + 通道）/ `download`（流式 + 增量摘要）/ `apply`（pending.json）/ `local`（本地包复用）/ `operation`（取消不释放所有权）/ `distribution`（随包分发同步）/ `version_info`（PE 版本解析）/ `error` | → config / status / events / utils / uninstall |
-| `web/` | Web 层：`auth`（token + bootstrap 握手）/ `host`（DNS rebinding 防线）/ `ssrf`（解析钉扎）/ `openapi`（utoipa 契约管线，route_table 单一来源 ↔ openapi.json 双向校验）/ `error`（信封）/ `state`（AppState 细粒度注入）/ `operations`（长操作登记）/ `static_files` / `ws`；`routes/` 按域拆分 20 个文件（config / profiles / login / http_tasks / monitor / scheduler / tasks / scripts / tools / system / autostart / debug / history / repo / background / uninstall / ocr / ai / notification / diagnostics / …） | → 全部服务（经 container 与细粒度 Api trait） |
+| `updater/` | 版本更新：`check`（清单 + 通道）/ `download`（流式 + 增量摘要）/ `apply`（pending.json）/ `local`（本地包复用）/ `operation`（取消不释放所有权）/ `distribution`（随包分发同步）/ `version_info`（PE 版本解析）/ `error` | → config / status / events / utils / uninstall / environment（RESYNC_MARKER） |
+| `web/` | Web 层：`auth`（token + bootstrap 握手）/ `host`（DNS rebinding 防线）/ `ssrf`（解析钉扎）/ `openapi`（utoipa 契约管线：已注解域 spec 与手写 baseline 按路径合并生成 `openapi.json`，route_table 单一来源 ↔ 产物双向校验）/ `error`（信封）/ `state`（AppState 细粒度注入）/ `operations`（长操作登记）/ `static_files` / `ws`；`routes/` 按域拆分 20 个文件（config / profiles / login / http_tasks / monitor / scheduler / tasks / scripts / tools / system / autostart / debug / history / repo / background / uninstall / ocr / ai / notification / diagnostics / …） | → 全部服务（经 container 与细粒度 Api trait） |
 | `ai/` | AI 任务生成：`llm`（OpenAI 兼容客户端）/ `prompt`（schema 提示词）/ `generate`（生成编排 + 强校验回喂）/ `error` | → config（加密凭据）/ utils |
-| `tray/` | 系统托盘（`desktop` feature）：OS 线程极简 + tokio 泵任务承载业务 | → app / container / engine / config / status / web |
+| `tray/` | 系统托盘（`desktop` feature）：OS 线程极简 + tokio 泵任务承载业务 | → app / container / engine / config / status / web / login（LoginApi 直发登录）/ utils |
 | `uninstall/` | 卸载计划**单一事实源**：删什么 / 拒什么 / 怎么删（界面与 helper 共用） | → utils（paths 布局常量） |
-| `utils/` | 跨切面工具：`paths`（运行时目录布局单一事实源）/ `lock`（实例文件锁）/ `metrics`（AtomicU64）/ `io`（原子写）/ `io_human`（人话化 IO 错误文案）/ `archive_guard`（未解压运行拦截）/ `platform` + `platform_windows` / `platform_macos`（自启动） | 最底层：仅依赖 std（`config` / `environment` 等反向依赖它） |
+| `utils/` | 跨切面工具：`paths`（运行时目录布局单一事实源）/ `lock`（实例文件锁）/ `metrics`（AtomicU64）/ `io`（原子写）/ `io_human`（人话化 IO 错误文案）/ `archive_guard`（未解压运行拦截）/ `platform` + `platform_windows` / `platform_macos`（自启动） | 近乎最底层：仅 std + 两处上行辅助（`archive_guard` 复用 `app::is_docker_env`、`lock` 关机通知复用 `web::auth::read_token_file`；`config` / `environment` 等反向依赖它） |
 
 ---
 
@@ -268,7 +289,7 @@ Vue 3 + TypeScript + Vite。分层单向依赖：`views` → `components` / `com
 
 | 层 | 内容 | 职责 |
 |----|------|------|
-| `api/` | `client.ts` / `index.ts` / `types.ts` | fetch 封装（自动解包 `{data}` 信封 + bootstrap 握手鉴权）、端点函数集合、**手写契约类型唯一来源**（openapi.json 仅路径清单） |
+| `api/` | `client.ts` / `index.ts` / `types.ts` / `generated/api.d.ts` | fetch 封装（自动解包 `{data}` 信封 + bootstrap 握手鉴权）、端点函数集合、**手写契约类型 `types.ts`**（业务消费唯一来源）；`generated/api.d.ts` 由 `npm run typegen` 从 openapi.json 生成（`typegen:check` 钉一致性），生成物暂未被业务代码消费、待逐步接管 |
 | `composables/` | `useConfig` / `useProfiles` / `useTasks` / `useWebSocket` / `useUpdateDialog` 等 30+ | 页面级状态组合（加载 / 草稿 / 轮询 / WS 订阅） |
 | `components/` | `common/`（Modal / Toast / SetupWizard / CommandPalette …）+ 面板组件（DebugPanel / NetworkDiagnosticsPanel …） | 跨视图复用 UI |
 | `views/` | DashboardView / TasksView / ProfilesView / SettingsView / AiTaskView 等（`views/settings/` 分区设置页、`views/tasks/` 四任务面板） | 路由页面 |
@@ -327,10 +348,15 @@ graph TB
     LAUNCHER --> ENGINE
     LAUNCHER --> CONFIG
     LAUNCHER --> UTILS
+    LAUNCHER --> TRAY
     TRAY --> APP
     TRAY --> ENGINE
     TRAY --> CONFIG
+    TRAY --> LOGIN
+    TRAY --> WEB
     APP --> WEB
+    LAUNCHER -.->|"复用 web::auth 鉴权辅助"| WEB
+    WEB -.->|"restart / watchdog 辅助"| LAUNCHER
 
     ENGINE --> LOGIN
     ENGINE --> MONITOR
@@ -349,11 +375,15 @@ graph TB
     MONITOR --> NETWORK
     MONITOR --> STATUS
     MONITOR --> CONFIG
+    MONITOR --> AI
+    MONITOR --> ENV
+    MONITOR --> NOTIFICATION
     MONITOR -.->|"diagnostics 读历史"| LOGIN
     SCHED --> CONFIG
     SCHED --> TASKS
     SCHED --> STATUS
     SCHED --> EVENTS
+    SCHED --> UTILS
     SCHED -.->|"复用 ApiError"| WEB
 
     BRIDGE --> ENV
@@ -362,14 +392,18 @@ graph TB
     BRIDGE --> UTILS
     ENV --> STATUS
     ENV --> EVENTS
+    ENV --> BROWSER
+    ENV --> UTILS
     TASKS --> BRIDGE
     TASKS --> ENV
     TASKS --> CONFIG
     TASKS --> STATUS
     TASKS --> EVENTS
+    TASKS --> UTILS
     UPDATER --> CONFIG
     UPDATER --> STATUS
     UPDATER --> EVENTS
+    UPDATER --> ENV
     UPDATER --> UNINSTALL
     AI --> CONFIG
     AI --> UTILS
@@ -387,10 +421,16 @@ graph TB
     WEB --> AI
     WEB --> NOTIFICATION
     WEB --> UTILS
+    WEB --> BROWSER
+    WEB --> NETWORK
+    WEB --> UNINSTALL
     NOTIFICATION --> EVENTS
     NOTIFICATION --> CONFIG
 
     CONFIG --> UTILS
+    CONFIG --> NETWORK
+    NETWORK --> CONFIG
+    NETWORK --> UTILS
     STATUS -.->|"快照含探测证据类型"| MONITOR
     UNINSTALL --> UTILS
     EVENTS --> UTILS
@@ -398,12 +438,14 @@ graph TB
     LOGIN --> UTILS
     UPDATER --> UTILS
     WEB --> UTILS
+    UTILS -.->|"archive_guard 复用 is_docker_env"| APP
+    UTILS -.->|"lock 复用 read_token_file"| WEB
 
     HELPER -.-> UPDATER
     HELPER -.-> UNINSTALL
 ```
 
-> 读图要点：`config` / `status` / `events` / `utils` 是四块公共底座，被所有域引用（图中仅画代表性边，避免蜘蛛网）；`web` 是唯一几乎全知的位置（经 `AppState` 的细粒度 Api trait 注入，不直触内部状态）；`events` 本身不依赖任何业务模块（发布方与订阅方互不感知）；`helper_main` 是独立 binary，经 `updater` / `uninstall` 共享 pending 契约与删除清单。
+> 读图要点：`config` / `status` / `events` / `utils` 是四块公共底座，被所有域引用（图中仅画代表性边，避免蜘蛛网）；`utils` 近乎最底层，仅两处上行辅助复用（虚线：`archive_guard → app::is_docker_env`、`lock → web::auth::read_token_file`）；`web` 是唯一几乎全知的位置（经 `AppState` 的细粒度 Api trait 注入，不直触内部状态）；`events` 本身不依赖任何业务模块（发布方与订阅方互不感知）；`helper_main` 是独立 binary，经 `updater` / `uninstall` 共享 pending 契约与删除清单；测试模块内部的引用（如 engine 测试注入 Bridge/TaskManager 假件、monitor 诊断夹具引 ai）一律不画。
 
 ---
 
@@ -419,6 +461,7 @@ graph TB
 | **真浏览器** | `python_worker/tests/test_auto_login_browser.py` | 真 chromium 驱动持久上下文自动登录回放 |
 | **Python 单测**（pytest） | `python_worker/tests/*.py` | 步骤契约回归（`test_step_contract_regressions` / `test_step_timeout_budget`）、任务契约、变量解析、stdin 读取、Worker 鲁棒性、config_session / debug_session / ocr_runtime 纯逻辑层 |
 | **Fuzz**（3 target） | `fuzz/fuzz_targets/` | `fuzz_config_json`（SettingsData / ProfileData 任意 JSON 不 panic）、`fuzz_migrate`（迁移管线）、`fuzz_parse_ipc`（NDJSON 解析链全反序列化面） |
+| **覆盖率门禁**（CI `coverage`） | `.github/workflows/ci.yml` | `cargo llvm-cov --lib` 按域分组（config / login / engine / updater）行覆盖率阈值断言，阈值 = 实测基线 −4pp（防回退、容忍跨平台抖动，调阈值流程见 job 注释） |
 | **前端**（vitest） | `frontend/src/**/*.test.ts` | composables / utils 纯函数（loginChannel 契约、configRanges、draftReconcile）、组件行为、styles tokens |
 | **跨端一致性** | Rust 与 Python 各自测试 | `browser_registry` 判定语义双端一致（任一侧漂移都被测试抓到） |
 
