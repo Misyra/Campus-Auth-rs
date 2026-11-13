@@ -74,6 +74,11 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/diagnostics/run", || {
             post(routes::diagnostics::run_diagnostics)
         }),
+        // ---- 事件流（events）----
+        // Dashboard 活动概览数据源：读 `<base>/events` 近 N 天 JSONL。
+        // 事件载荷在事件类型层已白名单式脱敏（crate::events 设计红线），
+        // 端点不做二次过滤；days 钳制 1..=30、单文件行数上限兜底响应体积
+        ("GET", "/api/events", || get(routes::events::get_events)),
         // 诊断包导出：zip 附件下载（manifest + 脱敏配置快照 + 事件流 + 日志 +
         // 环境观测），白名单式收集且深度脱敏，走标准鉴权
         ("GET", "/api/diagnostics/bundle", || {

@@ -6,6 +6,7 @@ pub mod background;
 pub mod config;
 pub mod debug;
 pub mod diagnostics;
+pub mod events;
 pub mod history;
 pub mod http_tasks;
 pub mod login;
