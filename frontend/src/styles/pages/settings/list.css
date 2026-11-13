@@ -15,37 +15,19 @@
    documentElement.scrollHeight 撑到整页内容高度，滚轮在容器到底后链式滚动 window，
    表现为「页面可以无限往下滚」。建立包含块后这些控件被本容器裁剪，与旧版
    容器限定隐藏类的行为一致（守卫测试位于 styles/utility.test.ts）。 */
-.settings-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; scroll-padding-block: 16px; padding-inline: 2px 12px; }
+/* 设置滚动区：滚动条自占 6px（auto，不再预留空槽），右内边距归零——
+   卡片右缘与顶栏动作区/其它页内容右缘对齐（layout.css 顶栏 +6px 补偿同理） */
+.settings-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: auto; scroll-padding-block: 16px; padding-inline: 2px 0; }
 .settings-scroll > .settings-form { margin-top: 0; padding-bottom: 16px; gap: 48px; }
 .settings-category { min-width: 0; scroll-margin-top: 16px; }
 .settings-category + .settings-category { padding-top: 28px; border-top: 1px solid var(--border); }
 .settings-category-heading { margin: 0 2px 22px; font-size: var(--text-xl); font-weight: 650; color: var(--text-primary); }
 .settings-mobile-jump { display: none; }
 
-/* 设置搜索：常驻工具条（输入框对齐 .form-group input 的材质，字段同 token）。
+/* 设置搜索：输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，
+   见 composables/useSettingsSearch）；本页只保留无命中的空态提示。
    过滤逻辑在 utils/settingsSearch.ts：无命中的分区整体隐藏，命中行加 .settings-search-hit。 */
-.settings-search { flex: none; display: flex; align-items: center; gap: 10px; margin: 0 2px 16px; }
-.settings-search-input {
-  flex: 1;
-  min-width: 0;
-  max-width: 380px;
-  padding: 9px 12px;
-  background: var(--bg-glass);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--text-primary);
-  font-size: var(--text-base);
-  color-scheme: inherit;
-}
-.settings-search-input:hover { background: var(--bg-glass-heavy); }
-.settings-search-input:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
-}
-.settings-search-input::placeholder { color: var(--text-secondary); }
-.settings-search-clear { flex: none; }
-.settings-search-empty { color: var(--text-secondary); font-size: var(--text-md); }
+.settings-search-empty { flex: none; margin: 0 2px 16px; color: var(--text-secondary); font-size: var(--text-md); }
 .settings-category.settings-search-hidden { display: none; }
 /* 相邻分隔线挂在「前一个分区存在」上：分区被过滤掉后不再给后继分区留上边框 */
 .settings-category.settings-search-hidden + .settings-category { padding-top: 0; border-top: 0; }

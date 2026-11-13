@@ -16,6 +16,7 @@ import { useWebSocket } from "../../composables/useWebSocket";
 import { useUi } from "../../composables/useUi";
 import { useAppearance } from "../../composables/useAppearance";
 import { useCommandPalette } from "../../composables/useCommandPalette";
+import { useSettingsSearch } from "../../composables/useSettingsSearch";
 
 const route = useRoute();
 const router = useRouter();
@@ -26,6 +27,10 @@ const { wsReconnecting, wsRetryCount, wsDisconnectReason, retryNow } = useWebSoc
 const { quitApp } = useUi();
 const { appearance, getEffectiveTheme } = useAppearance();
 const { openPalette } = useCommandPalette();
+const { query: settingsQuery } = useSettingsSearch();
+
+/** 设置路由下顶栏搜索即本页过滤器（与设置搜索合并为一个入口） */
+const isSettingsRoute = computed(() => String(route.name ?? "").startsWith("settings"));
 
 /** 主题切换按钮展示**目标**主题图标：浅色时显示月亮（点它转深色），反之太阳 */
 const isDarkTheme = computed(() => getEffectiveTheme() === "dark");
@@ -85,8 +90,30 @@ function onNotifOpen(open: boolean): void {
       <button class="btn btn-xs" @click="retryNow()" title="跳过退避等待，立即以最短间隔重连">立即重试</button>
     </div>
     <div class="top-actions">
-      <!-- 搜索：命令面板入口（点击与 Ctrl/⌘+K 同效），样式对齐输入框观感 -->
-      <button type="button" class="topbar-search" title="搜索或执行命令" aria-label="搜索或执行命令" @click="openPalette()">
+      <!-- 搜索：设置路由下即本页过滤器（与页面搜索合并为一个入口）；
+           其余路由打开命令面板（点击与 Ctrl/⌘+K 同效） -->
+      <div v-if="isSettingsRoute" class="topbar-search topbar-search--input">
+        <IconApp name="search" />
+        <input
+          v-model="settingsQuery"
+          type="text"
+          class="topbar-search-input"
+          placeholder="搜索设置项、说明或分区标题"
+          aria-label="搜索设置"
+          autocomplete="off"
+        />
+        <button
+          v-if="settingsQuery"
+          type="button"
+          class="topbar-search-clear"
+          aria-label="清空搜索"
+          title="清空搜索"
+          @click="settingsQuery = ''"
+        >
+          <IconApp name="close" />
+        </button>
+      </div>
+      <button v-else type="button" class="topbar-search" title="搜索或执行命令" aria-label="搜索或执行命令" @click="openPalette()">
         <IconApp name="search" />
         <span class="topbar-search-text">搜索</span>
         <kbd class="topbar-search-kbd">{{ hotkeyLabel }}</kbd>

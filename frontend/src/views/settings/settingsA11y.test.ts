@@ -48,17 +48,25 @@ describe("系统设置页控件可访问性", () => {
   });
 });
 
-describe("设置页搜索工具条可访问性（SettingsView）", () => {
-  it("搜索输入框带 aria-label，不能只靠 placeholder", () => {
-    const input = settingsView.match(/<input[^>]*class="settings-search-input"[^>]*>/);
-    expect(input, "SettingsView.vue 缺少 settings-search-input 输入框").not.toBeNull();
+describe("设置页搜索可访问性（输入框已合并进顶栏）", () => {
+  const topbar = readFileSync(new URL("../../components/common/AppTopbar.vue", import.meta.url), "utf8");
+
+  it("设置路由下顶栏输入框带 aria-label，不能只靠 placeholder", () => {
+    const input = topbar.match(/<input[^>]*class="topbar-search-input"[^>]*>/);
+    expect(input, "AppTopbar.vue 缺少 topbar-search-input 输入框").not.toBeNull();
     expect(input![0]).toContain('aria-label="搜索设置"');
+    expect(topbar).toContain("isSettingsRoute");
   });
 
   it("清空按钮可达：type=button + aria-label（有查询词时才渲染）", () => {
-    const clear = settingsView.match(/<button[^>]*class="btn btn-sm btn-ghost settings-search-clear"[^>]*>/);
-    expect(clear, "SettingsView.vue 缺少搜索清空按钮").not.toBeNull();
+    const clear = topbar.match(/<button[^>]*class="topbar-search-clear"[^>]*>/);
+    expect(clear, "AppTopbar.vue 缺少搜索清空按钮").not.toBeNull();
     expect(clear![0]).toContain('type="button"');
     expect(clear![0]).toContain('aria-label="清空搜索"');
+  });
+
+  it("SettingsView 不再自绘第二个搜索框（入口唯一）", () => {
+    expect(settingsView).not.toContain("settings-search-input");
+    expect(settingsView).not.toContain("settings-search-clear");
   });
 });

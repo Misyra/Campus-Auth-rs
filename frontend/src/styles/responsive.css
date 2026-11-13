@@ -14,14 +14,9 @@
  */
 
 @media (max-width: 1100px) {
-  /* 原 1024 档并入本档：看板栅格同属「平板宽区装不下多列」 */
+  /* 原 1024 档并入本档：统计卡在平板宽区降为两列 */
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
-  }
-
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-    flex: none;
   }
 
   /* 单列看板按内容滚动，避免历史记录把下方实时日志挤出可见区域。 */

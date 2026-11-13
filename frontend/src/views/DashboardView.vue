@@ -179,6 +179,9 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         <span v-if="s.status.monitoring" class="status-detail">{{ s.networkStatusDetail.value }}</span>
       </div>
       <div class="hero-actions">
+        <button v-if="s.busy.login" class="btn btn-danger" @click="ui.cancelLogin()" title="取消正在执行的登录"><IconApp name="close" />取消登录</button>
+        <button v-else class="btn btn-secondary" @click="ui.manualLogin()" :disabled="s.busy.action || s.busy.loginCooldown" title="立即执行一次登录认证"><IconApp name="log-in" />手动登录</button>
+        <button class="btn btn-secondary" @click="ui.testNetwork()" :disabled="s.busy.action" title="立即检测当前网络连接"><IconApp name="wifi" />网络测试</button>
         <button
           class="btn"
           :class="s.status.monitoring ? 'btn-secondary' : 'btn-primary'"
@@ -259,38 +262,22 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
       </div>
     </div>
 
-    <div class="dashboard-grid">
-      <div class="dashboard-left">
-        <!-- 常用操作与登录历史相邻，避免在状态横幅两端分散。 -->
-        <div class="card quick-actions-card">
-          <div class="card-header"><h2>快捷操作</h2></div>
-          <div class="card-body">
-            <div class="action-buttons">
-              <button v-if="s.busy.login" class="btn btn-danger" @click="ui.cancelLogin()" title="取消正在执行的登录"><IconApp name="close" />取消登录</button>
-              <button v-else class="btn btn-secondary" @click="ui.manualLogin()" :disabled="s.busy.action || s.busy.loginCooldown" title="立即执行一次登录认证"><IconApp name="log-in" />手动登录</button>
-              <button class="btn btn-secondary" @click="ui.testNetwork()" :disabled="s.busy.action" title="立即检测当前网络连接"><IconApp name="wifi" />网络测试</button>
-            </div>
-          </div>
+    <!-- 一键网络诊断：五项并发探测 + 结构化结论（轻量内嵌面板，不单独建页） -->
+    <NetworkDiagnosticsPanel />
+
+    <!-- 登录历史 -->
+    <div class="card history-card">
+      <div class="card-header">
+        <h2>登录历史</h2>
+        <div class="history-actions">
+          <button class="btn btn-sm btn-icon-only" @click="fetchLoginHistory(true)" title="刷新" aria-label="刷新登录历史">
+            <IconApp name="refresh" />
+          </button>
+          <button class="btn btn-sm btn-icon-only" @click="clearLoginHistory" title="清空" aria-label="清空登录历史" :disabled="!loginHistory.length">
+            <IconApp name="trash" />
+          </button>
         </div>
-
-        <!-- 一键网络诊断：五项并发探测 + 结构化结论（轻量内嵌面板，不单独建页） -->
-        <NetworkDiagnosticsPanel />
       </div>
-
-      <div class="dashboard-right">
-        <!-- 登录历史 -->
-        <div class="card history-card">
-          <div class="card-header">
-            <h2>登录历史</h2>
-            <div class="history-actions">
-              <button class="btn btn-sm btn-icon-only" @click="fetchLoginHistory(true)" title="刷新" aria-label="刷新登录历史">
-                <IconApp name="refresh" />
-              </button>
-              <button class="btn btn-sm btn-icon-only" @click="clearLoginHistory" title="清空" aria-label="清空登录历史" :disabled="!loginHistory.length">
-                <IconApp name="trash" />
-              </button>
-            </div>
-          </div>
           <div class="card-body">
             <div v-if="!loginHistory.length" class="empty-state">
               <IconApp name="clock" />
@@ -321,8 +308,6 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
             </div>
           </div>
         </div>
-      </div>
-    </div>
 
     <!-- 实时日志 -->
     <div class="card log-card">

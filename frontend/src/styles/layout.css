@@ -107,7 +107,9 @@
   column-gap: 12px;
   align-items: center;
   min-height: 76px;
-  padding: 16px 32px;
+  /* 右缘对齐内容区：content-wrapper 为滚动容器并保留 6px 滚动条槽，
+     顶栏不动滚，故右内边距补上同一槽宽（32 + 6），图标/搜索框与卡片右缘齐平 */
+  padding: 16px 38px 16px 32px;
   background: var(--navigation-bg);
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -134,7 +136,8 @@
   grid-column: 3;
 }
 
-/* 顶栏搜索（命令面板入口）：观感对齐输入框，点击与 Ctrl/⌘+K 同效 */
+/* 顶栏搜索：非设置路由为命令面板入口（点击与 Ctrl/⌘+K 同效）；
+   设置路由下切换为真输入框，直接过滤设置页（与页面搜索合并为同一入口） */
 .topbar-search {
   display: inline-flex;
   align-items: center;
@@ -179,8 +182,57 @@
   white-space: nowrap;
 }
 
+/* 设置路由下的输入形态：不可点按整块，输入框占满余下宽度 */
+.topbar-search--input {
+  min-width: 240px;
+  cursor: text;
+}
+
+.topbar-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  line-height: 1.2;
+}
+
+.topbar-search-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.topbar-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: none;
+}
+
+.topbar-search-clear:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.topbar-search-clear svg {
+  width: 14px;
+  height: 14px;
+}
+
 @media (max-width: 1100px) {
   .topbar-search { min-width: 0; }
+  .topbar-search--input { min-width: 180px; }
   .topbar-search-text,
   .topbar-search-kbd { display: none; }
 }

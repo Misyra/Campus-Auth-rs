@@ -13,6 +13,7 @@ import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
 import { useToast } from "@/composables/useToast";
 import { useSettingsNavigation } from "@/composables/useSettingsNavigation";
+import { useSettingsSearch } from "@/composables/useSettingsSearch";
 import { activeChildId, SETTINGS_NAV_CHILDREN } from "@/utils/navTree";
 import { applySettingsSearch, type SettingsSearchResult } from "@/utils/settingsSearch";
 
@@ -34,8 +35,8 @@ let resizeObserver: ResizeObserver | null = null;
 let anchoredSection: string | null = null;
 
 // ===== 设置搜索（纯前端过滤，见 utils/settingsSearch.ts） =====
-const searchInput = ref<HTMLInputElement | null>(null);
-const searchQuery = ref("");
+// 输入框在顶栏（useSettingsSearch 单例），本页只消费查询词并应用过滤
+const { query: searchQuery } = useSettingsSearch();
 const searchStats = ref<SettingsSearchResult>({ totalSections: 0, matchedSections: 0, matchedRows: 0 });
 /** 关键词非空且没有任何分区命中时提示空态 */
 const searchEmpty = computed(() => searchQuery.value.trim() !== "" && searchStats.value.matchedSections === 0);
@@ -43,12 +44,6 @@ const searchEmpty = computed(() => searchQuery.value.trim() !== "" && searchStat
 /** 关键词变化后等 DOM 稳定再扫分区可见性；空关键词即恢复完整列表。 */
 function applySearch(): void {
   searchStats.value = applySettingsSearch(settingsForm.value, searchQuery.value);
-}
-
-/** 清空并回到输入框，键盘用户不丢焦点。 */
-function clearSearch(): void {
-  searchQuery.value = "";
-  searchInput.value?.focus();
 }
 
 watch(searchQuery, () => { void nextTick(applySearch); });
@@ -113,7 +108,12 @@ onMounted(() => {
   if (settingsForm.value) resizeObserver.observe(settingsForm.value);
   if (scrollContainer.value) resizeObserver.observe(scrollContainer.value);
 });
-onBeforeUnmount(() => { resizeObserver?.disconnect(); });
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  // 离开设置页即清空共享查询词：顶栏输入框只在设置路由渲染，
+  // 残留过滤会让下次进入时表单缺分区且无输入框可清
+  searchQuery.value = "";
+});
 
 const saveFailed = computed(() => config.saveFailed.value);
 const configLoadFailed = computed(() => config.configLoadFailed.value);
@@ -140,29 +140,9 @@ function handleSave() {
         <option v-for="section in sections" :key="section.id" :value="section.id">{{ section.label }}</option>
       </select>
     </div>
-    <!-- 搜索常驻工具条：过滤纯前端完成，无命中的分区隐藏，命中行高亮（utils/settingsSearch.ts）。 -->
-    <div class="settings-search">
-      <input
-        ref="searchInput"
-        v-model="searchQuery"
-        type="text"
-        class="settings-search-input"
-        placeholder="搜索设置项、说明或分区标题"
-        aria-label="搜索设置"
-        autocomplete="off"
-      />
-      <button
-        v-if="searchQuery"
-        type="button"
-        class="btn btn-sm btn-ghost settings-search-clear"
-        aria-label="清空搜索"
-        title="清空搜索"
-        @click="clearSearch"
-      >
-        <IconApp name="close" width="16" height="16" />
-      </button>
-      <span v-if="searchEmpty" class="settings-search-empty" role="status">无匹配的设置项</span>
-    </div>
+    <!-- 搜索输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，见
+         useSettingsSearch）；本页只保留无命中的空态提示。 -->
+    <p v-if="searchEmpty" class="settings-search-empty" role="status">无匹配的设置项</p>
     <div ref="scrollContainer" class="settings-scroll" @scroll.passive="updateActiveSection"
       @wheel.passive="releaseAnchor" @touchstart.passive="releaseAnchor" @pointerdown="releaseAnchor" @keydown="releaseAnchor">
       <div v-if="configLoadFailed" class="settings-load-failed">

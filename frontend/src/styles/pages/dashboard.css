@@ -91,39 +91,25 @@
   color: var(--warning);
 }
 
-/* 主操作行（启动/停止检测）：紧邻网络状态结论，自顶栏迁入首页 */
+/* 主操作行（手动登录/网络测试/启动检测）：紧邻网络状态结论，自顶栏迁入首页 */
 .hero-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-sm);
   margin-left: auto;
   flex: none;
 }
 
-/* 看板双列：左列放操作与诊断，右列放登录历史；活动概览整行独占。
-   旧版 280–320px 窄列会把图表日期轴与图例挤成一团，视觉批次起加宽并改自然流。 */
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
-  gap: var(--space-md);
-  align-items: start;
-}
-
-.dashboard-left,
-.dashboard-right {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-  min-width: 0;
+/* 看板单列自然流：诊断 / 登录历史 / 日志逐张全宽堆叠，右缘一致、无列底参差 */
+.dashboard-page > .diag-card {
+  margin-bottom: var(--space-md);
 }
 
 .history-card {
   display: flex;
   flex-direction: column;
-}
-
-.dashboard-right .history-card {
-  min-height: 360px;
+  margin-bottom: var(--space-md);
 }
 
 .history-card .card-body {
@@ -132,7 +118,7 @@
   min-height: 0;
 }
 
-/* 实时日志：网格之后的整行自然流区块，顶部留出段距 */
+/* 实时日志：整行区块，固定高度内部滚动 */
 .log-card {
   display: flex;
   flex-direction: column;
@@ -141,7 +127,7 @@
 
 .dashboard-page > .log-card {
   height: 420px;
-  margin-top: var(--space-md);
+  margin-bottom: var(--space-md);
 }
 
 .log-card .card-body {
@@ -325,28 +311,7 @@
   gap: 10px;
 }
 
-.quick-actions-card { flex: none; }
-.quick-actions-card .card-header { padding: 10px 16px; }
-.quick-actions-card .card-body { padding: 12px 16px; }
-
-.action-buttons {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.action-buttons .btn {
-  min-width: 0;
-  min-height: 36px;
-  padding: 6px;
-  gap: 6px;
-  font-size: var(--text-md);
-}
-
-/* 图标尺寸并排声明：本规则特异度低于 .action-buttons .btn svg，按升序特异度排在其前 */
 .network-status-symbol svg { width: 20px; height: 20px; }
-
-.action-buttons .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
 
 .history-actions {
   display: flex;
@@ -589,7 +554,6 @@
 
 @media (max-width: 1100px) {
   .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
-  .dashboard-page .dashboard-grid { flex: none; }
   .dashboard-page .history-card,
   .dashboard-page .log-card { min-height: 300px; }
   .dashboard-page .log-card { min-height: 420px; }
@@ -597,7 +561,6 @@
 
 @media (max-height: 700px) {
   .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
-  .dashboard-page .dashboard-grid { flex: none; }
   .dashboard-page .history-card { min-height: 280px; }
   .dashboard-page .log-card { min-height: 340px; }
 }
