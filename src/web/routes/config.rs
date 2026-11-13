@@ -2548,13 +2548,7 @@ mod tests {
                 json!("http://trigger.example.edu/"),
                 true,
             ),
-            (
-                "isp",
-                json!("sec-isp"),
-                "/isp",
-                json!("sec-isp"),
-                true,
-            ),
+            ("isp", json!("sec-isp"), "/isp", json!("sec-isp"), true),
             (
                 "active_task",
                 json!("portal-browser"),

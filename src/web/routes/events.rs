@@ -257,51 +257,63 @@ mod tests {
         let today = today();
         let yesterday = today - Duration::days(1);
         let t = |date: chrono::NaiveDate, h: u32| {
-            Utc.with_ymd_and_hms(
-                date.year(),
-                date.month(),
-                date.day(),
-                h, 0, 0,
-            ).unwrap()
+            Utc.with_ymd_and_hms(date.year(), date.month(), date.day(), h, 0, 0)
+                .unwrap()
         };
         // 今日文件：两条（含一条损坏行与空行，应被跳过）
         std::fs::write(
             events_dir.join(format!("{today}.jsonl")),
             format!(
                 "{}\n\n损坏行不是 JSON\n{}\n",
-                line("evt-2", t(today, 9), &AppEvent::LoginFailed(LoginSummary {
-                    profile_id: "p-1".into(),
-                    channel: "http".into(),
-                    reason: Some("invalid_credential".into()),
-                    attempt: Some(2),
-                })),
-                line("evt-3", t(today, 15), &AppEvent::NetworkDown(NetworkSummary {
-                    profile_id: None,
-                    reason: Some("tcp timeout".into()),
-                })),
+                line(
+                    "evt-2",
+                    t(today, 9),
+                    &AppEvent::LoginFailed(LoginSummary {
+                        profile_id: "p-1".into(),
+                        channel: "http".into(),
+                        reason: Some("invalid_credential".into()),
+                        attempt: Some(2),
+                    })
+                ),
+                line(
+                    "evt-3",
+                    t(today, 15),
+                    &AppEvent::NetworkDown(NetworkSummary {
+                        profile_id: None,
+                        reason: Some("tcp timeout".into()),
+                    })
+                ),
             ),
         )
         .unwrap();
         // 昨日文件：一条
         std::fs::write(
             events_dir.join(format!("{yesterday}.jsonl")),
-            line("evt-1", t(yesterday, 20), &AppEvent::LoginSucceeded(LoginSummary {
-                profile_id: "p-1".into(),
-                channel: "browser".into(),
-                reason: None,
-                attempt: Some(1),
-            })),
+            line(
+                "evt-1",
+                t(yesterday, 20),
+                &AppEvent::LoginSucceeded(LoginSummary {
+                    profile_id: "p-1".into(),
+                    channel: "browser".into(),
+                    reason: None,
+                    attempt: Some(1),
+                }),
+            ),
         )
         .unwrap();
         // 更早日期文件：窗口外（days=2 不覆盖），不应被读入
         let older = today - Duration::days(5);
         std::fs::write(
             events_dir.join(format!("{older}.jsonl")),
-            line("evt-old", t(older, 8), &AppEvent::TaskFailed(TaskSummary {
-                task_id: "t-9".into(),
-                task_kind: Some("script".into()),
-                reason: Some("exit_code_1".into()),
-            })),
+            line(
+                "evt-old",
+                t(older, 8),
+                &AppEvent::TaskFailed(TaskSummary {
+                    task_id: "t-9".into(),
+                    task_kind: Some("script".into()),
+                    reason: Some("exit_code_1".into()),
+                }),
+            ),
         )
         .unwrap();
 
@@ -380,12 +392,7 @@ mod tests {
             let uri = format!("/api/events?{query}");
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "query={query}");
@@ -403,12 +410,7 @@ mod tests {
             let uri = format!("/api/events?{query}");
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "query={query}");
