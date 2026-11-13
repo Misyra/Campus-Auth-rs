@@ -228,7 +228,7 @@ pub fn parse_dns_server(value: &str) -> io::Result<SocketAddr> {
         .parse::<Ipv4Addr>()
         .map(|ip| SocketAddr::from((ip, 53)))
         .or_else(|_| value.trim().parse::<SocketAddr>())
-        .map_err(io::Error::other)?;
+        .map_err(|e| io::Error::other(format!("DNS 地址格式无效（{e}）")))?;
     if !addr.is_ipv4() || addr.port() == 0 || addr.ip().is_unspecified() || addr.ip().is_multicast()
     {
         return Err(io::Error::new(
@@ -369,7 +369,9 @@ fn bind_interface(socket: &Socket, adapter: &EgressAdapter) -> io::Result<()> {
         };
         if result != 0 {
             // 仅在 Winsock 调用失败后立即读取线程错误码。
-            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+            let raw = io::Error::from_raw_os_error(unsafe { WSAGetLastError() });
+            // 人话化：动作 + 失败类别 + 原始错误（全限定路径避免非 Windows 构建的未使用导入）
+            return Err(crate::utils::io_human::io_error("绑定出口网卡", raw));
         }
         Ok(())
     }

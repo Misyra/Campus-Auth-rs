@@ -11,7 +11,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum NetworkError {
     /// 子进程执行失败
-    #[error("子进程执行失败: {command}")]
+    ///
+    /// Display 内联原始错误（此前只挂在 `source` 链上，`{e}` 打日志时原因丢失）。
+    #[error("网络探测命令 {command} 启动失败：{source}")]
     SubprocessFailed {
         /// 执行的系统命令。
         command: String,
@@ -30,7 +32,9 @@ pub enum NetworkError {
     },
 
     /// 解析系统命令输出失败
-    #[error("解析系统命令输出失败: {command}")]
+    ///
+    /// Display 内联原始原因（非零退出码等），排障时不必再翻 `source` 链。
+    #[error("解析网络探测命令 {command} 输出失败：{source}")]
     ParseFailed {
         /// 执行的系统命令。
         command: String,
@@ -185,7 +189,10 @@ async fn run_command(program: &str, args: &[&str]) -> Result<String, NetworkErro
         );
         return Err(NetworkError::ParseFailed {
             command: program.to_string(),
-            source: anyhow::anyhow!("命令退出码 {:?}", output.status.code()),
+            source: anyhow::anyhow!(
+                "命令以非零退出码 {:?} 结束，无可用输出",
+                output.status.code()
+            ),
         });
     }
     Ok(decode_console_output(&output.stdout))

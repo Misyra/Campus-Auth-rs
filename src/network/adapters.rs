@@ -96,8 +96,8 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress
             .stdout
             .strip_prefix(b"\xef\xbb\xbf")
             .unwrap_or(&output.stdout);
-        let list: Vec<WindowsAdapter> =
-            serde_json::from_slice(bytes).map_err(std::io::Error::other)?;
+        let list: Vec<WindowsAdapter> = serde_json::from_slice(bytes)
+            .map_err(|e| std::io::Error::other(format!("网卡信息不是合法 JSON：{e}")))?;
         Ok(select_windows_adapters(list))
     }
     #[cfg(not(windows))]
@@ -108,8 +108,9 @@ ConvertTo-Json -InputObject $rows -Depth 4 -Compress
             .map_err(std::io::Error::other)?;
         let mut adapters = Vec::new();
         for interface in interfaces {
-            let name =
-                std::ffi::CString::new(interface.name.clone()).map_err(std::io::Error::other)?;
+            let name = std::ffi::CString::new(interface.name.clone()).map_err(|e| {
+                std::io::Error::other(format!("网卡名称无法转换为系统接口名（{e}）"))
+            })?;
             // 接口名来自系统枚举，CString 保证传入的字符串以 NUL 结束。
             let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
             if index == 0 {
