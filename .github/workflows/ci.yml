@@ -231,12 +231,18 @@ jobs:
           enable-cache: true
           cache-dependency-glob: python_worker/uv.lock
 
-      # 类型检查独立成步：此前它只隐含在 npm run build 里，
-      # 一旦失败会混在构建日志中难以辨认（曾因此长期未发现检查本身失效）。
       - name: 安装前端依赖
         working-directory: frontend
         run: npm ci
 
+      # openapi.json 与入库生成物 api.d.ts 的一致性门禁：后端契约改动后若忘跑
+      # npm run typegen 重新生成，前端类型就停留在旧契约上，在此尽早失败。
+      - name: 前端 typegen 一致性检查
+        working-directory: frontend
+        run: npm run typegen:check
+
+      # 类型检查独立成步：此前它只隐含在 npm run build 里，
+      # 一旦失败会混在构建日志中难以辨认（曾因此长期未发现检查本身失效）。
       - name: 前端类型检查（vue-tsc）
         working-directory: frontend
         run: npm run typecheck
