@@ -10,8 +10,9 @@
  *   开关自动勾选 + 录制数展示 + sessionStopped 通知宿主刷新；
  * - 409 占用 → 固定文案「已有配置会话进行中」（不透传后端 message）；
  * - 失败三分支：409 固定文案 / 后端中文 message 直显 / 网络异常兜底文案；
- * - 放弃路径：调 stop 关浏览器但**不采纳**返回（开关不动、录制数不更新、
- *   不通知宿主）；stop 409（会话已消失）静默收场；
+ * - 放弃路径：调 stop（?discard=true，后端不落盘录制）关浏览器但**不采纳**返回
+ *   （开关不动、录制数不更新、不通知宿主）；stop 409（会话已消失）静默收场；
+ * - discard 请求契约：放弃 URL 带 discard=true，完成配置 URL 不带；
  * - 完成配置失败：横幅保留可重试，放弃可退出；
  * - 截断提示；未保存方案只给指引；start 进行中防连点。
  */
@@ -139,11 +140,13 @@ describe("PersistentSessionSection", () => {
   });
 
   it("start 成功 → 横幅指引 → 完成配置 → 开关勾选 + 录制数 + 通知宿主", async () => {
+    const stopUrls: string[] = [];
     const fetchMock = stubFetch((url) => {
       if (url.includes("/api/profiles/dorm/config-session/start")) {
         return Promise.resolve(jsonResponse({ data: { started: true } }));
       }
       if (url.includes("/api/profiles/dorm/config-session/stop")) {
+        stopUrls.push(url);
         return Promise.resolve(
           jsonResponse({ data: { recorded_count: 2, truncated: false, persistent_session_enabled: true } }),
         );
@@ -165,6 +168,9 @@ describe("PersistentSessionSection", () => {
     click("session-finish");
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // 完成配置 = 落盘采纳：stop 不带 discard 参数
+    expect(stopUrls).toHaveLength(1);
+    expect(stopUrls[0]).not.toContain("discard");
     // 横幅收场；开关随 stop 响应自动勾选（写回草稿）；录制数来自响应计数
     expect(document.querySelector('[data-testid="session-banner"]')).toBeNull();
     expect(draft.persistent_session_enabled).toBe(true);
@@ -227,13 +233,15 @@ describe("PersistentSessionSection", () => {
     );
   });
 
-  it("放弃：调 stop 关浏览器但不采纳返回（开关不动、录制数不更新、不通知宿主）", async () => {
+  it("放弃：调 stop（?discard=true）关浏览器但不采纳返回（开关不动、录制数不更新、不通知宿主）", async () => {
+    const stopUrls: string[] = [];
     const fetchMock = stubFetch((url) => {
       if (url.includes("/config-session/start")) {
         return Promise.resolve(jsonResponse({ data: { started: true } }));
       }
-      // stop 响应带了录制结果（契约 stop 会落盘）：放弃语义必须无视它
+      // discard=true 时后端不落盘，但响应仍回真实计数：放弃语义必须无视它
       if (url.includes("/config-session/stop")) {
+        stopUrls.push(url);
         return Promise.resolve(
           jsonResponse({ data: { recorded_count: 5, truncated: false, persistent_session_enabled: true } }),
         );
@@ -247,8 +255,10 @@ describe("PersistentSessionSection", () => {
     await settle();
     click("session-abandon");
     await settle();
-    // stop 已发出（浏览器确实被关掉）……
+    // stop 已发出（浏览器确实被关掉），且带 discard=true（放弃 = 后端不落盘录制、不写方案）……
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(stopUrls).toHaveLength(1);
+    expect(stopUrls[0]).toContain("discard=true");
     // ……但返回被丢弃：开关保持关态、无录制数、横幅收场、宿主未被通知
     expect(draft.persistent_session_enabled).toBe(false);
     expect(toggleChecked()).toBe("false");
@@ -260,10 +270,12 @@ describe("PersistentSessionSection", () => {
   });
 
   it("放弃时 stop 409（会话已消失）静默收场", async () => {
+    const stopUrls: string[] = [];
     stubFetch((url) => {
       if (url.includes("/config-session/start")) {
         return Promise.resolve(jsonResponse({ data: { started: true } }));
       }
+      stopUrls.push(url);
       return Promise.resolve(
         jsonResponse({ error: { code: "NOT_FOUND", message: "无活跃配置会话" } }, { status: 409 }),
       );
@@ -273,6 +285,9 @@ describe("PersistentSessionSection", () => {
     await settle();
     click("session-abandon");
     await settle();
+    // 放弃语义与结果无关：即使会话已消失，请求仍须带 discard=true
+    expect(stopUrls).toHaveLength(1);
+    expect(stopUrls[0]).toContain("discard=true");
     expect(document.querySelector('[data-testid="session-banner"]')).toBeNull();
     expect(document.querySelector('[data-testid="session-error"]')).toBeNull();
   });

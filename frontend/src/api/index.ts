@@ -285,10 +285,12 @@ export const profilesApi = {
  * 浏览器持久会话的「配置会话」（headed 配置浏览器 + 交互录制）。
  *
  * start 打开以方案认证地址为门户地址的配置浏览器并开启录制；stop 结束会话并把
- * 录制动作落盘方案（recorded_actions + persistent_session_enabled=true）。会话全局
- * 互斥：已有活跃会话时 start 返回 409（前端显示固定文案「已有配置会话进行中」），
- * 无活跃会话时 stop 也返回 409（后端 message 直显）。start 要等浏览器真实拉起并
- * 就绪，放宽客户端超时（与重定向检测同量级）。
+ * 录制动作落盘方案（recorded_actions + persistent_session_enabled=true），带
+ * `discard=true` 时仅关闭浏览器：不落盘录制、不写方案（响应仍返回真实
+ * recorded_count，是否采纳由调用方决定）。会话全局互斥：已有活跃会话时 start
+ * 返回 409（前端显示固定文案「已有配置会话进行中」），无活跃会话时 stop 也返回
+ * 409（后端 message 直显）。start 要等浏览器真实拉起并就绪，放宽客户端超时
+ * （与重定向检测同量级）。
  */
 export const configSessionApi = {
   start: (profileId: string) =>
@@ -297,9 +299,10 @@ export const configSessionApi = {
       null,
       { timeout: 60000 },
     ),
-  stop: (profileId: string) =>
+  /** options.discard 为 true 时追加 `?discard=true`（放弃路径）；缺省落盘采纳（完成配置路径） */
+  stop: (profileId: string, options?: { discard?: boolean }) =>
     http.post<ConfigSessionStopResult>(
-      `/api/profiles/${pathSegment(profileId)}/config-session/stop`,
+      `/api/profiles/${pathSegment(profileId)}/config-session/stop${options?.discard ? "?discard=true" : ""}`,
     ),
 };
 

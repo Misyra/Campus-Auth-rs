@@ -127,20 +127,16 @@ async function finishSession(): Promise<void> {
 }
 
 /**
- * 放弃：调 stop 关闭浏览器，但**不采纳**返回——不写开关、不更新录制数。
- *
- * ⚠️ 语义取舍（待与 T3-3c 对齐）：冻结契约的 stop 是「结束并落盘」，没有独立的
- * 「丢弃录制」端点。这里的前端口径是「放弃 = 只求浏览器一定被关掉（泄漏面优先），
- * 录制是否已被后端落盘以后端实现为准」：若 T3-3c 落盘，重开编辑器会看到录制仍在
- * （用户可再次「重新录制」覆盖）；若未落盘，即字面意义的放弃。后端若将来提供
- * discard 语义，此处应改调之。对应的旧录制展示仍取草稿数组（可能陈旧）。
+ * 放弃：调 stop（discard=true）只关浏览器——后端不落盘录制、不写方案，「放弃 =
+ * 不采纳录制」由前后端共同保证（响应仍带真实 recorded_count，本路径一律丢弃：
+ * 不写开关、不更新录制数、不通知宿主）。「完成配置」走缺省 stop（落盘采纳）。
  */
 async function abandonSession(): Promise<void> {
   if (phase.value !== "active" && phase.value !== "stopping") return;
   phase.value = "stopping";
   errorMsg.value = "";
   try {
-    await configSessionApi.stop(props.profileId as string);
+    await configSessionApi.stop(props.profileId as string, { discard: true });
   } catch (error) {
     // 409（无活跃会话）= 浏览器已经没了，放弃的目的已达成，静默收场；
     // 其余失败如实提示（浏览器可能还开着，用户需自行关闭或重试）
