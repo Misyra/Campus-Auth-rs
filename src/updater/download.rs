@@ -13,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 use crate::updater::UpdateInfo;
 use crate::updater::apply::EXE_NAME;
 use crate::updater::error::UpdaterError;
+use crate::utils::io_human::{io_error, io_error_at};
 
 /// 已暂存的更新（下载校验 + 解压后的产物）
 ///
@@ -111,9 +112,9 @@ pub(crate) async fn download_and_verify(
         "开始下载更新包"
     );
 
-    tokio::fs::create_dir_all(staging_dir)
-        .await
-        .map_err(UpdaterError::StagingDirCreateFailed)?;
+    tokio::fs::create_dir_all(staging_dir).await.map_err(|e| {
+        UpdaterError::StagingDirCreateFailed(io_error_at("创建更新暂存目录", staging_dir, e))
+    })?;
 
     // 资产文件名跟随下载 URL（Windows 发布 zip / unix 发布 tar.gz），
     // 落盘命名与后续解压分派都以此为据，不再硬编码 .zip
@@ -124,9 +125,9 @@ pub(crate) async fn download_and_verify(
         let _ = tokio::fs::remove_file(&tmp_path).await;
     }
 
-    let mut file = tokio::fs::File::create(&tmp_path)
-        .await
-        .map_err(UpdaterError::PendingWriteFailed)?;
+    let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| {
+        UpdaterError::PendingWriteFailed(io_error_at("创建下载临时文件", &tmp_path, e))
+    })?;
 
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0u64;
@@ -160,7 +161,10 @@ pub(crate) async fn download_and_verify(
         hasher.update(chunk.as_ref());
         if let Err(e) = file.write_all(chunk.as_ref()).await {
             cleanup_tmp(&tmp_path);
-            return Err(UpdaterError::PendingWriteFailed(e));
+            return Err(UpdaterError::PendingWriteFailed(io_error(
+                "写入下载临时文件",
+                e,
+            )));
         }
         downloaded += chunk.len() as u64;
         if downloaded > MAX_UPDATE_ARCHIVE_BYTES {
@@ -191,7 +195,7 @@ pub(crate) async fn download_and_verify(
     }
     file.flush().await.map_err(|e| {
         cleanup_tmp(&tmp_path);
-        UpdaterError::PendingWriteFailed(e)
+        UpdaterError::PendingWriteFailed(io_error("写入下载临时文件", e))
     })?;
     drop(file);
 
@@ -226,7 +230,9 @@ pub(crate) async fn download_and_verify(
     let archive_path = staging_dir.join(&archive_name);
     tokio::fs::rename(&tmp_path, &archive_path)
         .await
-        .map_err(UpdaterError::PendingWriteFailed)?;
+        .map_err(|e| {
+            UpdaterError::PendingWriteFailed(io_error_at("保存下载完成的更新包", &archive_path, e))
+        })?;
     Ok(archive_path)
 }
 
@@ -293,12 +299,14 @@ fn extract_to_staging_blocking(
     if extracted_dir.exists() {
         let _ = std::fs::remove_dir_all(&extracted_dir);
     }
-    std::fs::create_dir_all(&extracted_dir).map_err(UpdaterError::StagingDirCreateFailed)?;
+    std::fs::create_dir_all(&extracted_dir).map_err(|e| {
+        UpdaterError::StagingDirCreateFailed(io_error_at("创建解压目录", &extracted_dir, e))
+    })?;
 
     // 全量解压（压缩包打开/解析错误统一映射为 ExtractFailed；路径穿越由
     // extract_archive 兜底跳过）
     crate::utils::io::extract_archive(archive_path, &extracted_dir, |_| true)
-        .map_err(|e| UpdaterError::ExtractFailed(e.to_string()))?;
+        .map_err(|e| UpdaterError::ExtractFailed(io_error("解压更新包", e).to_string()))?;
 
     let extracted_exe = extracted_dir.join(EXE_NAME);
     if !extracted_exe.exists() {

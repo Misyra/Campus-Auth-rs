@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ConfigService;
 use crate::events::{AppEvent, EventBus, UpdateSummary};
 use crate::status::{InstallProgress, LoginStatus, PartialSnapshot, StatusManager};
+use crate::utils::io_human::{io_error, io_error_at};
 
 mod apply;
 pub(crate) mod check;
@@ -826,9 +827,9 @@ impl UpdaterService {
     async fn download_stage_and_pending(&self, info: &UpdateInfo) -> Result<(), UpdaterError> {
         let worker_target_dir = self_update_worker_dir(&self.base_path)?;
         let staging_dir = self.base_path.join(apply::STAGING_DIR_NAME);
-        tokio::fs::create_dir_all(&staging_dir)
-            .await
-            .map_err(UpdaterError::StagingDirCreateFailed)?;
+        tokio::fs::create_dir_all(&staging_dir).await.map_err(|e| {
+            UpdaterError::StagingDirCreateFailed(io_error_at("创建更新暂存目录", &staging_dir, e))
+        })?;
 
         // 本地包优先：重新扫描（不信任 check 阶段回报的文件名与存在性——两个动作之间
         // 文件可能已被删除/替换）。文件名仍取远程资产名，内容由复制时的增量哈希锁定。
@@ -899,7 +900,9 @@ impl UpdaterService {
             staged.extracted_exe.display()
         );
 
-        let target_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
+        let target_exe = std::env::current_exe().map_err(|e| {
+            UpdaterError::CurrentExeResolveFailed(io_error("定位当前可执行文件", e))
+        })?;
         // 修复：pending 的 sha256 应为解压后 exe 的哈希，而非 zip 的哈希。
         // 之前直接克隆 info.sha256（zip sha）导致 helper 对 extracted_exe 的复核恒失败（P0 阻断）。
         // 现在下载阶段已校验 zip 完整性，此处额外计算 exe sha 存入 pending 供 helper 二次复核。
@@ -951,7 +954,9 @@ impl UpdaterService {
         if self.update_cancelled() {
             return Err(UpdaterError::Cancelled);
         }
-        let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
+        let current_exe = std::env::current_exe().map_err(|e| {
+            UpdaterError::CurrentExeResolveFailed(io_error("定位当前可执行文件", e))
+        })?;
         let helper_path = current_exe
             .parent()
             .map(|p| p.join(apply::HELPER_EXE_NAME))
@@ -990,7 +995,8 @@ impl UpdaterService {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        cmd.spawn().map_err(UpdaterError::HelperSpawnFailed)?;
+        cmd.spawn()
+            .map_err(|e| UpdaterError::HelperSpawnFailed(io_error("启动更新助手进程", e)))?;
         Ok(())
     }
     /// 关机时补唤醒 helper（幂等 best-effort）
@@ -1103,7 +1109,9 @@ impl UpdaterService {
         let staging_dir = PathBuf::from(&pending.staging_dir);
         let target_exe = PathBuf::from(&pending.target_exe);
         // 替换与备份都基于运行时取到的 current_exe，提前解析供校验与后续复用
-        let current_exe = std::env::current_exe().map_err(UpdaterError::CurrentExeResolveFailed)?;
+        let current_exe = std::env::current_exe().map_err(|e| {
+            UpdaterError::CurrentExeResolveFailed(io_error("定位当前可执行文件", e))
+        })?;
         // G13 对齐 helper 的防篡改基线：
         // - staging 是 remove_dir_all 的目标，必须锁在 base 之内，否则被篡改的
         //   pending 能把任意目录变成清理对象；
@@ -1215,18 +1223,18 @@ impl UpdaterService {
             })?;
             if !same_version_recovery {
                 self_replace::self_replace(&extracted_exe)
-                    .map_err(|e| UpdaterError::SelfReplaceFailed(e.to_string()))?;
+                    .map_err(|e| UpdaterError::SelfReplaceFailed(format!("替换主程序失败：{e}")))?;
             }
             // 主程序提交之后更新助手；失败保留 pending，下次用同版本摘要修复分发。
             distribution::replace_helper(&extracted_dir, install_dir).map_err(|e| {
                 UpdaterError::SelfReplaceFailed(format!("助手同步失败，暂存已保留: {e}"))
             })?;
             distribution::sync_portable_marker(&extracted_dir, install_dir)
-                .map_err(|e| UpdaterError::SelfReplaceFailed(e.to_string()))?;
+                .map_err(|e| UpdaterError::SelfReplaceFailed(format!("便携版标记同步失败：{e}")))?;
             Ok(true)
         })
         .await
-        .map_err(|e| UpdaterError::OperationFailed(e.to_string()))??;
+        .map_err(|e| UpdaterError::OperationFailed(format!("更新后台任务异常中止（{e}）")))??;
         apply::cleanup_after_apply(&self.base_path).await;
         tracing::info!("启动时已完整应用更新: v{}", pending.version);
         Ok(true)
@@ -1367,7 +1375,7 @@ fn build_proxied_client(proxy_url: &str) -> Result<reqwest::Client, String> {
         .connect_timeout(download::DOWNLOAD_CONNECT_TIMEOUT)
         .redirect(updater_redirect_policy())
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("更新下载客户端构建失败：{e}"))
 }
 
 /// 按更新器配置选择客户端（后台检查任务用，与 [`UpdaterService::effective_client`] 同语义）

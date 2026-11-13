@@ -64,7 +64,10 @@ impl UpdaterService {
             work(service).await
         })
         .await
-        .map_err(|error| UpdaterError::OperationFailed(error.to_string()))?
+        // 人话化：JoinError 只有 panic/中止两种语义，原文保留在括号内供排障
+        .map_err(|error| {
+            UpdaterError::OperationFailed(format!("更新后台任务异常中止（{error}）"))
+        })?
     }
 }
 

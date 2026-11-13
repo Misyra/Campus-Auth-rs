@@ -11,8 +11,8 @@ pub enum UpdaterError {
     /// 路由器版交由系统服务管理升级，避免助手与 procd 同时启动后继进程。
     #[error("OpenWrt 版请先停止 campus-auth 服务，再手动替换安装包并启动服务")]
     ServiceManaged,
-    /// 独立更新任务异常退出。
-    #[error("更新任务执行失败: {0}")]
+    /// 独立更新任务异常退出（panic / 被中止），载荷为中文描述 + 原始 JoinError。
+    #[error("{0}")]
     OperationFailed(String),
     /// 拉取发布清单（latest.json）失败（网络/超时/非 2xx）
     #[error("拉取发布清单失败: {0}")]
@@ -102,23 +102,38 @@ pub enum UpdaterError {
     StalePending,
 
     /// zip 解压失败（损坏/格式错误/路径穿越）
-    #[error("解压失败: {0}")]
+    ///
+    /// 载荷是「动作 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），Display 直接透出。
+    #[error("{0}")]
     ExtractFailed(String),
 
     /// staging 目录创建失败
-    #[error("创建 staging 目录失败: {0}")]
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），`ErrorKind` 原样保留。
+    #[error("{0}")]
     StagingDirCreateFailed(#[source] std::io::Error),
 
-    /// pending.json 写入失败
-    #[error("写入 pending.json 失败: {0}")]
+    /// pending.json / 暂存包落盘写失败
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），`ErrorKind` 原样保留。
+    #[error("{0}")]
     PendingWriteFailed(#[source] std::io::Error),
 
     /// pending.json 读取失败
-    #[error("读取 pending.json 失败: {0}")]
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），`ErrorKind` 原样保留。
+    #[error("{0}")]
     PendingReadFailed(#[source] std::io::Error),
 
     /// 助手进程启动失败
-    #[error("启动更新助手失败: {0}")]
+    ///
+    /// 载荷是「动作 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装，固定原因场景为自述中文文案）。
+    #[error("{0}")]
     HelperSpawnFailed(#[source] std::io::Error),
 
     /// 已有更新正在下载（进程内并发互斥窗口）
@@ -146,7 +161,10 @@ pub enum UpdaterError {
     HttpsRequired(String),
 
     /// 无法确定当前可执行文件路径
-    #[error("无法确定当前可执行文件路径: {0}")]
+    ///
+    /// 载荷是「动作 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装）。
+    #[error("{0}")]
     CurrentExeResolveFailed(#[source] std::io::Error),
 
     /// 当前 Worker 来自外部或只读布局，不能由便携版更新器安全覆盖
