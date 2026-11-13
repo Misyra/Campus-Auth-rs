@@ -60,7 +60,7 @@ pub fn extract_json(text: &str) -> Result<Value, AiError> {
 /// AI 生成专用安全校验：限制为新建浏览器任务，阻止覆盖已有任务、读取本机文件
 /// 或执行脚本步骤。
 ///
-/// 脚本步型禁令针对提示词注入面（见 [`FORBIDDEN_STEP_TYPES`]）：页面材料可诱导
+/// 脚本步型禁令针对提示词注入面（见 `FORBIDDEN_STEP_TYPES`）：页面材料可诱导
 /// 模型夹带 `eval` / `custom_js`，而 JSON 预览不足以让用户发现脚本内容。错误信息
 /// 面向前端用户展示，须指明步骤序号与步型名。
 pub fn validate_generated_task(task: &Value) -> Result<(), Vec<String>> {

@@ -14,13 +14,13 @@
 //!
 //! ## 子模块划分
 //!
-//! - [`error`]：`BridgeError` 错误类型；
-//! - [`state`]：Supervisor 内部状态（`BridgeInner`）与后台命令（`SupervisorCommand`）；
-//! - [`api`]：Web 层消费的 `BridgeApi` trait 及 Supervisor 实现；
+//! - `error`：`BridgeError` 错误类型；
+//! - `state`：Supervisor 内部状态（`BridgeInner`）与后台命令（`SupervisorCommand`）；
+//! - `api`：Web 层消费的 `BridgeApi` trait 及 Supervisor 实现；
 //! - [`debug`]：调试会话开合结算、守卫清理与孤儿 TTL；
-//! - [`lifecycle`]：Worker 进程生命周期（spawn / 健康检查 / 强杀 / 关闭 / 退出 / 空闲）；
+//! - `lifecycle`：Worker 进程生命周期（spawn / 健康检查 / 强杀 / 关闭 / 退出 / 空闲）；
 //! - [`session`]：会话互斥矩阵 + cancel_id 注册表 + 会话守卫；
-//! - [`process`] / [`ipc`] / [`orphan`] / [`job`] / [`worker`]：子进程与 IPC 执行侧。
+//! - `process` / `ipc` / `orphan` / `job` / `worker`：子进程与 IPC 执行侧。
 //!
 //! 本文件保留 Supervisor 主体与编排主流程（主循环 / 命令分发 / IPC 路由 /
 //! execute 临界区）。

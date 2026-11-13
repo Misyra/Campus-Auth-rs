@@ -5,7 +5,7 @@
 //! ok/warn/fail/skip 结论与总结论。探测实现一律复用 monitor/network 既有基建
 //! （TcpProbe 竞速、PreparedEgress 出口租约、网卡枚举），不重写探测器。
 //!
-//! 可测试性：探测动作收敛在私有 [`ProbeBackend`] trait 之后，生产实现走系统
+//! 可测试性：探测动作收敛在私有 `ProbeBackend` trait 之后，生产实现走系统
 //! 调用与真实网络，单元测试注入桩（见模块测试）；五项检查并发执行，整体受
 //! [`TOTAL_TIMEOUT`] 硬约束——任一项超限都以 fail 收敛返回，调用绝不悬挂。
 //!

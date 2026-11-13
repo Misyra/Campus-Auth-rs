@@ -72,6 +72,7 @@ pub const UV_TARGET: &str = "aarch64-apple-darwin";
 /// uv 可执行文件名
 #[cfg(target_os = "windows")]
 pub const UV_EXE_NAME: &str = "uv.exe";
+/// uv 可执行文件名（Unix 无扩展名）
 #[cfg(not(target_os = "windows"))]
 pub const UV_EXE_NAME: &str = "uv";
 /// uv 下载超时（单次镜像请求总超时，兜底）
@@ -132,6 +133,7 @@ pub use crate::utils::paths::{ENV_DIR, VENV_DIR, WORKER_PROJECT_DIR};
 /// venv 检测、引导与 Bridge spawn 全链路误判"未安装"。
 #[cfg(target_os = "windows")]
 pub const PYTHON_EXE_RELATIVE: &str = ".venv/Scripts/python.exe";
+/// Python 解释器相对路径（Unix venv 布局）
 #[cfg(not(target_os = "windows"))]
 pub const PYTHON_EXE_RELATIVE: &str = ".venv/bin/python";
 
@@ -597,7 +599,7 @@ impl EnvironmentManager {
 
     /// 构造环境管理器并注入事件总线（容器生产入口）
     ///
-    /// 引导完成（[`Self::fire_bootstrap_done`]）时发布 [`AppEvent::EnvironmentReady`]。
+    /// 引导完成（`Self::fire_bootstrap_done`）时发布 [`AppEvent::EnvironmentReady`]。
     pub fn new_with_events(
         base_path: PathBuf,
         status_manager: Arc<StatusManager>,

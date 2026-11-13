@@ -21,7 +21,7 @@
 //!
 //! reqwest 的错误 Display 会携带完整请求 URL——Bark 的 device_key、Telegram
 //! 的 bot_token 都在 **URL 路径**里，webhook 的密钥可能出现在 query。因此
-//! 本模块绝不把 `reqwest::Error` 原文透出，一律经 [`describe_reqwest_error`]
+//! 本模块绝不把 `reqwest::Error` 原文透出，一律经 `describe_reqwest_error`
 //! 归类为不含 URL 的短语；需要展示 URL 的地方（测试端点响应）经
 //! [`sanitize_url`] 去 query/userinfo/fragment。
 
@@ -177,7 +177,7 @@ pub fn sanitize_url(url: &str) -> String {
 
 /// 错误文本最终出口：其中出现的任何裸 URL token 都替换为脱敏版本
 ///
-/// 错误短语本身已由 [`describe_reqwest_error`] 脱敏；本函数兜底拼接了 URL
+/// 错误短语本身已由 `describe_reqwest_error` 脱敏；本函数兜底拼接了 URL
 /// 的场景（如测试端点把「目标 URL + 错误」组合展示）。
 pub fn sanitize_error_text(text: &str) -> String {
     text.split_whitespace()

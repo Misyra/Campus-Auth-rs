@@ -18,7 +18,7 @@
 //!
 //! # 配置读取
 //!
-//! 服务内缓存 [`NotificationSettings`]，每 [`CONFIG_REFRESH_INTERVAL`] 从配置源
+//! 服务内缓存 [`NotificationSettings`]，每 `CONFIG_REFRESH_INTERVAL` 从配置源
 //! 重读一次：修改推送配置最多一个周期后生效，避免为低频事件逐条读盘。
 //!
 //! # Lagged 处理口径

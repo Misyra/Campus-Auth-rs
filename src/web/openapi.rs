@@ -30,7 +30,7 @@ use utoipa::OpenApi;
 /// 命名与引用规范（给后续域批次）：
 /// - `Error*` 为错误信封：任何 `Result<_, ApiError>` 处理器的非 2xx 响应
 ///   一律 `body = ErrorResponse`（wire 形状 `{ "error": { code, message, details? } }`，
-///   对齐 [`crate::web::error::ApiError::into_response`]）；
+///   对齐 [`crate::web::error::ApiError`] 的 `IntoResponse` 实现）；
 /// - `DataEnvelope<T>` 为成功响应包装：2xx 响应一律
 ///   `body = DataEnvelope<XxxData>`（wire 形状 `{ "data": <T> }`），
 ///   业务载荷类型以 `XxxData` 命名并定义在各自 route 文件内；

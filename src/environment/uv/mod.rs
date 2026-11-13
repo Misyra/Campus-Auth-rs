@@ -4,10 +4,10 @@
 //! 压缩包多镜像流式下载 → 校验 → 解压提取 → 原子安装 → 实启校验。
 //!
 //! 子模块按职责划分：
-//! - [`download`]：URL/镜像构造、镜像测速排序、文本/流式下载与压缩包提取；
-//! - [`verify`]：uv 就绪校验（实启/PATH 探测）与 SHA256 校验；
-//! - [`sync`]：`uv sync` 与 OCR 依赖交接（`uv add/remove` + 项目文件备份回滚）；
-//! - [`process`]：取消/超时受控的子进程执行封装与流式输出。
+//! - `download`：URL/镜像构造、镜像测速排序、文本/流式下载与压缩包提取；
+//! - `verify`：uv 就绪校验（实启/PATH 探测）与 SHA256 校验；
+//! - `sync`：`uv sync` 与 OCR 依赖交接（`uv add/remove` + 项目文件备份回滚）；
+//! - `process`：取消/超时受控的子进程执行封装与流式输出。
 
 mod download;
 mod process;

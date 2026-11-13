@@ -224,7 +224,7 @@ const OS_BODY_MAX_CHARS: usize = 200;
 /// 系统通知内容：`(标题, 正文)`
 ///
 /// 标题取一句话摘要 `summary`，正文取人话拼接 `detail` 并裁剪到
-/// [`OS_BODY_MAX_CHARS`] 字符——按字符边界截断（不切半多字节字符），
+/// `OS_BODY_MAX_CHARS` 字符——按字符边界截断（不切半多字节字符），
 /// 截断时补省略号提示。
 pub fn os_body(message: &MessageContent) -> (String, String) {
     let mut chars = message.detail.chars();

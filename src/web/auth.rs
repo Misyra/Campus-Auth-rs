@@ -258,7 +258,7 @@ pub fn effective_management_password<'a>(
 }
 
 /// exchange 请求体：两字段均可选，「恰含其一」的组合校验在
-/// [`respond_exchange`] 完成；未知键宽容忽略（对本契约无安全影响）
+/// `respond_exchange` 完成；未知键宽容忽略（对本契约无安全影响）
 #[derive(Debug, Default, Deserialize)]
 pub struct ExchangeBody {
     /// bootstrap 握手秘钥（界面 URL fragment 携带）

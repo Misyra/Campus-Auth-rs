@@ -501,12 +501,14 @@ pub const NOTIFICATION_EVENT_TYPES: &[&str] = &[
 /// 推送通道数量上限（防误配刷屏与端点滥用；前端同口径）
 pub const NOTIFICATION_MAX_CHANNELS: usize = 10;
 
-/// 单通道超时上下界（秒）
+/// 单通道超时下界（秒）
 pub const NOTIFICATION_TIMEOUT_MIN: u32 = 1;
+/// 单通道超时上界（秒）
 pub const NOTIFICATION_TIMEOUT_MAX: u32 = 60;
 
-/// 重试退避上下界（重试次数不含首次；基准间隔为首次重试前的等待）
+/// 重试次数上界（重试次数不含首次）
 pub const NOTIFICATION_RETRY_MAX_ATTEMPTS_MAX: u32 = 10;
+/// 重试基准间隔上界（秒；基准间隔为首次重试前的等待）
 pub const NOTIFICATION_RETRY_BASE_INTERVAL_MAX: u32 = 60;
 
 /// webhook 自定义请求头数量上限

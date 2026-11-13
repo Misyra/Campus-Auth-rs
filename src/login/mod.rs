@@ -473,7 +473,7 @@ impl LoginOrchestrator {
 
     /// 构造登录编排器并注入事件总线（容器生产入口）
     ///
-    /// 登录终态经 [`LoginSession::emit`]（结果槽写入的单一发射点）向注入的
+    /// 登录终态经 `LoginSession::emit`（结果槽写入的单一发射点）向注入的
     /// [`EventBus`] 发布 [`crate::events::AppEvent::LoginSucceeded`] /
     /// [`crate::events::AppEvent::LoginFailed`]（白名单摘要载荷）；取消终态、
     /// 重试预算内的中间失败与校验失败的立即终态句柄均不发布。
@@ -525,9 +525,9 @@ impl LoginOrchestrator {
     /// 会话执行/重试共享同一令牌——准备阶段点取消即可中断整个流程，而非
     /// 仅取消「已创建活跃会话」之后的部分。
     ///
-    /// 结构上分四段协作（T7-5）：参数校验与计划装配 [`Self::prepare_submission`]、
-    /// 去重/抢占仲裁 [`Self::arbitrate_admission`]、会话与句柄装配
-    /// [`Self::assemble_session`]，本函数保留接纳登记与活跃槽位安装的编排骨架。
+    /// 结构上分四段协作（T7-5）：参数校验与计划装配 `Self::prepare_submission`、
+    /// 去重/抢占仲裁 `Self::arbitrate_admission`、会话与句柄装配
+    /// `Self::assemble_session`，本函数保留接纳登记与活跃槽位安装的编排骨架。
     pub async fn submit(
         &self,
         source: LoginSource,

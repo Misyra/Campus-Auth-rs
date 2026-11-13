@@ -321,9 +321,9 @@ impl LoginSession {
     /// 会话主循环：执行 → 分类 → 重试/终态
     ///
     /// 每轮尝试按阶段协作（T7-5）：循环头守卫（取消/会话总超时）→
-    /// [`Self::prepare_attempt`] 尝试准备（cancel_id / 进度状态 / 执行 future）→
-    /// [`Self::await_attempt`] 执行等待（取消/关闭/超时/完成竞速）→
-    /// [`Self::handle_attempt_result`] 结果处理（分类 → 终态收尾或重试）。
+    /// `Self::prepare_attempt` 尝试准备（cancel_id / 进度状态 / 执行 future）→
+    /// `Self::await_attempt` 执行等待（取消/关闭/超时/完成竞速）→
+    /// `Self::handle_attempt_result` 结果处理（分类 → 终态收尾或重试）。
     pub async fn run(mut self) {
         let session_start = Instant::now();
         self.deps.status_manager.merge(PartialSnapshot::Login {

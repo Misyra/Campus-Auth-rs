@@ -9,7 +9,7 @@
 //! 平台差异：Windows 产物（PE）携带 VERSIONINFO 资源；macOS / Linux 产物
 //! （Mach-O / ELF）没有等价机制，版本来源改为发布包组装产物——**版本 marker
 //! 文件 `campus-auth.version`**（与 exe 同目录，内容为一行 Cargo.toml 版本号，
-//! 由 release.yml / build.ps1 组装便携包时写入，见 [`read_version_marker`]）。
+//! 由 release.yml / build.ps1 组装便携包时写入，见 `read_version_marker`）。
 //! marker 缺失（源码 `cargo run`、手工目录、无 marker 的自制包）或损坏（非
 //! semver 内容）时返回 `None`，回退链与"无版本资源"完全一致：上传路径据此以
 //! `VersionUnrecognized` 明确拒绝（fail-closed），不降级。
@@ -62,7 +62,7 @@ fn read_version_marker(exe_path: &Path) -> Option<String> {
 /// Windows 上解析 PE 的 VERSIONINFO 资源（优先 `StringFileInfo` 中的
 /// `ProductVersion` / `FileVersion` 字符串，缺失时回退 `VS_FIXEDFILEINFO` 的
 /// 数字 FileVersion）；非 Windows 上读取 exe 同目录的版本 marker 文件
-/// （发布包组装产物，见 [`read_version_marker`]）。非 PE、缺资源、解析失败、
+/// （发布包组装产物，见 `read_version_marker`）。非 PE、缺资源、解析失败、
 /// marker 缺失或损坏一律返回 `None`。
 pub fn extract_exe_version(path: &Path) -> Option<String> {
     #[cfg(windows)]

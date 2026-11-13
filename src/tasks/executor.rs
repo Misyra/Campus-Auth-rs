@@ -102,7 +102,7 @@ impl TaskExecutor {
     /// 构造执行器并注入事件总线（容器生产入口）
     ///
     /// 任务终态（`TaskFinished` / `TaskFailed`）经两个统一入口发布，载荷为
-    /// 白名单摘要（task_id / task_kind / 失败原因短语），见 [`Self::report_task_event`]。
+    /// 白名单摘要（task_id / task_kind / 失败原因短语），见 `Self::report_task_event`。
     pub fn new_with_events(
         base_path: &Path,
         status: Arc<StatusManager>,

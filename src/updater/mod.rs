@@ -16,7 +16,7 @@
 //! 清单信任与版本单调（T6-4）：清单在接受前经过 ed25519 签名严格校验（嵌公钥
 //! 构建；见 [`signature`] 模块 doc），并受版本回滚保护约束——同一更新通道内
 //! 已见过的最高清单版本记录在 `update/last_check.json`（[`LastCheckState`]），
-//! 可能驱动降级安装的更低版本清单被拒绝（[`ensure_manifest_not_rollback`]）。
+//! 可能驱动降级安装的更低版本清单被拒绝（`ensure_manifest_not_rollback`）。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -83,7 +83,7 @@ fn self_update_worker_dir(base_path: &Path) -> Result<PathBuf, UpdaterError> {
 /// 手动"立即检查"与后台自动检查共用一份记录：成功时写 `latest_version` /
 /// `has_update`，失败时仅写 `error`（时间照常刷新）。`highest_seen_*` 字段
 /// 承载版本回滚保护的跨重启记忆，检查失败时保留不抹（见
-/// [`failed_check_state`]）。
+/// `failed_check_state`）。
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LastCheckState {
     /// 上次检查时间（UTC RFC3339，前端转本地时区展示）

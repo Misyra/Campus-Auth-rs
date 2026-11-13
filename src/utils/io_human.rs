@@ -5,7 +5,7 @@
 //! 文本追加在文案末尾（排障链路仍能拿到 `std::io` 原文）。
 //!
 //! 本模块只做文案包装，不定义错误类型；各域错误枚举（`TaskError::IoError` 等）
-//! 的构造点必须经 [`io_error_at`] / [`io_error`] 包装，不得把裸 `std::io` 原文
+//! 的构造点必须经 `io_error_at` / `io_error` 包装，不得把裸 `std::io` 原文
 //! 直接抛给用户。
 
 use std::path::Path;
