@@ -249,8 +249,8 @@ pub async fn update_task(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let task: crate::tasks::TaskKind =
-        serde_json::from_value(body).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let task: crate::tasks::TaskKind = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(format!("请求体 JSON 无效: {e}")))?;
     tasks.save_task(&id, &task).await?;
     Ok(data(Value::String("ok".into())))
 }

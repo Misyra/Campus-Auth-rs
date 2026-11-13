@@ -267,8 +267,8 @@ pub async fn update_script(
         body.get("binary_path").and_then(Value::as_str),
         body.get("script_path").and_then(Value::as_str),
     )?;
-    let task: crate::tasks::TaskKind =
-        serde_json::from_value(body).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let task: crate::tasks::TaskKind = serde_json::from_value(body)
+        .map_err(|e| ApiError::BadRequest(format!("请求体 JSON 无效: {e}")))?;
     tasks.save_task(&task_id, &task).await?;
     Ok(data(task_id))
 }
