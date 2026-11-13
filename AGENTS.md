@@ -20,6 +20,7 @@ Campus-Auth（中文名「认证喵」）是一个校园网自动认证工具。
 | 日志 | tracing + tracing-subscriber |
 | 错误处理 | thiserror (库) + anyhow (应用层) |
 | 加密 | aes-gcm (AES-256-GCM) |
+| 清单签名 | ed25519-dalek 2（发布清单 ed25519 离线签名/校验，见 `src/updater/signature.rs`） |
 | 敏感数据清零 | zeroize |
 | 时间 / Cron | chrono + cron |
 | 系统托盘 | tray-icon |
@@ -140,7 +141,7 @@ campus-auth/
 ├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；原 mock_portal/ 已整体搬迁至 tests/mock-servers/full-portal/
 ├── fuzz/                     # cargo-fuzz 独立 crate（自带 lockfile，不纳入主工程口径）：fuzz_config_json / fuzz_migrate / fuzz_parse_ipc 三 target，CI fuzz.yml 每周冒烟
 ├── docs/                     # 文档：updatelog（用户）/ changelog（开发）/ known-issues / plan-next / guides（含 architecture.md 架构图与模块地图——依赖关系与数据流权威参照）/ assets（README 引用的截图）/ promo（介绍演示页）；reports/ 与 compose/ 为过程产物（.gitignore 忽略）
-├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入，区别于 frontend/public 与 frontend/dist）
+├── resources/                # 随二进制分发的静态资源（icons/ 托盘与浏览器图标、tools/ 脚本，rust-embed 嵌入；manifest-pubkey 清单签名公钥——非 rust-embed，build.rs 构建期按 CAMPUS_MANIFEST_SIGNING=1 注入二进制），区别于 frontend/public 与 frontend/dist
 └── .github/workflows/        # ci.yml（fmt + clippy + test 双平台（含 e2e-login-chain + rust-tests-unix）+ 前端构建 + vitest + 覆盖率门禁 + pytest）+ audit.yml（月度供应链审计）+ fuzz.yml（每周冒烟）+ release.yml + openwrt.yml
 ```
 
@@ -189,7 +190,7 @@ struct ServiceHandle {
 
 NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果。Bridge Supervisor 懒加载 Worker，空闲超时后关闭释放内存。Worker 崩溃不影响 Rust 控制平面。
 
-命令并发由 `check_session_compat` 互斥矩阵裁决（`bridge/session.rs`，统一执行入口内检查）：OCR 轻量请求与任意会话并发、不占单会话槽位；浏览器登录共享同一会话槽位且互不排斥（渠道内去重/抢占在登录编排层）。持久会话类命令（`profile_session_start/stop` / `profile_auto_login`）归会话通道，各带命令级超时预算（如 `profile_auto_login` 300s）。
+命令并发由 `check_session_compat` 互斥矩阵裁决（`bridge/session.rs`，统一执行入口内检查）：OCR 轻量请求与任意会话并发、不占单会话槽位；浏览器登录共享同一会话槽位且互不排斥（渠道内去重/抢占在登录编排层）。持久会话类命令（`profile_session_start/stop` / `profile_auto_login`）归会话通道，各带命令级超时预算（`CONFIG_SESSION_START_TIMEOUT` 90s / `CONFIG_SESSION_STOP_TIMEOUT` 30s / `PERSISTENT_AUTO_LOGIN_TIMEOUT` 300s，见 `bridge/mod.rs`；会话存续期不在预算内，`profile_auto_login` 实际由会话总超时 `login_timeout` 兜底）。
 
 ### Updater（更新器）
 
@@ -204,7 +205,11 @@ NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果
   - **取消语义**：`cancel_pending_update()`（卸载流程调用）先在状态临界区置 `update_cancelled` 标记，等待独立任务持有的操作互斥释放，再清 `pending.json` + staging；最终 pending 提交、助手唤醒与取消标记共用临界区，阻止在途操作于取消完成后重新提交。调用方中断不提前释放正在执行的阻塞 I/O 所有权；失败卸载的恢复只复位取消标记。返回值是"**确实**取消掉了"（存在 pending 且清理后复查 pending 与 staging 均消失），不是仅"此前有 pending"。
   - 清单声明的 `size` 为咨询性字段（同 UPD-7），不符仅告警、以摘要为准
 - 版本探测（`src/updater/version_info.rs`）：Windows 读 PE VERSIONINFO 资源（手写最小解析器，零新依赖）；非 Windows（Mach-O / ELF 无等价机制）读发布包组装产物**版本 marker 文件 `campus-auth.version`**（与 exe 同目录，单行纯 semver，release.yml / build.ps1 组装时写入），缺失或损坏回退链与"无版本资源"一致——上传路径以 `VersionUnrecognized` 明确拒绝（fail-closed）
-- **ed25519 清单签名【进行中】**（T6-4 在编，落库前本条不作为实现依据）：设计口径为签名 gated（CI 仅在 `MANIFEST_SIGNING_KEY` secret 存在时签名）、验证公钥与签名同批嵌入二进制；marker 格式已预留伴随签名文件 / 键值结构两条扩展路径（见 `version_info.rs` 模块 doc）
+- **ed25519 清单签名 + 版本单调（T6-4 已落库，`src/updater/signature.rs` / `check.rs` / `mod.rs`）**：
+  - **签名对象**：清单文档剥离 `signature` 字段后的确定性规范化 JSON（对象键递归按字典序、无空白、serde_json 标准转义），不是文件原文——镜像/代理重排键序或改空白后验证一致通过；规范化只钉死清单实际用到的 JSON 子集（无浮点数），规则一经发布不可变更
+  - **验证策略按构建形态二选一**：release 流程在 Secret `MANIFEST_SIGNING_KEY` 存在时以 `CAMPUS_MANIFEST_SIGNING=1` 构建，`build.rs` 读仓内 `resources/manifest-pubkey` 经 `option_env!` 注入公钥（构建期校验 44 字符 base64 格式）——该类构建对清单**严格校验 fail-closed**：`signature` 缺失 / 畸形 / 校验失败一律 `ManifestSignatureInvalid` 拒绝，不降级；未嵌公钥构建（默认开发/CI）不校验，与历史未签名清单兼容。**同源同批**是安全语义核心：公钥嵌入与清单签名必须来自同一批发布（release.yml build / manifest 两 job 由同一 secret 判定）——嵌了公钥却发未签名清单，会让该版本之后所有客户端拒绝一切更新。签名/复核工具链为助手 `--gen-signing-key` / `--sign-manifest` / `--verify-manifest`（与客户端共用同一套规范化实现，无算法漂移）
+  - **校验点只覆盖清单文件路径**：自定 `latest.json` 镜像（`check.rs` 格式 1 分支）与 GitHub Release 附带的已签名 `latest.json` 资产（优先于逐资产合成，对完整清单整体签名）两处；资产缺失或不可用时回退逐资产**合成**清单（版本取 tag、摘要取 `.sha256` 伴随文件）——合成清单无签名字段、**不经任何签名校验**（嵌钥构建下同样直通），当前仅靠版本单调闸门兜底降级重放。注意 `check.rs` / `signature.rs` 注释声称「合成清单嵌钥构建下被拒（统一校验点）」与「签名校验失败不回退」，两点**均未实现**（签名失败同样回退合成），落库复核确认注释超前于实现，修复前勿据注释做安全依赖
+  - **版本单调（回滚保护）**：`update/last_check.json` 记录同通道已见最高版本（`highest_seen_version` / `highest_seen_channel`），手动与后台检查共用闸门 `ensure_manifest_not_rollback`：只拒「> 当前版本且 < 已见最高」的可能驱动降级安装的清单（≤当前的清单不拒——那是正常"已是最新"；记录缺失/损坏按无保护处理，状态文件不在清单攻击面内）；记录按通道隔离（切通道主动降级不受历史压制）；检查失败只刷新时间与错误原因、**保留**单调记忆（`failed_check_state`），防攻击者诱导一次检查失败清记忆后重放旧签名清单。已知取舍：同通道「< 已见最高但 > 当前」的窄窗口清单（如 All 通道候选回退）也会被拒，恢复依赖正常发布
 
 ### 前端嵌入
 
