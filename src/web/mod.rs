@@ -134,6 +134,13 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/profiles/auto-switch", || {
             post(routes::profiles::auto_switch)
         }),
+        // 配置会话（持久浏览器 + 交互录制）：start/stop 编排录制的取回与写盘
+        ("POST", "/api/profiles/{id}/config-session/start", || {
+            post(routes::profiles::start_config_session)
+        }),
+        ("POST", "/api/profiles/{id}/config-session/stop", || {
+            post(routes::profiles::stop_config_session)
+        }),
         // ---- 任务（tasks）----
         ("GET", "/api/tasks", || get(routes::tasks::list_tasks)),
         ("POST", "/api/tasks", || post(routes::tasks::create_task)),

@@ -42,6 +42,53 @@ pub trait BridgeApi: Send + Sync {
         )
         .await
     }
+    /// 配置会话启动命令通道：派发 `profile_session_start`（headed 持久上下文 +
+    /// 门户页 + 交互录制，配置会话编排入口）。
+    ///
+    /// 命令级预算固定为 [`super::CONFIG_SESSION_START_TIMEOUT`]（等 headed 浏览器
+    /// 真实拉起并就绪，冷启动含 Worker spawn + Playwright 启动的宽裕值）；会话
+    /// 存续期不受命令级超时约束（Worker 契约，对齐 debug session）。默认实现
+    /// 复用 [`Self::execute_with_timeout`]，内存 mock 等实现无需覆写。
+    async fn execute_config_session_start(
+        &self,
+        params: Value,
+    ) -> Result<IpcResponse, BridgeError> {
+        self.execute_with_timeout(
+            "profile_session_start",
+            params,
+            super::CONFIG_SESSION_START_TIMEOUT,
+        )
+        .await
+    }
+    /// 配置会话停止命令通道：派发 `profile_session_stop`（关闭持久浏览器 +
+    /// 取回录制动作，user_data_dir 原样保留）。
+    ///
+    /// 命令级预算固定为 [`super::CONFIG_SESSION_STOP_TIMEOUT`]。默认实现复用
+    /// [`Self::execute_with_timeout`]，内存 mock 等实现无需覆写。
+    async fn execute_config_session_stop(&self, params: Value) -> Result<IpcResponse, BridgeError> {
+        self.execute_with_timeout(
+            "profile_session_stop",
+            params,
+            super::CONFIG_SESSION_STOP_TIMEOUT,
+        )
+        .await
+    }
+    /// 活跃配置会话的归属记录（`None` = 本地无记录）。
+    ///
+    /// 占用互斥以 Worker 为权威，本记录仅供 stop 端点做**方案归属**校验
+    /// （见 [`super::session::ConfigSessionOwner`]）。默认实现返回 `None`，
+    /// 供内存 mock 等实现复用。
+    fn config_session_owner(&self) -> Option<super::session::ConfigSessionOwner> {
+        None
+    }
+    /// 记录活跃配置会话归属（start 成功后调用；覆盖旧记录）。
+    /// 默认实现为 no-op，供内存 mock 等实现复用。
+    fn set_config_session_owner(&self, _owner: super::session::ConfigSessionOwner) {}
+    /// 取走活跃配置会话归属记录（stop 结算后调用）。默认实现返回 `None`，
+    /// 供内存 mock 等实现复用。
+    fn take_config_session_owner(&self) -> Option<super::session::ConfigSessionOwner> {
+        None
+    }
     /// 强制回收当前 Worker（kill 子进程并标记 Error，下次请求重新 spawn）。
     async fn force_recycle(&self);
     /// 归属感知的强制回收：仅当会话槽位**未被其他请求占用**时才强杀 Worker。
@@ -103,6 +150,18 @@ pub trait BridgeApi: Send + Sync {
 
 #[async_trait::async_trait]
 impl BridgeApi for BridgeSupervisor {
+    fn config_session_owner(&self) -> Option<super::session::ConfigSessionOwner> {
+        self.config_session.peek()
+    }
+
+    fn set_config_session_owner(&self, owner: super::session::ConfigSessionOwner) {
+        self.config_session.set(owner);
+    }
+
+    fn take_config_session_owner(&self) -> Option<super::session::ConfigSessionOwner> {
+        self.config_session.take()
+    }
+
     fn debug_session_active(&self) -> bool {
         self.inner
             .lock()

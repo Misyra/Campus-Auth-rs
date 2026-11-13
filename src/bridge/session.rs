@@ -216,6 +216,50 @@ pub(super) fn is_lightweight_method(method: &str) -> bool {
     matches!(method, "ocr_recognize" | "feedback_capture")
 }
 
+/// 活跃配置会话的归属记录（session_id ↔ 方案 id）
+///
+/// 「同一时刻仅一个配置会话」的占用互斥以 Worker 侧占用注册表为权威
+/// （`profile_session_start` 重复启动由 Worker 回结构化错误）；本记录只补
+/// Rust 侧需要而 Worker 不感知的一件事——**会话属于哪个方案**：stop 端点据
+/// 此把录制写回发起会话的方案，并把「会话属于别的方案」的 stop 拒之门外
+/// （否则 A 方案的录制会被写进 B 方案）。归属信息只存在于本进程内存，
+/// Rust 重启即失；Worker 侧重启 / 回收由 [`ConfigSessionRegistry`] 的惰性
+/// 自愈兜底。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSessionOwner {
+    /// Worker 返回的配置会话 id（`profile_session_start` 响应载荷 `session_id`）
+    pub session_id: String,
+    /// 发起配置会话的方案 id
+    pub profile_id: String,
+}
+
+/// 配置会话归属注册表（单活跃会话，`Mutex` 保护）
+///
+/// 与 Worker 侧会话生命周期的对齐口径：`force_recycle`（强杀 Worker）时同步
+/// 清空；Worker 优雅关闭 / 崩溃等未覆盖路径由 stop 的「无活跃会话」结构化
+/// 错误回包惰性自愈（清表 + 409）。设计上不存在「残留表项放行误写」的路径：
+/// 误写只会发生在表项指向**别的方案**时，而该分支被归属校验拦截；表项指向
+/// 本方案但 Worker 侧已无会话时，stop 派发会被 Worker 拒绝并回 409。
+#[derive(Default)]
+pub struct ConfigSessionRegistry(Mutex<Option<ConfigSessionOwner>>);
+
+impl ConfigSessionRegistry {
+    /// 记录活跃配置会话归属（覆盖旧记录：Worker 单会话语义下新 start 即旧会话终结）
+    pub fn set(&self, owner: ConfigSessionOwner) {
+        *self.0.lock().unwrap_or_else(recover_lock) = Some(owner);
+    }
+
+    /// 读取当前归属（不取走）
+    pub fn peek(&self) -> Option<ConfigSessionOwner> {
+        self.0.lock().unwrap_or_else(recover_lock).clone()
+    }
+
+    /// 取走当前归属（stop 结算后清空；此后 stop 一律按「无活跃配置会话」拒绝）
+    pub fn take(&self) -> Option<ConfigSessionOwner> {
+        self.0.lock().unwrap_or_else(recover_lock).take()
+    }
+}
+
 /// 会话互斥矩阵：判断新请求 `method` 与当前活跃会话 `current` 是否兼容。
 ///
 /// 兼容（允许继续）：
@@ -230,8 +274,12 @@ pub(super) fn is_lightweight_method(method: &str) -> bool {
 ///   都会做「登录后网络验证」兜底（探测与门户流量互相污染判定），排队
 ///   进 Worker 也会与前序登录的验证阶段真正并发；快速失败后由登录会话
 ///   转 NetworkError 退避重试，等对方完全收尾再进
-/// - InDebug + (execute_login_attempt/execute_browser_task/profile_auto_login)：
-///   登录类请求快速失败
+/// - InLogin + (profile_session_start/profile_session_stop)：配置会话与登录
+///   互斥（同 profile_auto_login 口径）——start 会打开 headed 浏览器并等待
+///   用户手动登录，与在途登录的网络验证兜底互相污染判定；stop 在登录收尾
+///   前一并拒绝，保持「持久类命令」与登录互斥的单一心智模型
+/// - InDebug + (execute_login_attempt/execute_browser_task/profile_auto_login/
+///   profile_session_*)：登录类请求快速失败
 /// - InDebug + debug_start：已有调试会话
 /// - RedirectTest 与所有非轻量会话互斥：可见临时窗口不得被登录/调试关闭
 ///
@@ -250,6 +298,8 @@ pub(super) fn check_session_compat(
             // 持久自动登录拥有独立持久上下文，但不与另一登录并发（见函数头）；
             // 归类先例同 debug_start：自有运行时，不走 OCR 式轻量旁路
             "profile_auto_login" => Err(BridgeError::WorkerBusy),
+            // 配置会话启停同属持久类命令：与在途登录互斥（见函数头）
+            "profile_session_start" | "profile_session_stop" => Err(BridgeError::WorkerBusy),
             // execute_login_attempt / execute_browser_task / debug_start：FIFO 排队
             _ => Ok(()),
         },
@@ -264,7 +314,8 @@ pub(super) fn check_session_compat(
                 }
             } else {
                 // 登录类命令（execute_login_attempt / execute_browser_task /
-                // profile_auto_login）在调试会话存续期一律拒绝：与登录口径一致
+                // profile_auto_login / profile_session_*）在调试会话存续期一律
+                // 拒绝：与登录口径一致
                 Err(BridgeError::WorkerBusy)
             }
         }
@@ -462,5 +513,65 @@ mod tests {
         assert_ok(Some(SessionType::Login), "feedback_capture");
         assert_ok(Some(SessionType::RedirectTest), "feedback_capture");
         assert_ok(Some(SessionType::Debug), "feedback_capture");
+    }
+
+    // ============ 配置会话（profile_session_*）互斥归类 ============
+
+    /// 配置会话启停属持久类命令：无会话时可进入（与其他命令无差别）
+    #[test]
+    fn 配置会话启停_无会话可进入() {
+        assert_ok(None, "profile_session_start");
+        assert_ok(None, "profile_session_stop");
+    }
+
+    /// 配置会话启停在在途登录期间快速失败：start 与登录的网络验证兜底互相
+    /// 污染判定，stop 保持「持久类命令与登录互斥」的单一口径
+    #[test]
+    fn 配置会话启停_在途登录期间应忙碌() {
+        assert_busy(Some(SessionType::Login), "profile_session_start");
+        assert_busy(Some(SessionType::Login), "profile_session_stop");
+    }
+
+    /// 配置会话启停在调试会话 / 可见重定向窗口期间一律拒绝（登录类命令口径）
+    #[test]
+    fn 配置会话启停_调试与重定向会话期间应忙碌() {
+        assert_busy(Some(SessionType::Debug), "profile_session_start");
+        assert_busy(Some(SessionType::Debug), "profile_session_stop");
+        assert_busy(Some(SessionType::RedirectTest), "profile_session_start");
+        assert_busy(Some(SessionType::RedirectTest), "profile_session_stop");
+    }
+
+    // ============ 配置会话归属注册表 ============
+
+    /// set → peek → take 的基本语义：peek 不取走，take 幂等清空
+    #[test]
+    fn 配置会话归属_set_peek_take语义() {
+        let reg = ConfigSessionRegistry::default();
+        assert_eq!(reg.peek(), None, "空表 peek 应为 None");
+        assert_eq!(reg.take(), None, "空表 take 应为 None");
+        let owner = ConfigSessionOwner {
+            session_id: "abc".into(),
+            profile_id: "dorm".into(),
+        };
+        reg.set(owner.clone());
+        assert_eq!(reg.peek(), Some(owner.clone()), "peek 不应取走记录");
+        assert_eq!(reg.take(), Some(owner), "take 应取走记录");
+        assert_eq!(reg.peek(), None, "取走后应回到空表");
+    }
+
+    /// 新 start 覆盖旧归属：Worker 单会话语义下新会话开始即旧会话终结
+    #[test]
+    fn 配置会话归属_新start覆盖旧归属() {
+        let reg = ConfigSessionRegistry::default();
+        reg.set(ConfigSessionOwner {
+            session_id: "old".into(),
+            profile_id: "dorm".into(),
+        });
+        let newer = ConfigSessionOwner {
+            session_id: "new".into(),
+            profile_id: "lab".into(),
+        };
+        reg.set(newer.clone());
+        assert_eq!(reg.peek(), Some(newer), "set 应覆盖旧记录");
     }
 }

@@ -128,6 +128,10 @@ pub use crate::ServiceHandle;
 pub struct BridgeSupervisor {
     /// 浏览器当前出口租约；跨 IPC 命令保活，禁止保留无主转发监听器。
     browser_egress: Mutex<Option<Arc<crate::network::egress::PreparedEgress>>>,
+    /// 活跃配置会话归属（session_id ↔ 方案 id）：Worker 侧占用注册表之外的
+    /// Rust 侧补充记录，供 stop 端点做方案归属校验（见
+    /// [`session::ConfigSessionRegistry`]）
+    config_session: ConfigSessionRegistry,
     inner: Mutex<BridgeInner>,
     config: Arc<ConfigService>,
     status: Arc<StatusManager>,
@@ -166,6 +170,7 @@ impl BridgeSupervisor {
         let worker_project_dir = worker_project_dir(&base_path);
         Arc::new_cyclic(|weak| Self {
             browser_egress: Mutex::new(None),
+            config_session: ConfigSessionRegistry::default(),
             orphan_cleanup_done: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(BridgeInner {
                 debug_session_open: false,
@@ -361,6 +366,9 @@ impl BridgeSupervisor {
                 h.abort();
             }
         }
+        // Worker 进程随强杀终止，配置会话（由 Worker 进程承载）一并消亡：
+        // 同步清归属注册表，避免 stop 端点对着已死的会话派发
+        self.config_session.take();
         // 强杀子进程并标记 Error
         kill_worker_now(self).await;
         self.browser_egress

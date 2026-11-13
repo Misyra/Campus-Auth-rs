@@ -7,12 +7,13 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 use zeroize::Zeroizing;
 
+use crate::bridge::BridgeApi;
 use crate::config::{ConfigApi, LoginChannel, ProfileApi, ProfileData};
 use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
 use crate::tasks::TaskApi;
@@ -152,6 +153,25 @@ pub struct AutoSwitchData {
     pub message: String,
 }
 
+/// POST /api/profiles/{id}/config-session/start 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConfigSessionStartData {
+    /// 配置浏览器是否已拉起且录制已开启（成功响应恒为 true）
+    pub started: bool,
+}
+
+/// POST /api/profiles/{id}/config-session/stop 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConfigSessionStopData {
+    /// 本次会话录制的动作数（Worker 侧截断后的真实数量；discard 时仅回显不落盘）
+    pub recorded_count: u64,
+    /// 动作数超出 Worker 单次上限（50 条）被截断
+    pub truncated: bool,
+    /// 方案的持久会话开关：非 discard 恒为 true（写回方案的当前值），
+    /// discard 回方案当前值（未写回，不虚报）
+    pub persistent_session_enabled: bool,
+}
+
 /// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
 #[derive(Deserialize, ToSchema)]
 pub struct ProfileCreateBody {
@@ -183,6 +203,10 @@ pub struct ProfileCreateBody {
     pub active_http_task: Option<String>,
     /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）
     pub active_script_task: Option<String>,
+    /// 是否启用持久浏览器会话（门户「记住密码」模式）；缺省不启用。
+    /// 录制动作（recorded_actions）不进创建/更新通道：它只由配置会话
+    /// stop 端点写回，本字段只承载开关
+    pub persistent_session_enabled: Option<bool>,
 }
 
 /// 所有保存路径共用的出口校验；任意脚本无法由本程序强制绑定网卡。
@@ -337,6 +361,13 @@ pub struct ProfileUpdateBody {
     pub active_http_task: Option<String>,
     /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）
     pub active_script_task: Option<String>,
+    /// 是否启用持久浏览器会话（门户「记住密码」模式）；仅显式出现时覆盖。
+    ///
+    /// **录制动作（recorded_actions）刻意不进本请求体**：它是配置会话
+    /// stop 端点写回的编排产物，不是用户手编字段。serde 对未知字段静默
+    /// 忽略（无 `deny_unknown_fields`），前端即使把编辑器全文回传也碰不到
+    /// 它（守护测试钉住该行为）
+    pub persistent_session_enabled: Option<bool>,
 }
 
 /// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
@@ -738,6 +769,9 @@ pub async fn create_profile(
     if let Some(active_script_task) = body.active_script_task {
         profile.active_script_task = active_script_task;
     }
+    if let Some(persistent_session_enabled) = body.persistent_session_enabled {
+        profile.persistent_session_enabled = persistent_session_enabled;
+    }
     if let Some(network) = body.network {
         network.validate().map_err(ApiError::BadRequest)?;
         profile.network = Some(network);
@@ -844,6 +878,9 @@ pub async fn update_profile(
                     }
                     if let Some(active_script_task) = body.active_script_task {
                         profile.active_script_task = active_script_task;
+                    }
+                    if let Some(persistent_session_enabled) = body.persistent_session_enabled {
+                        profile.persistent_session_enabled = persistent_session_enabled;
                     }
                     if let Some(network) = body.network {
                         network.validate()?;
@@ -1006,20 +1043,243 @@ pub async fn auto_switch(
     })))
 }
 
+/// POST /api/profiles/{id}/config-session/start — 启动持久配置会话（无请求体）
+///
+/// 编排口径与登录编排的持久自动登录装配同源：
+/// - `user_data_dir`：按方案 id 拼接的持久目录（browser_profiles/<id>/），
+///   派发前 ensure 创建（持久目录按需创建口径）；
+/// - `portal_url`：方案浏览器导航有效地址（认证地址回退链，留空时落触发
+///   地址，恒非空）；
+/// - `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth
+///   口径对齐 Worker 启动逻辑）。
+///
+/// 占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化
+/// 错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，
+/// 在途登录 / 调试 / 重定向检测期间快速失败（409）。
+///
+/// 归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属
+/// 注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的
+/// 录制写进 B 方案」。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/{id}/config-session/start",
+    operation_id = "post_api_profiles_id_config_session_start",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    responses(
+        (status = 200, description = "配置浏览器已拉起且录制已开启（会话存续期不受命令级超时约束，直到 stop）", body = DataEnvelope<ConfigSessionStartData>),
+        (status = 400, description = "非浏览器渠道（持久会话仅浏览器渠道支持）", body = ErrorResponse),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 409, description = "已有活跃配置会话（Worker 占用互斥）或会话槽位忙（在途登录/调试/重定向检测）", body = ErrorResponse),
+        (status = 500, description = "持久会话目录创建失败或命令超时等内部错误", body = ErrorResponse),
+        (status = 503, description = "Worker 未安装，或配置浏览器/门户页启动失败（环境不可用）", body = ErrorResponse),
+    )
+)]
+pub async fn start_config_session(
+    State(bridge): State<Arc<dyn BridgeApi>>,
+    State(config): State<Arc<dyn ConfigApi>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let profile = config.load_profile(&id)?;
+    // 渠道校验：持久会话依赖门户「记住密码」（cookie/localStorage 持久化），
+    // 直连与脚本渠道没有浏览器会话可录
+    if profile.login_channel != LoginChannel::Browser {
+        return Err(ApiError::BadRequest(
+            "持久会话仅浏览器渠道支持，请先将本方案的登录渠道切换为浏览器".into(),
+        ));
+    }
+    // portal_url 与 browser_settings 取运行时口径（含认证地址回退链与全局浏览器设置）
+    let rt = config.runtime_config_for_profile(&id)?;
+    let user_data_dir = crate::utils::paths::browser_profile_dir(&config.base_path(), &id);
+    // 持久目录由编排侧 ensure（登录编排同口径）：目录建不出来时 Worker 启动
+    // 持久上下文必然失败，早失败早提示
+    std::fs::create_dir_all(&user_data_dir).map_err(|e| {
+        ApiError::Internal(format!(
+            "创建持久会话目录失败（{}）: {e}",
+            user_data_dir.display()
+        ))
+    })?;
+    let params = serde_json::json!({
+        "user_data_dir": user_data_dir,
+        "portal_url": rt.profile.effective_browser_login_url(),
+        "record": true,
+        "browser_settings": rt.browser,
+    });
+    let resp = bridge.execute_config_session_start(params).await?;
+    // Worker 结构化失败（success=false）：占用互斥命中（重复启动）归 409，
+    // 其余（浏览器/门户环境故障）归 503。占用文案钉在 python_worker 的
+    // profile_session_start 契约上（「已存在活跃配置会话，请先停止当前配置会话」）
+    if !resp.result.success {
+        let msg = resp
+            .result
+            .error
+            .unwrap_or_else(|| "配置会话启动失败".into());
+        if msg.contains("已存在活跃配置会话") {
+            return Err(ApiError::Conflict(msg));
+        }
+        return Err(ApiError::ServiceUnavailable(msg));
+    }
+    // 记录归属（覆盖旧记录）：Worker 单会话语义下新 start 即旧会话终结
+    let session_id = resp
+        .result
+        .data
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    bridge.set_config_session_owner(crate::bridge::ConfigSessionOwner {
+        session_id,
+        profile_id: id.clone(),
+    });
+    tracing::info!(profile_id = %id, "配置会话已启动（headed 持久浏览器）");
+    Ok(data(serde_json::json!({ "started": true })))
+}
+
+/// POST /api/profiles/{id}/config-session/stop 查询参数
+#[derive(Deserialize, ToSchema)]
+pub struct ConfigSessionStopQuery {
+    /// 丢弃本次录制：仅关闭浏览器，**不落盘录制、不写方案**（A47 对齐决策：
+    /// 「只退出不保存」的显式出口）。录制内容仍回显真实计数（信息无害）
+    #[serde(default)]
+    pub discard: bool,
+}
+
+/// POST /api/profiles/{id}/config-session/stop — 停止配置会话并结算录制
+///
+/// 非 discard：解析 Worker 回传的 `recorded_actions`，经方案更新事务（与 PUT
+/// 同一 profiles_lock 临界区）一次性写回
+/// `recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：
+/// 并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。
+///
+/// discard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/{id}/config-session/stop",
+    operation_id = "post_api_profiles_id_config_session_stop",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+        ("discard" = bool, Query, description = "true 时仅关闭浏览器不落盘录制（缺省 false）"),
+    ),
+    responses(
+        (status = 200, description = "会话已结束；非 discard 时录制动作与开关已写回方案（响应只带计数不带动作数组）", body = DataEnvelope<ConfigSessionStopData>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 409, description = "无活跃配置会话，或活跃会话属于其他方案（归属校验拒绝跨方案写盘）", body = ErrorResponse),
+        (status = 500, description = "录制动作解析失败或命令超时等内部错误", body = ErrorResponse),
+        (status = 503, description = "Worker 未安装或环境不可用（Worker 重启后无活跃会话的陈旧归属走 409 自愈）", body = ErrorResponse),
+    )
+)]
+pub async fn stop_config_session(
+    State(bridge): State<Arc<dyn BridgeApi>>,
+    State(profiles): State<Arc<dyn ProfileApi>>,
+    State(config): State<Arc<dyn ConfigApi>>,
+    Path(id): Path<String>,
+    Query(query): Query<ConfigSessionStopQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let profile = config.load_profile(&id)?;
+    // 归属校验先行：本地无记录 / 记录指向别的方案时一律不派发——占用互斥
+    // 以 Worker 为权威，但「会话属于哪个方案」只有 Rust 侧知道，跨方案
+    // 写盘必须在这里拦下
+    let owner = bridge
+        .config_session_owner()
+        .ok_or_else(|| ApiError::Conflict("无活跃配置会话".into()))?;
+    if owner.profile_id != id {
+        return Err(ApiError::Conflict(format!(
+            "活跃配置会话属于方案「{}」，请在该方案下停止",
+            owner.profile_id
+        )));
+    }
+    let resp = bridge
+        .execute_config_session_stop(serde_json::json!({ "session_id": owner.session_id }))
+        .await?;
+    // 收到 Worker 结构化回包即清归属：成功 = 会话已拆除；结构化失败 = 会话
+    // 本已不存在（Worker 重启/崩溃后的陈旧归属）。仅传输层错误（上方 `?`，
+    // 超时/崩溃，会话状态未知）保持归属，等下次 stop 惰性自愈
+    bridge.take_config_session_owner();
+    if !resp.result.success {
+        let msg = resp
+            .result
+            .error
+            .unwrap_or_else(|| "停止配置会话失败".into());
+        // Worker 侧无会话（文案钉在 python_worker 的 profile_session_stop 契约）：
+        // 陈旧归属自愈为统一的 409「无活跃配置会话」
+        if msg.contains("没有活跃配置会话") || msg.contains("配置会话不存在") {
+            return Err(ApiError::Conflict("无活跃配置会话".into()));
+        }
+        return Err(ApiError::Internal(msg));
+    }
+    let truncated = resp
+        .result
+        .data
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Worker 返回形状即方案存储形状（RecordedAction 契约逐字对齐），解析失败
+    // 属于契约破裂，按内部错误处理而不静默丢录制
+    let recorded: Vec<crate::config::schema::RecordedAction> = resp
+        .result
+        .data
+        .get("recorded_actions")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| ApiError::Internal(format!("录制动作解析失败: {e}")))?
+        .unwrap_or_default();
+    let recorded_count = recorded.len() as u64;
+    let mut persistent_enabled = profile.persistent_session_enabled;
+    if !query.discard {
+        let actions = recorded;
+        let result = profiles
+            .update_profile_tx(
+                &id,
+                Box::new(move |mut profile| {
+                    Box::pin(async move {
+                        profile.recorded_actions = actions;
+                        profile.persistent_session_enabled = true;
+                        Ok(profile)
+                    })
+                }),
+            )
+            .await?;
+        match result {
+            Ok(_) => persistent_enabled = true,
+            // 事务闭包在本路径无可失败校验，该分支按不可达防御处理
+            Err(msg) => return Err(ApiError::BadRequest(msg)),
+        }
+    }
+    tracing::info!(
+        profile_id = %id,
+        discard = query.discard,
+        recorded_count,
+        truncated,
+        "配置会话已停止"
+    );
+    Ok(data(serde_json::json!({
+        "recorded_count": recorded_count,
+        "truncated": truncated,
+        "persistent_session_enabled": persistent_enabled,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::VecDeque;
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use tower::ServiceExt; // oneshot
 
+    use crate::bridge::{BridgeError, ConfigSessionOwner, IpcResponse, IpcResult};
     use crate::config::{ConfigError, ProfileData, ProfileSummary, SettingsData};
     use crate::engine::EngineError;
     use crate::tasks::{TaskApi, TaskError, TaskKind};
 
-    #[derive(Default)]
     struct MockInner {
         profiles: Vec<ProfileData>,
         active: String,
@@ -1028,6 +1288,10 @@ mod tests {
         dispatched_apply_profile: Vec<String>,
         /// 内存任务表：只服务 `validate_login_task_binding` 的存在性 + 类型判定
         tasks: Vec<(String, TaskKind)>,
+        /// 方案根目录（base_path）：配置会话 start 在其下 ensure 持久目录，
+        /// 用 TempDir 保证不污染进程工作目录
+        #[allow(dead_code)]
+        base: tempfile::TempDir,
     }
 
     /// 内存 EngineApi：仅记录 ApplyProfile 派发（switch 路由联动验证）
@@ -1226,6 +1490,106 @@ mod tests {
         }
     }
 
+    // ============ 配置会话端点（config-session）的 Bridge mock ============
+
+    /// 预置回包脚本的一项
+    enum MockReply {
+        /// Worker 成功回包（success=true，data 为响应载荷）
+        Ok(Value),
+        /// Worker 结构化失败（success=false，error 为消息）
+        WorkerError(String),
+        /// 传输层错误（execute_with_timeout 直接返回 Err）
+        Transport(BridgeError),
+    }
+
+    /// 内存 BridgeApi：按脚本依序回包并记录派发，归属注册表用真实语义
+    struct MockBridgeApi {
+        script: std::sync::Mutex<VecDeque<MockReply>>,
+        sent: std::sync::Mutex<Vec<(String, Value)>>,
+        owner: std::sync::Mutex<Option<ConfigSessionOwner>>,
+    }
+
+    impl MockBridgeApi {
+        fn new(script: Vec<MockReply>) -> Self {
+            Self {
+                script: std::sync::Mutex::new(script.into()),
+                sent: std::sync::Mutex::new(Vec::new()),
+                owner: std::sync::Mutex::new(None),
+            }
+        }
+
+        /// 派发的命令与参数（按序）
+        fn sent(&self) -> Vec<(String, Value)> {
+            self.sent.lock().unwrap().clone()
+        }
+
+        /// 当前归属
+        fn owner(&self) -> Option<ConfigSessionOwner> {
+            self.owner.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BridgeApi for MockBridgeApi {
+        async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError> {
+            self.execute_with_timeout(method, params, Duration::from_secs(1))
+                .await
+        }
+
+        fn cancel(&self, _cancel_id: &str) {}
+
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: Value,
+            _timeout: Duration,
+        ) -> Result<IpcResponse, BridgeError> {
+            self.sent.lock().unwrap().push((method.to_string(), params));
+            match self.script.lock().unwrap().pop_front() {
+                Some(MockReply::Ok(data)) => Ok(IpcResponse {
+                    id: 1,
+                    result: IpcResult {
+                        success: true,
+                        data,
+                        error: None,
+                    },
+                }),
+                Some(MockReply::WorkerError(msg)) => Ok(IpcResponse {
+                    id: 1,
+                    result: IpcResult {
+                        success: false,
+                        data: Value::Null,
+                        error: Some(msg),
+                    },
+                }),
+                Some(MockReply::Transport(e)) => Err(e),
+                None => panic!("MockBridgeApi 回包脚本已耗尽: {method}"),
+            }
+        }
+
+        async fn force_recycle(&self) {}
+
+        fn has_live_worker(&self) -> bool {
+            false
+        }
+
+        async fn recycle_if_running(&self) {}
+
+        async fn shutdown(&self) {}
+
+        fn config_session_owner(&self) -> Option<ConfigSessionOwner> {
+            self.owner.lock().unwrap().clone()
+        }
+
+        fn set_config_session_owner(&self, owner: ConfigSessionOwner) {
+            *self.owner.lock().unwrap() = Some(owner);
+        }
+
+        fn take_config_session_owner(&self) -> Option<ConfigSessionOwner> {
+            self.owner.lock().unwrap().take()
+        }
+    }
+
     /// 内存 ConfigApi（profiles handler 测试所需的最小面）
     struct MockConfigApi(Arc<std::sync::Mutex<MockInner>>);
 
@@ -1281,7 +1645,7 @@ mod tests {
         }
 
         fn base_path(&self) -> std::path::PathBuf {
-            std::path::PathBuf::new()
+            self.0.lock().unwrap().base.path().to_path_buf()
         }
 
         fn runtime_snapshot(&self) -> std::sync::Arc<crate::config::RuntimeConfig> {
@@ -1315,13 +1679,14 @@ mod tests {
     }
 
     /// 多 State 提取的测试 Router：ProfileApi + ConfigApi + EngineApi + TaskApi
-    /// 组合为单一 state 类型
+    /// + BridgeApi 组合为单一 state 类型
     #[derive(Clone)]
     struct TestState {
         profiles: Arc<dyn ProfileApi>,
         config: Arc<dyn ConfigApi>,
         engine: Arc<dyn EngineApi>,
         tasks: Arc<dyn TaskApi>,
+        bridge: Arc<dyn BridgeApi>,
     }
 
     impl axum::extract::FromRef<TestState> for Arc<dyn ProfileApi> {
@@ -1345,6 +1710,12 @@ mod tests {
     impl axum::extract::FromRef<TestState> for Arc<dyn TaskApi> {
         fn from_ref(state: &TestState) -> Self {
             state.tasks.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn BridgeApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.bridge.clone()
         }
     }
 
@@ -1397,6 +1768,18 @@ mod tests {
     }
 
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
+        let (app, inner, _bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(Vec::new())));
+        (app, inner)
+    }
+
+    /// 带预置回包脚本的 mock app（配置会话端点测试用）；返回 bridge 具体句柄供断言
+    fn mock_app_with_bridge(
+        bridge: Arc<MockBridgeApi>,
+    ) -> (
+        axum::Router,
+        Arc<std::sync::Mutex<MockInner>>,
+        Arc<MockBridgeApi>,
+    ) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner {
             profiles: vec![profile_of("default"), profile_of("dorm")],
             active: "default".into(),
@@ -1407,12 +1790,14 @@ mod tests {
                 browser_task("portal-browser"),
                 script_task("portal-login"),
             ],
+            base: tempfile::TempDir::new().unwrap(),
         }));
         let state = TestState {
             profiles: Arc::new(MockProfileApi(inner.clone())),
             config: Arc::new(MockConfigApi(inner.clone())),
             engine: Arc::new(MockEngineApi(inner.clone())),
             tasks: Arc::new(MockTaskApi(inner.clone())),
+            bridge: bridge.clone(),
         };
         let app = axum::Router::new()
             .route("/api/profiles", get(list_profiles))
@@ -1430,8 +1815,16 @@ mod tests {
                 "/api/profiles/auto-switch",
                 axum::routing::post(auto_switch),
             )
+            .route(
+                "/api/profiles/{id}/config-session/start",
+                axum::routing::post(start_config_session),
+            )
+            .route(
+                "/api/profiles/{id}/config-session/stop",
+                axum::routing::post(stop_config_session),
+            )
             .with_state(state);
-        (app, inner)
+        (app, inner, bridge)
     }
 
     // 测试脚手架统一走共享 test_support（WE2-5：原逐文件复制的 body_json 已收敛）
@@ -2891,5 +3284,350 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ============ 配置会话端点（config-session start/stop）============
+
+    /// Worker 回包里的一条录制动作（与 profile_session_stop 响应契约同形）
+    fn recorded_click_json(ts: i64) -> Value {
+        serde_json::json!({
+            "type": "click",
+            "selector": "#login-btn",
+            "strategy": "id",
+            "ts": ts,
+        })
+    }
+
+    async fn post_config_session(app: &axum::Router, uri: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// start 成功：派发 profile_session_start（持久目录 / 门户地址 / 录制开启 /
+    /// 浏览器设置整体下发）并记录归属
+    #[tokio::test]
+    async fn config_session_start_成功派发并记录归属() {
+        let (app, _inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Ok(
+                serde_json::json!({"session_id": "sess-1", "recorded": true}),
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["started"], true);
+
+        let sent = bridge.sent();
+        assert_eq!(sent.len(), 1, "应恰好派发一条命令");
+        assert_eq!(sent[0].0, "profile_session_start");
+        let params = &sent[0].1;
+        assert!(
+            params["user_data_dir"]
+                .as_str()
+                .unwrap()
+                .ends_with("browser_profiles/dorm"),
+            "持久目录应按方案 id 拼接: {params}"
+        );
+        assert!(
+            !params["portal_url"].as_str().unwrap().is_empty(),
+            "portal_url 取 effective_browser_login_url 口径恒非空"
+        );
+        assert_eq!(params["record"], true, "录制必须开启");
+        assert!(
+            params["browser_settings"].is_object(),
+            "browser_settings 整体下发: {params}"
+        );
+        let owner = bridge.owner().expect("start 成功后应记录归属");
+        assert_eq!(owner.session_id, "sess-1");
+        assert_eq!(owner.profile_id, "dorm");
+    }
+
+    /// start 时 Worker 报占用（重复启动）→ 409
+    #[tokio::test]
+    async fn config_session_start_worker占用归409() {
+        let (app, _inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::WorkerError(
+                "已存在活跃配置会话，请先停止当前配置会话".into(),
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("已存在活跃配置会话"),
+            "{v}"
+        );
+        assert!(bridge.owner().is_none(), "start 失败不得留下归属记录");
+    }
+
+    /// start 时 Rust 会话矩阵拒绝（在途登录占用槽位）→ 409
+    #[tokio::test]
+    async fn config_session_start_会话槽位忙归409() {
+        let (app, _inner, _bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Transport(
+                BridgeError::WorkerBusy,
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    /// start 时方案不存在 → 404，且不派发任何命令
+    #[tokio::test]
+    async fn config_session_start_方案不存在404() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp = post_config_session(&app, "/api/profiles/ghost/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(bridge.sent().is_empty(), "404 前不得派发命令");
+    }
+
+    /// start 时非浏览器渠道 → 400（持久会话仅浏览器渠道）
+    #[tokio::test]
+    async fn config_session_start_非浏览器渠道400() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .login_channel = LoginChannel::Http;
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("持久会话仅浏览器渠道"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty(), "渠道校验先于派发");
+    }
+
+    /// start 时 Worker 未安装 → 503（既有 From<BridgeError> 映射）
+    #[tokio::test]
+    async fn config_session_start_worker未安装503() {
+        let (app, _inner, _bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Transport(
+                BridgeError::WorkerNotInstalled,
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// stop 非 discard：录制解析后事务写回方案（动作 + 开关），归属随结算清空
+    #[tokio::test]
+    async fn config_session_stop_落盘写回方案() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [
+                    recorded_click_json(1000),
+                    {"type": "change", "selector": "#isp", "strategy": "name", "ts": 2000, "value": "电信"}
+                ],
+                "truncated": true,
+            })),
+        ])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+        });
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["recorded_count"], 2);
+        assert_eq!(v["data"]["truncated"], true);
+        assert_eq!(v["data"]["persistent_session_enabled"], true);
+
+        // 派发参数带会话 id
+        let sent = bridge.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "profile_session_stop");
+        assert_eq!(sent[0].1["session_id"], "sess-1");
+
+        // 方案写回断言
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.recorded_actions.len(), 2);
+        assert_eq!(dorm.recorded_actions[0].selector, "#login-btn");
+        assert_eq!(dorm.recorded_actions[1].value.as_deref(), Some("电信"));
+        assert!(dorm.persistent_session_enabled);
+        drop(guard);
+        // 归属已随结算清空
+        assert!(bridge.owner().is_none(), "stop 结算后归属应清空");
+    }
+
+    /// stop discard=true：只关浏览器，录制不落盘、方案不动；响应仍回真实计数
+    /// 与方案当前开关值
+    #[tokio::test]
+    async fn config_session_stop_discard不落盘() {
+        let (app, inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Ok(
+                serde_json::json!({
+                    "recorded_actions": [recorded_click_json(1000)],
+                    "truncated": false,
+                }),
+            )])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+        });
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?discard=true").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["recorded_count"], 1, "discard 仍回显真实计数");
+        assert_eq!(v["data"]["truncated"], false);
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "未写回，回方案当前值"
+        );
+
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert!(dorm.recorded_actions.is_empty(), "discard 不得写回录制");
+        assert!(!dorm.persistent_session_enabled, "discard 不得打开开关");
+        drop(guard);
+        assert!(bridge.owner().is_none());
+    }
+
+    /// stop 无活跃会话（本地无归属）→ 409 且不派发
+    #[tokio::test]
+    async fn config_session_stop_无活跃会话409() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["message"], "无活跃配置会话");
+        assert!(bridge.sent().is_empty(), "归属缺失时不得派发 stop");
+    }
+
+    /// stop 归属指向别的方案 → 409（跨方案写盘在归属校验处拦下），归属保留
+    #[tokio::test]
+    async fn config_session_stop_跨方案归属409() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+        });
+        let resp = post_config_session(&app, "/api/profiles/default/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains("属于方案"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty());
+        assert!(
+            bridge.owner().is_some(),
+            "归属校验失败时不得清空记录（会话仍在别的方案名下）"
+        );
+    }
+
+    /// stop 陈旧归属（Worker 重启后已无会话）→ 409 自愈并清空归属
+    #[tokio::test]
+    async fn config_session_stop_陈旧归属自愈409() {
+        let (app, _inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::WorkerError(
+                "当前没有活跃配置会话，请先启动".into(),
+            )])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+        });
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["message"], "无活跃配置会话");
+        assert!(bridge.owner().is_none(), "结构化失败后归属应自愈清空");
+    }
+
+    /// A47 对齐守护：PUT 带未知 `recorded_actions` 字段不得覆盖方案录制
+    /// （serde 静默忽略未知字段），显式 `persistent_session_enabled` 正常生效
+    #[tokio::test]
+    async fn put_未知recorded_actions字段不覆盖录制() {
+        let (app, inner, _bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.recorded_actions = vec![crate::config::schema::RecordedAction {
+                action_type: "click".into(),
+                selector: "#real-btn".into(),
+                strategy: "id".into(),
+                ts: 42,
+                value: None,
+            }];
+            dorm.persistent_session_enabled = true;
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "改名",
+                            "recorded_actions": [{"type": "click", "selector": "#bogus"}],
+                            "persistent_session_enabled": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.name, "改名");
+        assert_eq!(dorm.recorded_actions.len(), 1, "录制必须原样保留");
+        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        assert!(
+            !dorm.persistent_session_enabled,
+            "显式 persistent_session_enabled 字段应生效"
+        );
+    }
+
+    /// 创建通道接受 persistent_session_enabled（缺省 false 不受影响）
+    #[tokio::test]
+    async fn create_profile_接受持久会话开关() {
+        let (app, inner, _bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/persist-on")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "持久方案",
+                            "username": "u",
+                            "password": "p",
+                            "persistent_session_enabled": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let guard = inner.lock().unwrap();
+        let created = guard
+            .profiles
+            .iter()
+            .find(|p| p.id == "persist-on")
+            .expect("应已创建");
+        assert!(created.persistent_session_enabled);
     }
 }

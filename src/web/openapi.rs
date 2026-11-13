@@ -111,6 +111,9 @@ pub mod schemas {
         crate::web::routes::profiles::switch_profile,
         crate::web::routes::profiles::detect_profile,
         crate::web::routes::profiles::auto_switch,
+        // ---- profiles 域：配置会话（T3-3c）----
+        crate::web::routes::profiles::start_config_session,
+        crate::web::routes::profiles::stop_config_session,
         // ---- login 域（T5-1a）----
         crate::web::routes::login::trigger_login,
         crate::web::routes::login::cancel_login,
@@ -193,6 +196,12 @@ pub mod schemas {
         crate::web::routes::profiles::ProfileUpdateBody,
         crate::web::routes::profiles::SwitchBody,
         crate::web::routes::profiles::AutoSwitchBody,
+        // ---- profiles 域：配置会话（T3-3c）----
+        schemas::DataEnvelope<crate::web::routes::profiles::ConfigSessionStartData>,
+        schemas::DataEnvelope<crate::web::routes::profiles::ConfigSessionStopData>,
+        crate::web::routes::profiles::ConfigSessionStartData,
+        crate::web::routes::profiles::ConfigSessionStopData,
+        crate::web::routes::profiles::ConfigSessionStopQuery,
         // ---- login 域（T5-1a）----
         schemas::DataEnvelope<crate::web::routes::login::LoginTriggerData>,
         schemas::DataEnvelope<crate::web::routes::login::LoginOnceData>,
