@@ -17,6 +17,105 @@
 
 - **立项登记**：plan-next 新增战役 10 阶段任务清单（阶段 0 热修 → 阶段 9 收尾），含用户选定的 EventBus+推送通知、诊断体验、浏览器持久会话配置模式、质量护栏、契约战役、平台补全、前后端结构批次，以及四项已确认纳入的可选项（OS 通知 / Dashboard 图表 / Ctrl+K / 主题跟随）；执行模式为主代理派发+验收、子代理并发上限 4 滚动回填、每小时心跳自动化守护续跑。
 
+### 阶段 0：热修批次（全收口）
+
+- **T0a-1 token 收口与 bootstrap 握手（P0-1）**：删除免鉴权裸发 token 的 `GET /api/auth/token`——本地跨用户进程可凭它绕开秘钥文件 0600 ACL 调脚本执行接口（任意脚本执行），Docker/LAN 绑定下对整个可达网络开放，全服务不再存在免鉴权发 token 入口。新增 `POST /api/auth/exchange`：请求体携带 bootstrap 秘钥（界面 URL `#auth=` fragment 携带，fragment 不发往服务器不进日志）或管理密码换取 token，常量时间比对、同现/均缺/非法 JSON 一律 400、失败不回显秘钥；启动时 bootstrap 与 token 配对生成并持久化 `config/.auth_bootstrap`，任一缺失/损坏即成对轮换。界面打开入口（启动自动打开、重复启动跳转、托盘）统一携带 fragment，日志只记基础 URL，托盘新增「复制界面链接」（clipboard 经系统工具 stdin 传入不进进程参数）。前端 `ensureAuthToken` 改「内存缓存 → fragment 引导交换（成功即 `history.replaceState` 剥除）→ sessionStorage 缓存」三级取用；无凭据时 AuthBootstrapGuide 全屏接管（本地展示粘贴引导链接/秘钥、远程展示管理密码表单，`AUTH_NOT_CONFIGURED` 就地给服务端配置指引），401 失效重试语义对齐无匿名取 token 端点的新模型。
+- **T0a-2 Docker/LAN 管理凭据门禁（P1-1）**：新增 `app.management_password` 配置与 `--management-password` / `CAMPUS_AUTH_MANAGEMENT_PASSWORD` 启动覆盖（生效值收敛为纯函数、配置值每次请求实时读取），设置页「访问与安全」分区新增密文输入（显隐切换、PATCH 缺省保持不变）；非回环绑定无凭据且未显式 `--allow-unauthenticated-bind` 时在监听器准备点 fail-closed 拒绝启动。`docker/README.md` 新增「安全模型」章节（局域网 HTTP 明文与明文存储风险如实说明），user-guide 鉴权段改写为 bootstrap 成对生成 / exchange 换取 / 无免鉴权 token 端点的新信任模型；entrypoint 启动提示管理凭据设置状态。
+- **T0a-3 AI 生成任务步型禁用**：AI 生成的浏览器任务校验拒绝 `eval` 与 `custom_js` 步型——LLM 输出不可信，任意 JS 注入不允许经生成链路进入执行面。
+- **T0a-4 密钥文件权限收口**：加密密钥生成与 Python 继承两条路径注明经 `atomic_write_bytes`（tempfile 默认 0600 创建 + rename）自诞生即 0600，消灭「先按 umask 0644 落盘再 chmod」的竞态窗口；Windows `icacls` 检查调用成败（失败 warn 含退出码），`set_permissions` 失败由静默改为 warn 留痕，取不到 USERNAME 不再静默跳过。
+- **T0b-1 配置迁移原子写**：v8→v9/v9→v10 迁移落盘改 `atomic_write_bytes`，写回失败传播 `Err` 阻断版本提交——崩溃不再可能留半截文件且版本号照常前移；补中断续跑测试。
+- **T0b-2 首启播种原子写与自愈**：首启播种（配置/任务）改原子写；`ensure_default_task` 对解析损坏的默认任务重播自愈，半截 JSON 不再卡死首启。
+- **T0c-1 page_capture 临时浏览器隔离**：`page_capture` 从复用常驻会话改为独立非持久化临时浏览器（对齐 test_redirect 纪律），捕获不再触碰门户心跳页与登录会话状态；补「捕获不触碰常驻会话」回归测试。
+- **T0c-2 Worker 信封脱敏收口**：响应脱敏从各命令分散拼接收敛到 `worker_main._dispatch` 写出前统一 `_sanitize_error`——message/error 单点脱敏，新增命令默认安全；补主信封测试用例。
+- **T0d-1 CI 加固与 dependabot**：ci.yml / release.yml 接入 `Swatinem/rust-cache`（pin SHA，release 按 matrix.target prefix-key）、`permissions: contents: read`、各 job `timeout-minutes`、`cargo test --locked`；新增 dependabot 三生态（npm/cargo/github-actions）周检。
+- **T0d-2 release 镜像版本门禁**：release.yml docker job 加 `needs: build`，版本门禁覆盖镜像产物——版本不符不再可能只拦住二进制而漏发镜像。
+
+### 对齐修复批（鉴权握手后续对齐）
+
+- **refreshAuthToken/sessionStorage 语义分界**：token 已由后端持久化跨重启有效，WS 重连前的 `refreshAuthToken` 由双层全清改为仅清内存缓存——sessionStorage 保留并复用同一 token，后端重启场景页面不再被迫回到引导页；401 证实的失效仍走 `resetAuthToken` 双层全清。补语义分界测试，`useWebSocket` 注释口径同步对齐；锁定 exchange 400 防御面（同现/均缺/非法 JSON）映射为 `AUTH_REJECTED` 的前端契约。
+
+### 阶段 1：内部事件总线与通知（全收口）
+
+- **T1a-1/1b/3 EventBus 基座**：新增 `src/events/`——类型化应用事件总线（订阅/广播分发）+ JSONL 事件流落盘（按 UTC 日分文件 `<base>/events/YYYY-MM-DD.jsonl`，固定保留 30 天，启动清理 + 复用每日 housekeeping 兜底；写入失败只 warn 不阻断内存分发）。载荷为白名单式摘要设计：凭据/密码/token/URL 查询串在结构上不存在对应字段（脱敏红线由事件类型设计保证，写入层不做二次脱敏）；容器构造并持有共享 EventBus，卸载清单同步纳入事件流目录。
+- **T1a-B1 事件源头接入批一**：环境引导完成（EnvironmentReady，载荷取 uv/python 就绪摘要）、任务终态（TaskExecutor 统一入口发布 TaskFinished/TaskFailed，手动与定时调度共用收敛点，失败原因只报短语与退出码——stderr 原始输出不进事件载荷）、调度域目标任务加载失败补发 TaskFailed（执行链未进统一入口的旁路，跳过/禁用等放弃路径非失败终态不发布）三处接入；`EnvironmentManager`/`TaskExecutor`/`SchedulerService` 增 `new_with_events` 构造入口，旧构造保留并委托孤立总线（兼容既有测试装配）。
+- **T1a-B2 事件源头接入批二**：Engine 网络翻转（NetworkDown/NetworkUp）与 Profile 切换、更新发现（UpdateAvailable）接入事件总线。
+- **T1a-B3 事件源头接入批三（登录终态）**：登录编排器终态接入事件总线并完成容器接线；登录会话 panic 补偿路径同步补发失败事件——panic 兜底不再绕过事件流。
+- **T1b 推送通知服务**：新增 `notification` 模块订阅 EventBus，事件按配置经 webhook/Bark/Server酱/Telegram 推送——通道模型 serde tagged（webhook 自定义头 + JSON 模板 + 超时，三预设仅凭据字段），模板占位符 `{{event_type}}/{{summary}}/{{profile}}/{{time}}/{{detail}}`（detail 只拼白名单载荷），事件类型集合 + 免打扰时段（跨零点）过滤为纯函数，发送失败指数退避（注入时钟）后仅 warn。`POST /api/notification/test` 真发测试消息（逐通道回执、响应不回显凭据、错误过 URL 脱敏、单次最多 3 通道、超时截断 15s）；`GET/PATCH /api/config` 透出 notification 节（PATCH 缺省不变更，合并闭包统一校验非法配置拒绝落盘）；设置页新增推送通知分区（通道增删改、每通道启用与测试发送三分支结果、事件类型开关组、免打扰时段、重试参数），深浅两主题 token 驱动。
+- **T1c OS 系统通知通道**：`notify-rust` 接入通知服务 `os` 通道（Windows toast / macOS 通知中心 / Linux freedesktop 统一实现；默认特性仅 `z` 走纯 Rust zbus，防 C 库依赖拖累交叉编译）——调用属阻塞 IO 包 `spawn_blocking` 外套共字段超时，失败静默不重试（无桌面会话/SSH 下重发同样失败，与远端通道的瞬时网络错误语义不同）；通知设置支持系统通知通道类型（前端通道可辨识联合扩展），测试构建走进程级桩不触达真发。
+- **主代理直做小笔**：登录补偿路径 channel 按 Copy 传递消除克隆告警（随 T1a-B3 触及文件的纯风格收敛）。
+
+### 阶段 2：诊断体验（全收口）
+
+- **T2-1/T2-3 一键网络诊断**：`POST /api/diagnostics/run` 五项并发探测（本机网卡/默认网关/DNS/认证门户/近期登录失败归因），15s 总限时收敛返回，结果脱敏（不含凭据/token/带查询串 URL）；runner 位于 `monitor::diagnostics`，探测动作收敛于可注入桩的 ProbeBackend，Web 层按需构造不入容器拓扑。Dashboard 新增网络诊断面板（开始诊断防连点/超时错误态，逐项状态图标 + 耗时 + 摘要 + 细节折叠，总结论按 healthy/degraded/faulty 高亮，样式全 token 驱动）。
+- **T2-2 诊断包导出**：`GET /api/diagnostics/bundle` 白名单式收集 manifest + 深度脱敏配置快照 + 事件流 JSONL（30 天）+ 运行日志（7 天）+ 环境观测文本，总量 20MB 软上限、超限截断并在包内 manifest 注明；敏感字段清单先枚举后实现并逐字段钉测试。诊断面板新增「导出诊断包」与「开始诊断」并排（blob 下载 + 日期命名，防连点，失败就地报错且与诊断错误互不覆盖）。
+
+### 阶段 3：浏览器持久会话配置模式（差 T3-3c 端点，在编）
+
+- **T3-1 持久会话数据面**：方案新增 `persistent_session_enabled` + `recorded_actions` 字段（serde 默认，旧配置零迁移成本）；新增 `browser_profiles/<id>/` 持久目录——utils::paths 常量 + 卸载清单纳入（与用户数据同口径处置），Web 层卸载清单同步透出。
+- **T3-2 Worker 配置会话与交互录制**：新增 `profile_session_start` / `profile_session_stop` 两条 NDJSON 命令——headed 持久上下文打开门户页供用户手动登录（勾选门户记住密码），录制器录下 select change 与按钮/提交类点击，stop 返回 recorded_actions（500ms 防抖、50 上限 + truncated 标记、ts 排序；动作经 expose_binding 跨导航存活，JS 文档内触顶回传 truncated 防漏报）。会话语义：同一时刻仅一个活跃配置会话（重复 start 报错、幽灵会话收尾后放行），与自动化浏览器完全独立（独占 Playwright 连接不共享 context/page）；收尾路径（stop/close 事件/Worker 退出）一律不清理 user_data_dir，profile_session_* 不进强制中断白名单。新增 `config_session.py`（选择器策略优先级单一事实源）与 30 项 stub 级测试，pytest 356→386。
+- **T3-3a Worker 持久自动登录**：新增 `profile_auto_login` 命令——无头复用持久 context 回放 recorded_actions（门户记住密码回填 + 录制动作回放，沉降窗口 best-effort 不作成败判定）；真浏览器端到端 pytest 5/5。
+- **T3-3b 持久登录编排核心**：浏览器渠道接入持久会话自动登录——`BridgeApi::execute_persistent_auto_login` 编排回放，**Worker Success 恒经既有登录后网络验证兜底**（回放完成即返回 Success ≠ 登录成功，成败以网络验证结论为准）；与在途登录互斥；失效短语经 message 链路上报提示重开配置会话；删除方案联动幂等清理持久浏览器目录。login:: 202 / bridge:: 64 / config:: 164 独立复跑绿。
+- **T3-5 持久会话前端**：方案编辑器新增持久会话配置分区（307 行组件 + 366 行测试 12 用例）：开关、会话状态、启动/停止配置会话、录制动作只读回显（truncated 标注）；**PUT 保存剥离 recorded_actions 防旧草稿覆盖**（录制发生在编辑器之外）。vitest 690。
+
+### 阶段 4：质量护栏（全收口）
+
+- **T4-2a proptest 批一（挖出真 bug）**：登录会话失败信封恢复路径属性测试挖出真 bug——`success=false` 信封的 `error` 为**空串**时被当作存在采信，空 message 直入登录历史与状态广播；修复为空串视为缺失、回退兜底文案「Worker 返回失败」。另补 IPC 解析属性测试钉住解析器边界、登录决策抢占不变量属性测试（Reuse/Preempt/终态判别不因输入抖动翻转）。
+- **T4-2b proptest 批二（挖出真 bug）**：settings PATCH 合并语义属性测试挖出真 bug——`monitor.url_expected_responses` 走深合并，**清空 URL 检测列表清不掉旧映射、移除条目残留旧期望响应**（深合并对空对象 no-op）；修复为该键合并前取出补丁值、合并后整体替换。另补配置迁移链属性测试钉住幂等与保全（任意起点往返终态一致、用户数据不丢）。
+- **T4-3/T4-4 fuzz 与覆盖率门禁**：新增 cargo-fuzz 三 target（IPC 解析/配置 JSON/迁移链，`fuzz/` 独立 lockfile 不纳入主口径）与每周冒烟工作流（39 万 runs 零崩溃）；核心域覆盖率门禁入 CI（分域阈值实测校准），前端 vitest 接入覆盖率阈值。
+- **T4-5 供应链审计**：release 六矩阵构建接入 `cargo-auditable`（共用 step 一处改，二进制内嵌依赖清单）；新增月度 audit.yml（cargo audit 失败即拦 + artifact 上传；npm audit runtime 严格/dev 仅报告分级）；taiki-e install-action SHA-pin 选型书面化。
+- **T4-6/T4-7 护栏测试**：tests/common 新增 `wait_until` 限期轮询异步谓词，bridge_supervisor 全部 10 处固定 sleep 改轮询既有观测面（慢机踩空、快机白等；中止用例单测 11.1s→7.2s）；补 lightweight 与 login-once 启动模式集成测试（真起二进制 + SERIAL 互斥：macOS 轻量自动降级完整模式，login-once 直连渠道经进程内 mock 门户登录成功后 0 自退且不创建 python_worker）。
+
+### 阶段 5：API 契约战役（差批三与 typegen 管线，在编）
+
+- **T5-0 契约生成脚手架**：引入 utoipa + schemars，新增 `src/web/openapi.rs` 生成管线（生成 ⊕ 手写合并——既有 openapi.json 手写条目逐字保留，注解生成的 schema 增量并入）；system 域先行注解贯通作样板，注解规范成文（错误状态按 error.rs From 如实标注、只注解不注册模式留给后续批）。
+- **T5-1a 契约注解批一**：config/profiles/login 三域 22/22 端点注解入库，78 条既有手写路径逐字未动。
+- **T5-1b 契约注解批二**：tasks/http_tasks/scheduler/scripts/repo 五域 25/25 端点注解；95 条路径零漂移、schemas 47→78 纯新增；utoipa 5.5 三坑记录留给批三。
+
+### 阶段 6：平台补全（差 T6-4 ed25519）
+
+- **T6-1/T6-5/T6-9 平台三补**：`is_own_process` 补 macOS `proc_pidpath` 分支（防重复启动判定此前走不到精确比较）；helper 卸载结果补 macOS osascript 对话框（Windows MessageBox 对应物）；Windows 版本资源补全与应用图标（exe 资源管理器元数据齐备）。
+- **T6-7/T6-6/T6-8 打包与 Docker 批（含真实数据丢失点修复）**：Dockerfile 基础镜像统一 digest pin、删除 rust-builder 阶段 python_worker 缓存毒化拷贝（.venv 快照随构建缓存漂移）、容器降权为 campus(1000) 运行（entrypoint 以 root 修正存量卷属主后 `setpriv` 降权 exec——主进程/Worker/Chromium 实际均非 root，降权工具为基础镜像 Essential 包零额外安装）；**`HOME=/data/home` 指向数据卷——加密密钥 `~/.campus_network_auth` 随 /data 持久化，修复旧版 root 运行时密钥存于容器临时层、重建容器即失、已加密方案密码全部失效的真实数据丢失点**（升级迁移步骤见 docker/README.md）。build.ps1 适配 macOS/Linux 打包；e2e-login-chain 扩展到 macOS runner；ci 校验 Dockerfile Rust 工具链与 rust-toolchain.toml 一致（防两处版本漂移）。
+- **T6-2 非 Windows 版本 marker**：手动「选择安装包」的版本闸门此前在非 Windows 平台恒 `VersionUnrecognized` 拒绝（Mach-O/ELF 无 VERSIONINFO）——发布包组装产物新增 `campus-auth.version` marker（与 exe 同目录、单行纯 semver，release.yml/build.ps1 组装时写入；严格 parse 零新依赖；缺失/损坏仍 fail-closed 拒绝不降级），三写入点 + 11 形态单测，updater:: 64 绿；marker 格式为 T6-4 签名清单预留扩展路径。
+- **T6-3 macOS launchd 自启动**：macOS 自启动接入 launchd（LaunchAgent plist 写入/移除/状态查询，收敛进独立 `platform_macos.rs` 模块）；真机探测先行、真机 launchctl 往返测试，1378 全绿。
+
+### 阶段 7：后端结构（全收口）
+
+- **T7-1 launcher 拆分**：1391 行 `launcher.rs` 按职责拆为 `src/launcher/` 模块目录（cli/config/engine_watch/locks/modes/restart/shutdown），行为零变化。
+- **T7-3 bridge 与 environment/uv 拆分**：约 2700 行 `bridge/mod.rs` 按职责拆为模块目录（api/debug/error/ipc/job/lifecycle/orphan/process/session/state，mod.rs 收敛至约 1400 行）；约 1700 行 `environment/uv.rs` 拆为 download/process/sync/verify 五子模块。known-issues BRG-5/ENV-8 就此收口。
+- **T7-4 playwright_worker 模块化**：3800+ 行单体按职责拆为 14 个模块（browser_detect/browser_launch/browser_lifecycle/cancel_registry/capture_commands/capture_kit/debug_commands/ocr_commands/profile_commands/step_engine/task_runner/worker_paths 等）；OCR 探测状态从 worker_main 下沉 `ocr_runtime.py` 消除影子模块（同状态两处读取的漂移隐患）。
+- **T7-5 四长函数拆分**：`submit` 拆 prepare_submission/arbitrate_admission/assemble_session（Reuse/抢占/立即终态路径与日志逐字保留）；`session::run` 按阶段拆 prepare_attempt/await_attempt/handle_attempt_result 等；`validate_task` 按类别拆 browser/script/http 校验纯函数（错误文案与顺序逐字保留）；`handle_probe_message` 按消息类型与阶段拆六私有函数（G23 累计指标与自适应探测墙钟语义逐行保留）。等价性以字符串多重集 diff 证据佐证，1363 项全绿。
+- **T7-6 Engine/Updater 墙钟化**：类 Unix 系统睡眠期间单调钟停摆，合盖数小时唤醒后睡眠中到期的业务周期要再等满一个周期，「唤醒即重认证」被显著推迟——Engine 冷却计时/谨慎重试间隔/Profile 切换检测周期/周期探测到期点与 Updater 自动检查周期全部改按墙钟判定（对齐 scheduler cron_loop 口径），到期睡眠 ≤60s 分片、每片醒来重估剩余；时钟收敛为可注入 WallClock（测试注入伪造时钟），新增端到端「睡眠 8h 唤醒即首探」用例。纯耗时测量与单次探测超时护栏保持单调钟不动（防墙钟跳变误伤）。
+- **T7-7 清理盲区**：任务扫描跳过 `.` 开头临时文件（原子写残留不再被当任务解析）；`config/.trash` 纳入每日 30 天轮转清理（此前只清 tasks/.trash）；`.tmp_` 清扫扩展到任务三桶与环境目录（原子写中断残留不再累积占盘）。
+- **T7-2 http_login 双路径脱糖收敛（两步）**：先提取共享尝试上下文（新旧管线共用的出口准备/凭据解析收敛一处）；再将旧六步管线脱糖为「prepare → 前置 logout 钩子 → run_flow_once」单路径——旧任务固定字段（加密脚本/前置请求/单请求本体）在编排入口脱糖为等价有序步骤，logout 闸口随单路径自然生效零代码解决。行为统一以逐条对照测试钉住，行为变化见文末「行为变化要点」；`docs/guides/custom-script-guide.md` 与 http-login-guide 同步新口径。
+- **T7-10+T4-8 Worker P2 批**：evaluate/eval/custom_js 步骤超时由 UNKNOWN_ERROR（终态不重试）改为 ASSERTION_FAILED（Rust classify 可重试、不回收 Worker）；WorkerCore 浏览器生命周期加 asyncio.Lock 串行化消除空闲回收竞态（回收协程持引用可取消、拿锁后复查状态不误关重建后的新实例）；test_redirect 首导航 goto 移入独立任务轮询取消（挂死导航可即时打断，不再被动等满上限）；OCR 缓存键规范化 + 4 实例 LRU 上限（非法取值归一默认档，不再每种非法值各加载一份模型）；系统保留变量值跳过链式再展开（凭据含字面 `{{X}}` 不被二次替换）与 serde null 不注入（`str(None)` 不再当凭据注入模板）；CancelRegistry pending 触顶改逐项淘汰最旧（新近取消不被连坐清空）；文档口径修正（导入注释不再宣称「延后加载防崩溃」、health_check 不可达分支改浏览器二进制缺失口径）与幽灵会话/取消收敛/cookie 清理矩阵 pytest 缺口收口。拆 hunk 提交时 playwright_worker.py 一度写成破损中间态（语法错误），以验证过的完整实现一次性修正收口。
+
+### 阶段 8：前端结构（差 T8-6a 图表，待事件 API）
+
+- **T8-3a UI 修复批（非设置域）**：HttpTestResult 深色 chip 对比度修复（引用未定义的 `--surface-subtle` 恒落浅色兜底、深色主题 1.13:1，改 rgba slate + 显式文字色）并新增全仓 CSS 变量守卫测试（全部 var(--x) 引用必须可解析）；`--warning-text` 浅色加深达 AA 正文线（4.47:1→约 5.3:1，色相不变仅压暗）并补全 `--warning-border`；日志级别色收敛 `--log-*` 语义 token（映射单一出处，改级别配色不再记两处）；`tsk-crumb-back` 的 transition:all 改显式属性列表；触及文件 stylelint 升序特异度告警顺手清零；14 处 icon-only 按钮补齐 aria-label（设置域全量扫描 0 遗漏）；任务面板名称列宽迁 `--tsk-col-name-w` 变量口（遵守样式归属判据）；任务四面板与方案页补首拉加载态（「首拉在途且列表为空」显示 spinner，消除首屏白屏闪现「暂无…」）；SetupWizard 迁 Reka Dialog（原手写 overlay 无焦点陷阱/初始焦点，键盘可真实走出全屏遮罩；Esc/遮罩 dismiss 一律否决，滚动锁/焦点归还交库承担，手写 lockBodyScroll 退役）并补焦点陷阱测试；Toast live region 常驻（aria-live 节点必须先于内容变化存在才有播报保证，原 role=alert 挂在每条消息新建节点上会被当节点增删漏播；容器常驻、消息体容器内进出）；UpdateDialog 样式上提共享层并收敛 15 处字面字号为 token（scoped 221 行超 200 行判据，原 15px token 外真逃逸按 16px 收编）。
+- **T8-3b 设置域 UI 子批**：清理设置域死规则群（含「从不命中」更强结论）；badge--mono 迁移 components/badge.css；设置域 stylelint 基线收敛。T8-3 全收口。
+- **T8-4 前端结构批**：App 浮层组件异步分包（首屏 gzip -17.3KB）；autostart 轮询改页面驱动（页面可见才拉取）；清理前端死代码；autostartApi.toggle 具名返回。
+- **T8-5 依赖升级四线**：stylelint 18、vitest 5、eslint-plugin-vue 10（启用 strongly-recommended）、vite 7/plugin-vue 6/TS 5.9；package.json 补 engines 字段（node 版本口径成文）。
+- **T8-6b Ctrl+K 命令面板**：新增命令面板（commandRegistry 22 命令懒加载注册、Ctrl+K 唤起、键盘导航），首屏 gzip +0.42KB；样式落 command-palette.css。
+- **T8-6c 主题跟随核实**：外观持久化往返与强调色对比度红线用例——核实主题跟随与强调色为既有实现已生效，仅补回归红线测试（图表随事件 API 另批）。
+- **小项池清理批**：清理 responsive 与设置列表死规则并修正断点注释；修正 useUpdateDialog 测试 mock 键名（诚实纠正主代理笔误）。后续小项池清空。
+
+### 阶段 9：收尾（进行中）
+
+- **T9-1 错误文案人话化（后半四域）**：config 域 IO 与密钥错误按 `io_error_at`「动作（路径）：类别（原文）」范式人话化（ErrorKind 原样保留供程序化分支、原始文本保留末尾供日志比对）；登录 Worker 忙提示去除错误原文重复拼接；bridge 域自有错误 8 点（**Worker 信封 message 一字未动**——IPC 契约红线）；web 层 error.rs 集中化（裸 `?` 传播的 IO/JSON 错误统一人话化 + zip 写入标签）。四域 701 项测试全绿**零断言更新**。遗留：五路由 JSON 标签归 A54、mod.rs:942 语义错位受枚举冻结红线未动记 known-issues；前半六域（monitor/engine/updater/environment/scheduler/network）在编。
+- **T9-2 known-issues 对质刷新**：known-issues 全面对质——#5「暂停期自动切换检测被门控」给出维持现状结论（与 F4 暂停语义一致、手动切换入口不受限）；持久会话 Worker Success ≠ 登录成功成文为排障入口；#22 十九条逐条复核（BRG-5/ENV-8 已解决就地标注，其余维持理由逐条成文）。
+- **T9-4 架构图与模块地图**：新增 `docs/guides/architecture.md`（434 行 8 节）：服务拓扑 mermaid 图（container 16 字段核实）、46 条依赖边 grep 佐证、测试地图九类验证面；5 个 mermaid 块过解析器校验。
+
+**行为变化要点（用户可感知）**
+
+- **鉴权模型重构**：免鉴权 token 端点删除，界面统一经 bootstrap fragment 握手换取 token；非回环（Docker/LAN）绑定未配管理凭据默认拒绝启动（`CAMPUS_AUTH_MANAGEMENT_PASSWORD` 或显式 `--allow-unauthenticated-bind` 豁免）；WS 重连不再误清 sessionStorage（后端重启后页面不再被迫回引导页）
+- **Docker 运行身份与密钥持久化**：容器降权 campus(1000) 运行；`HOME=/data/home` 使加密密钥随数据卷持久化——旧版密钥在容器临时层，重建容器即失、已加密方案密码全部失效，升级迁移步骤见 docker/README.md
+- **http_login 脱糖行为统一（旧固定字段任务）**：① 下线动作对带 steps 的任务生效（此前静默跳过）；② 变量预算 8KiB/值 + 128KiB/尝试对旧脚本产出生效（超限即拒）；③ 总时限 120s + 单步 min(20s, 剩余)（旧口径无总预算、固定 20s/请求退役，前置请求超时 10s 并入步骤口径）；④ 判定文案统一流程形态（**「直连请求成功」退役**，脚本指南同步）；⑤ 脚本 ctx.vars 带累计变量表（覆盖已有占位符记 info）
+- **Engine/Updater 墙钟化**：合盖睡眠唤醒后到期的冷却/探测/检查周期不再推迟一个周期，「唤醒即重认证」恢复
+- **Worker evaluate 类步骤超时可重试**：不再终态失败直接计入失败预算
+- **settings PATCH 清空修复**：清空 URL 检测列表不再残留旧期望响应映射
+
+战役进行中，后续批次持续追加（A45 错误人话化六域 / A52 持久会话端点 / A53 契约注解批三 / A54 五路由 JSON 标签与 typegen 管线在编）。
+
 ## 开发中（2026-11-12 全面审查修复战役）
 
 > 依据 `docs/reports/full-review-2026-11-12.md`（76 项发现）与五份 fixplaybook 按阶段实施；过程性进度与心跳记录在 gitignored 的 `docs/reports/`。
