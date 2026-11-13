@@ -10,6 +10,7 @@ use crate::environment::{
     EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
     UV_SYNC_TIMEOUT,
 };
+use crate::utils::io_human::io_error_reason;
 
 /// ddddocr 按需安装版本下限（`uv add` 用，不预声明于 pyproject）
 const DDDDOCR_REQUIREMENT: &str = "ddddocr>=1.6.1";
@@ -36,9 +37,10 @@ pub async fn run_uv_sync(
     }
 
     let uv_exe = uv_exe_path(mgr);
+    // 人话化载荷：失败类别 + 原始错误（动作由 UvExtractFailed 的 Display 表达）
     tokio::fs::create_dir_all(mgr.env_path())
         .await
-        .map_err(EnvironmentError::UvExtractFailed)?;
+        .map_err(|e| EnvironmentError::UvExtractFailed(io_error_reason(e)))?;
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
     let mut last_err: Option<EnvironmentError> = None;
@@ -72,7 +74,7 @@ pub async fn run_uv_sync(
                 continue;
             }
             Err(CommandOutputError::Io(error)) => {
-                last_err = Some(EnvironmentError::UvExtractFailed(error));
+                last_err = Some(EnvironmentError::UvExtractFailed(io_error_reason(error)));
                 continue;
             }
         };
@@ -233,7 +235,7 @@ async fn run_uv_package_alter(
     let uv_exe = uv_exe_path(mgr);
     tokio::fs::create_dir_all(mgr.env_path())
         .await
-        .map_err(EnvironmentError::UvExtractFailed)?;
+        .map_err(|e| EnvironmentError::UvExtractFailed(io_error_reason(e)))?;
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
     // remove 的参数组：新版 pyproject 无 extra 声明，优先裸 remove；
     // 存量副本仍带 ocr extra 声明时再回退 `--optional ocr`。
@@ -249,7 +251,7 @@ async fn run_uv_package_alter(
     for (i, args) in arg_sets.iter().enumerate() {
         let backup = ProjectFilesBackup::take(mgr.worker_project_path())
             .await
-            .map_err(EnvironmentError::UvExtractFailed)?;
+            .map_err(|e| EnvironmentError::UvExtractFailed(io_error_reason(e)))?;
 
         let cmd = uv_package_alter_command(
             &uv_exe,
@@ -274,7 +276,7 @@ async fn run_uv_package_alter(
             }
             Err(CommandOutputError::Io(error)) => {
                 backup.restore().await;
-                return Err(EnvironmentError::UvExtractFailed(error));
+                return Err(EnvironmentError::UvExtractFailed(io_error_reason(error)));
             }
         };
 

@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use crate::environment::{EnvironmentError, EnvironmentManager, RESYNC_MARKER};
+use crate::utils::io_human::io_error_reason;
 
 /// Rust 控制平面当前要求的 Worker 协议版本。
 pub const EXPECTED_WORKER_VERSION: &str = "1.0.0";
@@ -170,7 +171,12 @@ pub fn runtime_manifest_state(mgr: &EnvironmentManager) -> Result<ManifestState,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ManifestState::Missing);
         }
-        Err(source) => return Err(EnvironmentError::StateIo { path, source }),
+        Err(source) => {
+            return Err(EnvironmentError::StateIo {
+                path,
+                source: io_error_reason(source),
+            });
+        }
     };
     let state: RuntimeState = match serde_json::from_slice(&bytes) {
         Ok(state) => state,
@@ -200,11 +206,13 @@ pub async fn record_verified_runtime(mgr: &EnvironmentManager) -> Result<(), Env
         .await
         .map_err(|source| EnvironmentError::StateIo {
             path: mgr.env_path().clone(),
-            source,
+            source: io_error_reason(source),
         })?;
     let path = runtime_state_path(mgr);
-    crate::utils::atomic_write_json(&path, &state)
-        .map_err(|source| EnvironmentError::StateIo { path, source })
+    crate::utils::atomic_write_json(&path, &state).map_err(|source| EnvironmentError::StateIo {
+        path,
+        source: io_error_reason(source),
+    })
 }
 
 /// 确保 Worker 核心依赖可导入；清单变化、显式修复或探针失败时执行 uv sync。
@@ -278,12 +286,17 @@ pub fn ocr_enabled(mgr: &EnvironmentManager) -> Result<bool, EnvironmentError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(mgr.ocr_marker_path().is_file());
         }
-        Err(source) => return Err(EnvironmentError::StateIo { path, source }),
+        Err(source) => {
+            return Err(EnvironmentError::StateIo {
+                path,
+                source: io_error_reason(source),
+            });
+        }
     };
     let prefs: PythonPreferences =
         serde_json::from_slice(&bytes).map_err(|error| EnvironmentError::StateDataInvalid {
             path: path.clone(),
-            reason: error.to_string(),
+            reason: format!("内容不是合法 JSON（{error}）"),
         })?;
     Ok(prefs.schema_version == STATE_SCHEMA_VERSION && prefs.ocr_enabled)
 }
@@ -297,15 +310,17 @@ pub async fn set_ocr_enabled(
         .await
         .map_err(|source| EnvironmentError::StateIo {
             path: mgr.env_path().clone(),
-            source,
+            source: io_error_reason(source),
         })?;
     let path = preferences_path(mgr);
     let prefs = PythonPreferences {
         schema_version: STATE_SCHEMA_VERSION,
         ocr_enabled: enabled,
     };
-    crate::utils::atomic_write_json(&path, &prefs)
-        .map_err(|source| EnvironmentError::StateIo { path, source })
+    crate::utils::atomic_write_json(&path, &prefs).map_err(|source| EnvironmentError::StateIo {
+        path,
+        source: io_error_reason(source),
+    })
 }
 
 /// 判断部署副本的 pyproject 是否由 uv add 声明了 ddddocr。
@@ -327,8 +342,10 @@ fn runtime_fingerprint(mgr: &EnvironmentManager) -> Result<String, EnvironmentEr
     let mut hasher = Sha256::new();
     for name in ["pyproject.toml", "uv.lock"] {
         let path = mgr.worker_project_path().join(name);
-        let bytes =
-            std::fs::read(&path).map_err(|source| EnvironmentError::StateIo { path, source })?;
+        let bytes = std::fs::read(&path).map_err(|source| EnvironmentError::StateIo {
+            path,
+            source: io_error_reason(source),
+        })?;
         hasher.update(name.as_bytes());
         hasher.update([0]);
         hasher.update(bytes);

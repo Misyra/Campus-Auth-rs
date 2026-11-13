@@ -27,6 +27,7 @@ use crate::environment::{
     EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
     UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME,
 };
+use crate::utils::io_human::io_error_reason;
 
 use download::{
     download_file_streaming, download_text_with_mirrors, extract_uv_from_archive,
@@ -184,7 +185,8 @@ pub async fn download_uv(
             );
             let _ = tokio::fs::remove_file(&tmp_archive).await;
             let _ = tokio::fs::remove_file(&tmp_exe).await;
-            return Err(EnvironmentError::UvExtractFailed(e));
+            // 人话化载荷：失败类别 + 原始错误（动作由 UvExtractFailed 的 Display 表达）
+            return Err(EnvironmentError::UvExtractFailed(io_error_reason(e)));
         }
 
         // 5. 原子安装：rename 到目标位置（跨卷回退走 copy→临时名→rename）
@@ -195,7 +197,7 @@ pub async fn download_uv(
         // copy 失败自动清理临时文件，残留的 tmp_exe 一并清除。
         if let Err(e) = crate::utils::io::rename_or_copy(&tmp_exe, &uv_dest).await {
             let _ = tokio::fs::remove_file(&tmp_exe).await;
-            return Err(EnvironmentError::UvExtractFailed(e));
+            return Err(EnvironmentError::UvExtractFailed(io_error_reason(e)));
         }
 
         // 6. 验证可执行（ENV-2：带超时 + 响应取消 + kill_on_drop）——该步骤
@@ -213,7 +215,7 @@ pub async fn download_uv(
                 CommandOutputError::Timeout => EnvironmentError::UvExtractFailed(
                     std::io::Error::other("uv --version 校验超时（5s），疑似环境异常"),
                 ),
-                CommandOutputError::Io(e) => EnvironmentError::UvExtractFailed(e),
+                CommandOutputError::Io(e) => EnvironmentError::UvExtractFailed(io_error_reason(e)),
             })?;
 
         if !output.status.success() {

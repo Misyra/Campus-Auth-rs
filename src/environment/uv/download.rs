@@ -6,6 +6,7 @@ use crate::environment::{
     EnvironmentError, EnvironmentManager, UV_DOWNLOAD_STALL_TIMEOUT, UV_DOWNLOAD_TIMEOUT,
     UV_EXE_NAME, UV_FALLBACK_VERSION, UV_MIRROR_PROBE_TIMEOUT, UV_RELEASES_BASE, UV_TARGET,
 };
+use crate::utils::io_human::io_error_reason;
 
 /// uv 发布资产扩展名：Windows 为 zip；官方 Linux / macOS release 只提供 tar.gz
 /// （zip 资产在 unix 目标上 404，是环境引导链的第一处平台断点）
@@ -321,7 +322,9 @@ pub(super) async fn download_file_streaming(
             retries: 0,
             source: e,
         },
-        crate::utils::io::DownloadError::Io(e) => EnvironmentError::UvExtractFailed(e),
+        crate::utils::io::DownloadError::Io(e) => {
+            EnvironmentError::UvExtractFailed(io_error_reason(e))
+        }
         crate::utils::io::DownloadError::Stalled {
             idle_secs,
             received_bytes,

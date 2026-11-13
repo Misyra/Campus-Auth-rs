@@ -84,17 +84,19 @@ pub(crate) async fn uv_executable_works(uv_exe: &Path) -> bool {
 
 /// 校验文件 SHA256 与期望值一致
 pub async fn verify_sha256(path: &Path, expected: &str) -> Result<(), EnvironmentError> {
+    use crate::utils::io_human::io_error_reason;
     use tokio::io::AsyncReadExt;
+    // 人话化载荷：失败类别 + 原始错误（动作由 UvExtractFailed 的 Display 表达）
     let mut file = tokio::fs::File::open(path)
         .await
-        .map_err(EnvironmentError::UvExtractFailed)?;
+        .map_err(|e| EnvironmentError::UvExtractFailed(io_error_reason(e)))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
         let n = file
             .read(&mut buf)
             .await
-            .map_err(EnvironmentError::UvExtractFailed)?;
+            .map_err(|e| EnvironmentError::UvExtractFailed(io_error_reason(e)))?;
         if n == 0 {
             break;
         }
