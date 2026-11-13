@@ -4,7 +4,9 @@ import pluginVue from "eslint-plugin-vue";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist/**", "node_modules/**"] },
+  // src/api/generated 为 openapi-typescript 生成物（npm run typegen 产物，
+  // 见目录内 README），整体豁免 lint——生成代码风格不归人工规则管
+  { ignores: ["dist/**", "node_modules/**", "src/api/generated/**"] },
 
   js.configs.recommended,
   ...tseslint.configs.recommended,
