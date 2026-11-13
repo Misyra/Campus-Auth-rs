@@ -20,13 +20,15 @@ const inputEl = ref<HTMLInputElement | null>(null);
 const items = ref<PaletteCommand[]>([]);
 
 // 命令集在每次打开时重建：「启动/停止监测」动态文案与登录中可用性即时取值；
-// 查询词与选中项复位，避免残留上一次的过滤现场
+// 查询词与选中项复位，避免残留上一次的过滤现场。
+// immediate 必需：面板是懒加载 chunk，首次打开时 open 已为 true 才挂载，
+// 非 immediate 的 watch 永远收不到这次"打开"，命令集为空（首个打开恒「无匹配命令」）。
 watch(palette.open, (open) => {
   if (!open) return;
   items.value = buildCommandItems();
   query.value = "";
   activeIndex.value = 0;
-});
+}, { immediate: true });
 const filtered = computed(() => filterCommands(items.value, query.value));
 // 换查询词回到第一个结果：选中态跟随输入而不是停留在旧的条目上
 watch(query, () => {

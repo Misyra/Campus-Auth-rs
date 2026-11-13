@@ -90,6 +90,22 @@ describe("命令面板开关", () => {
     uninstall();
   });
 
+  it("懒加载首开回归：open 先于挂载置真时命令集仍完整（不再是空列表）", async () => {
+    // 真实入口是 defineAsyncComponent：首次点击时 open 已是 true，组件随后才挂载。
+    // 若构建命令集的 watch 不是 immediate，这一生命周期顺序会让列表恒为空，
+    // 用户看到「无匹配命令」而任何关键词都搜不到。
+    palette.openPalette();
+    mountPalette();
+    await settle();
+    expect(palette.open.value).toBe(true);
+    expect(options().length).toBeGreaterThan(0);
+    // 「浏览器」应命中设置分区命令（用户实测回归词）
+    typeQuery("浏览器");
+    await flush();
+    const labels = options().map((el) => el.textContent ?? "");
+    expect(labels.some((text) => text.includes("浏览器"))).toBe(true);
+  });
+
   it("macOS Cmd+K 同样触发；焦点在文本框时仍可用（输入现场不丢失）", () => {
     mountPalette();
     const uninstall = installCommandPaletteHotkey();
