@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
@@ -35,10 +35,7 @@ use crate::web::state::AppState;
 // handler 内 `json!` 组装形状的镜像 DTO（handler 仍返回 `Json<Value>`）。
 
 /// GET /api/uninstall/detect 的单项系统残留
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UninstallDetectItem {
     /// 项标识：user_data / playwright / autostart
     pub key: String,
@@ -51,10 +48,7 @@ pub struct UninstallDetectItem {
 }
 
 /// 程序目录 / 卸载助手条目
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UninstallEntryData {
     /// 展示名称（"程序目录" / "卸载助手"）
     pub label: String,
@@ -65,10 +59,7 @@ pub struct UninstallEntryData {
 }
 
 /// base_path 下的用户数据目录条目
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UninstallDataDirData {
     /// 目录标识（`crate::uninstall::DATA_DIR_NAMES` 七项之一）
     pub key: String,
@@ -81,10 +72,7 @@ pub struct UninstallDataDirData {
 }
 
 /// GET /api/uninstall/detect 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UninstallDetectData {
     /// base_path 之外的系统残留清单（用户数据目录 / Playwright 缓存 / 自启动）
     pub items: Vec<UninstallDetectItem>,
@@ -101,10 +89,7 @@ pub struct UninstallDetectData {
 }
 
 /// POST /api/uninstall 单步结果
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UninstallStepData {
     /// 步骤标识：autostart / user_data / playwright
     pub key: String,
@@ -117,10 +102,7 @@ pub struct UninstallStepData {
 }
 
 /// POST /api/uninstall 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UninstallCleanupData {
     /// 三步执行结果（互不阻断，逐项返回）
     pub results: Vec<UninstallStepData>,
@@ -129,10 +111,7 @@ pub struct UninstallCleanupData {
 }
 
 /// POST /api/uninstall/purge 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PurgeUninstallData {
     /// 汇总提示（按需追加「待应用更新未能取消」与「加密密钥尚未清理」警示）
     pub message: String,
@@ -149,10 +128,7 @@ pub struct PurgeUninstallData {
 }
 
 /// POST /api/uninstall/purge 计划删除的用户数据目录条目
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UninstallPurgeDirData {
     /// 目录标识（`crate::uninstall::DATA_DIR_NAMES` 之一）
     pub key: String,

@@ -10,6 +10,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use utoipa::ToSchema;
@@ -32,10 +33,7 @@ use crate::web::operations::{OperationRegistration, WebOperations};
 // SSE 流事件帧的字段级契约归 T5-4 流事件批次（本端点只注解 HTTP 触发面）。
 
 /// GET/PUT /api/ai/llm-config 响应载荷（脱敏视图）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LlmConfigData {
     /// 服务商标识（glm / deepseek / custom 等，`crate::ai::validate_provider` 口径）
     pub provider: String,
@@ -52,10 +50,7 @@ pub struct LlmConfigData {
 }
 
 /// PUT /api/ai/llm-config 请求体
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LlmConfigUpdateBody {
     /// 服务商标识；缺省时按 base_url 推断
     pub provider: Option<String>,
@@ -70,10 +65,7 @@ pub struct LlmConfigUpdateBody {
 }
 
 /// POST /api/ai/llm-config/test 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LlmConnectionTestData {
     /// 链路与凭据是否连通（回复被测试上限截断也算连通，附 note）
     pub connected: bool,
@@ -86,10 +78,7 @@ pub struct LlmConnectionTestData {
 }
 
 /// POST /api/ai/models 请求体
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LlmModelsBody {
     /// 服务商标识；缺省时按 base_url 推断
     pub provider: Option<String>,
@@ -100,10 +89,7 @@ pub struct LlmModelsBody {
 }
 
 /// POST /api/ai/models 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LlmModelsData {
     /// 模型数量
     pub count: usize,
@@ -112,20 +98,14 @@ pub struct LlmModelsData {
 }
 
 /// POST /api/ai/capture 请求体
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CaptureBody {
     /// 待捕获页面 URL（http/https）
     pub url: String,
 }
 
 /// GET /api/ai/capture/status 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CaptureStatusData {
     /// 最近一次捕获产物是否完整可用（meta + page.html + screenshot.png 齐备且 meta 可解析）
     pub available: bool,
@@ -140,10 +120,7 @@ pub struct CaptureStatusData {
 }
 
 /// POST /api/ai/generate/stream 请求体
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct GenerateStreamBody {
     /// 追加到提示词的用户补充说明（≤4000 字符，可省略）
     pub extra_prompt: Option<String>,

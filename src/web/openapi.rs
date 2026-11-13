@@ -5,7 +5,7 @@
 //!    批次一律引用本模块，不得在各 route 文件内重复定义信封；
 //! 2. [`ApiDoc`]：utoipa 文档骨架——根元数据（openapi/info/servers）由生成侧
 //!    接管，版本号随 `CARGO_PKG_VERSION` 自动同步（三端同版少一处手工项），
-//!    paths 逐批挂载已注解域（system 样板 + T5-1a 三域 + T5-1b 五域）；
+//!    paths 逐批挂载已注解域（system 样板 + T5-1a 三域 + T5-1b 五域 + 批三九域）；
 //! 3. [`merged_openapi_json`]：生成管线——utoipa 生成 spec 与手写 baseline
 //!    （根目录 `openapi.json` 的未注解域条目）按路径合并，产出最终文档。
 //!
@@ -67,8 +67,10 @@ pub mod schemas {
 ///
 /// `info`/`servers` 由本骨架权威持有；`paths` 随域批次逐个挂载
 /// `#[utoipa::path]` 注解处理器（已挂载：system 样板、config/profiles/login
-/// （T5-1a）、tasks/http_tasks/scheduler/scripts/repo（T5-1b）五域第二批，
-/// 见 `routes` 各文件注解；monitor/debug/history 等剩余域随后续批次接入）。
+/// （T5-1a）、tasks/http_tasks/scheduler/scripts/repo（T5-1b）、批三九域
+/// monitor/debug/history/uninstall/autostart/ocr/ai/background/tools，
+/// 见 `routes` 各文件注解；diagnostics/notification/auth/browsers 等剩余域
+/// 随后续批次接入）。
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -149,6 +151,54 @@ pub mod schemas {
         crate::web::routes::repo::repo_fetch_index,
         crate::web::routes::repo::repo_fetch_task,
         crate::web::routes::repo::repo_image,
+        // ---- monitor 域（批三）----
+        crate::web::routes::monitor::get_status,
+        crate::web::routes::monitor::test_network,
+        crate::web::routes::monitor::start_monitor,
+        crate::web::routes::monitor::stop_monitor,
+        crate::web::routes::monitor::test_redirect,
+        crate::web::routes::monitor::get_network_interfaces,
+        // ---- debug 域（批三）----
+        crate::web::routes::debug::start_debug,
+        crate::web::routes::debug::step_debug,
+        crate::web::routes::debug::stop_debug,
+        crate::web::routes::debug::debug_status,
+        crate::web::routes::debug::run_all,
+        crate::web::routes::debug::debug_screenshot,
+        crate::web::routes::debug::feedback_bundle,
+        // ---- history 域（批三）----
+        crate::web::routes::history::get_history,
+        crate::web::routes::history::clear_history,
+        // ---- uninstall 域（批三）----
+        crate::web::routes::uninstall::detect_uninstall,
+        crate::web::routes::uninstall::uninstall,
+        crate::web::routes::uninstall::purge_uninstall,
+        // ---- autostart 域（批三）----
+        crate::web::routes::autostart::get_autostart,
+        crate::web::routes::autostart::enable_autostart,
+        crate::web::routes::autostart::disable_autostart,
+        // ---- ocr 域（批三）----
+        crate::web::routes::ocr::ocr_recognize,
+        crate::web::routes::ocr::ocr_status,
+        crate::web::routes::ocr::ocr_uninstall,
+        crate::web::routes::ocr::ocr_install,
+        // ---- ai 域（批三）----
+        crate::web::routes::ai::get_llm_config,
+        crate::web::routes::ai::put_llm_config,
+        crate::web::routes::ai::test_llm_connection,
+        crate::web::routes::ai::list_models,
+        crate::web::routes::ai::capture,
+        crate::web::routes::ai::capture_screenshot,
+        crate::web::routes::ai::capture_status,
+        crate::web::routes::ai::generate_stream,
+        crate::web::routes::ai::capture_bundle,
+        // ---- background 域（批三）----
+        crate::web::routes::background::get_background,
+        crate::web::routes::background::upload_background,
+        crate::web::routes::background::fetch_url_background,
+        crate::web::routes::background::delete_background,
+        // ---- tools 域（批三）----
+        crate::web::routes::tools::task_recorder,
     ),
     components(schemas(
         schemas::ErrorDetail,
@@ -245,6 +295,79 @@ pub mod schemas {
         //      生成代码会碎），只能作为泛型实参随信封注册）----
         schemas::DataEnvelope<serde_json::Value>,
         crate::web::routes::repo::RepoImageBody,
+        // ---- monitor 域（批三；快照/探测结果是 Serialize 类型的线格式镜像）----
+        schemas::DataEnvelope<crate::web::routes::monitor::MonitorStatusData>,
+        schemas::DataEnvelope<crate::web::routes::monitor::TestNetworkResultData>,
+        schemas::DataEnvelope<crate::web::routes::monitor::RedirectTestResultData>,
+        schemas::DataEnvelope<Vec<crate::web::routes::monitor::NetworkInterfaceData>>,
+        crate::web::routes::monitor::MonitorStatusData,
+        crate::web::routes::monitor::MonitorConnectivityData,
+        crate::web::routes::monitor::ProbeEvidenceData,
+        crate::web::routes::monitor::TestNetworkResultData,
+        crate::web::routes::monitor::ProbeDetailsData,
+        crate::web::routes::monitor::RedirectTestResultData,
+        crate::web::routes::monitor::RedirectTestStatus,
+        crate::web::routes::monitor::NetworkInterfaceData,
+        crate::web::routes::monitor::RedirectTestRequest,
+        // ---- debug 域（批三；start/step/stop/run-all 为 Worker 协议透传，
+        //      data 复用 Value 信封）----
+        schemas::DataEnvelope<crate::web::routes::debug::DebugStatusData>,
+        crate::web::routes::debug::DebugStatusData,
+        crate::web::routes::debug::DebugScreenshotBody,
+        crate::web::routes::debug::FeedbackBundleBody,
+        // ---- history 域（批三；200 载体为 untagged 枚举 oneOf：裸数组 ⊕ 分页对象）----
+        schemas::DataEnvelope<crate::web::routes::history::HistoryResponseData>,
+        crate::web::routes::history::HistoryResponseData,
+        crate::web::routes::history::HistoryPageData,
+        crate::web::routes::history::HistoryItemData,
+        // ---- uninstall 域（批三）----
+        schemas::DataEnvelope<crate::web::routes::uninstall::UninstallDetectData>,
+        schemas::DataEnvelope<crate::web::routes::uninstall::UninstallCleanupData>,
+        schemas::DataEnvelope<crate::web::routes::uninstall::PurgeUninstallData>,
+        crate::web::routes::uninstall::UninstallDetectData,
+        crate::web::routes::uninstall::UninstallDetectItem,
+        crate::web::routes::uninstall::UninstallEntryData,
+        crate::web::routes::uninstall::UninstallDataDirData,
+        crate::web::routes::uninstall::UninstallCleanupData,
+        crate::web::routes::uninstall::UninstallStepData,
+        crate::web::routes::uninstall::PurgeUninstallData,
+        crate::web::routes::uninstall::UninstallPurgeDirData,
+        crate::web::routes::uninstall::CleanupRequest,
+        crate::web::routes::uninstall::PurgeRequest,
+        // ---- autostart 域（批三；status 载荷因平台平铺字段而异，data 复用 Value 信封）----
+        schemas::DataEnvelope<crate::web::routes::autostart::AutostartToggleData>,
+        crate::web::routes::autostart::AutostartToggleData,
+        // ---- ocr 域（批三）----
+        schemas::DataEnvelope<crate::web::routes::ocr::OcrRecognizeData>,
+        schemas::DataEnvelope<crate::web::routes::ocr::OcrStatusData>,
+        schemas::DataEnvelope<crate::web::routes::ocr::OcrInstallData>,
+        crate::web::routes::ocr::OcrRecognizeBody,
+        crate::web::routes::ocr::OcrRecognizeData,
+        crate::web::routes::ocr::OcrStatusData,
+        crate::web::routes::ocr::OcrInstallData,
+        // ---- ai 域（批三；捕获响应 data 复用 Value 信封，SSE 流帧只声明文本形态）----
+        schemas::DataEnvelope<crate::web::routes::ai::LlmConfigData>,
+        schemas::DataEnvelope<crate::web::routes::ai::LlmConnectionTestData>,
+        schemas::DataEnvelope<crate::web::routes::ai::LlmModelsData>,
+        schemas::DataEnvelope<crate::web::routes::ai::CaptureStatusData>,
+        crate::web::routes::ai::LlmConfigData,
+        crate::web::routes::ai::LlmConfigUpdateBody,
+        crate::web::routes::ai::LlmConnectionTestData,
+        crate::web::routes::ai::LlmModelsBody,
+        crate::web::routes::ai::LlmModelsData,
+        crate::web::routes::ai::CaptureBody,
+        crate::web::routes::ai::CaptureStatusData,
+        crate::web::routes::ai::GenerateStreamBody,
+        crate::web::routes::ai::GenerateStreamFrame,
+        crate::web::routes::ai::CaptureScreenshotBody,
+        crate::web::routes::ai::CaptureBundleBody,
+        // ---- background 域（批三；GET 200 与 multipart file 为 binary 载体）----
+        schemas::DataEnvelope<crate::web::routes::background::BackgroundUploadData>,
+        crate::web::routes::background::BackgroundImageBody,
+        crate::web::routes::background::BackgroundUploadFile,
+        crate::web::routes::background::BackgroundUploadData,
+        crate::web::routes::background::BackgroundFetchBody,
+        // ---- tools 域（批三；200 为 application/javascript 文本原文，无本地 DTO）----
     )),
 )]
 pub struct ApiDoc;
@@ -356,7 +479,7 @@ mod tests {
     /// 样板域条目必须是生成源，未注解域保留手写条目
     ///
     /// 生成源判据：响应携带真实 schema（`$ref` / `properties`，非 `{}` 空占位）；
-    /// 反例取 monitor 域（尚未注解），其条目应原样保留 baseline 的 `{}` 占位。
+    /// 反例取 browsers 域（尚未注解），其条目应原样保留 baseline 的 `{}` 占位。
     /// 该测试钉住「合并真的发生了」——若 paths 覆盖逻辑退化为纯 baseline，
     /// 样板域 schema 会消失、测试即失败。
     #[test]
@@ -370,11 +493,12 @@ mod tests {
             "样板域 /api/health 应携带生成 schema，实际 {health_schema}"
         );
 
-        let monitor_schema = &spec["paths"]["/api/monitor/status"]["get"]["responses"]["200"]["content"]
+        let browsers_schema = &spec["paths"]["/api/browsers"]["get"]["responses"]["200"]["content"]
             ["application/json"]["schema"];
         assert!(
-            monitor_schema.is_object() && monitor_schema.as_object().is_some_and(|o| o.is_empty()),
-            "未注解域 /api/monitor/status 应保留手写占位 schema，实际 {monitor_schema}"
+            browsers_schema.is_object()
+                && browsers_schema.as_object().is_some_and(|o| o.is_empty()),
+            "未注解域 /api/browsers 应保留手写占位 schema，实际 {browsers_schema}"
         );
 
         // 错误信封与 data 包装必须进入 components（共享 schema 模块的出口）

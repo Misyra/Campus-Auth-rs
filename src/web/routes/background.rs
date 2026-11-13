@@ -7,7 +7,7 @@ use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
@@ -50,10 +50,7 @@ pub struct BackgroundImageBody(Vec<u8>);
 pub struct BackgroundUploadFile(Vec<u8>);
 
 /// POST /api/background/upload 与 /api/background/fetch-url 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BackgroundUploadData {
     /// 落盘文件名（`bg-<stem>-<uuid>.<ext>`，已做 Windows 设备名/ADS 消毒）
     pub filename: String,

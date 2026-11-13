@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Query, State};
 use chrono::{Duration, Local};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 
@@ -24,10 +24,7 @@ use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 // 以 untagged 枚举声明为 oneOf（handler 仍按查询参数动态二选一）。
 
 /// GET /api/history 条目（`LoginHistoryEntry` 线格式镜像 + `success` 计算字段）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HistoryItemData {
     /// 记录时间戳（本地时区 ISO 8601）
     pub timestamp: String,
@@ -48,10 +45,7 @@ pub struct HistoryItemData {
 }
 
 /// GET /api/history 分页形态（传 `page` 时的 200 载荷）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HistoryPageData {
     /// 总条数（在 limit 截断之后取值，与可翻页条目数一致）
     pub total: usize,
@@ -65,10 +59,11 @@ pub struct HistoryPageData {
 
 /// GET /api/history 200 响应 data 形状（schema 载体）：不传 `page` 时为裸数组
 /// （向后兼容），传 `page` 时为分页对象；以 untagged 枚举声明为 oneOf。
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
+// 契约声明类型：handler 组装走 `json!`，两个变体在运行时从不构造；
+// 注册进 components 后「变体从未构造」仍按预期触发，dead_code 属预期
+// （范式同二进制载体 RepoImageBody）
 #[allow(dead_code)]
-#[derive(ToSchema)]
+#[derive(Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum HistoryResponseData {
     /// 裸数组形态（不传 page）

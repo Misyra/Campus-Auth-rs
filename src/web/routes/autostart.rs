@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
@@ -21,10 +22,7 @@ use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 // 单一 DTO，以 `DataEnvelope<Value>` + 响应说明诚实标注；开关响应形状本地可定。
 
 /// POST /api/autostart/enable 与 /api/autostart/disable 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AutostartToggleData {
     /// 操作结果提示
     pub message: String,

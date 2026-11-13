@@ -44,10 +44,7 @@ pub struct RedirectTestRequest {
 // 不改 handler 返回类型；字符串枚举字段的取值在各字段 doc 中逐项列明。
 
 /// GET /api/monitor/status 响应载荷（`StatusSnapshot` 线格式镜像）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MonitorStatusData {
     /// 快照单调版本号（每次 merge +1，前端据此判断状态新旧）
     pub snapshot_version: u64,
@@ -106,10 +103,7 @@ pub struct MonitorStatusData {
 }
 
 /// 连通性解释（`ConnectivityAssessment` 线格式镜像）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MonitorConnectivityData {
     /// 网络连通性状态：online / captive_portal / offline / unknown
     pub status: String,
@@ -129,10 +123,7 @@ pub struct MonitorConnectivityData {
 }
 
 /// 原始探测证据（`ProbeEvidence` 线格式镜像）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProbeEvidenceData {
     /// TCP 弱连通探测：pass / captive / inconclusive / fail / disabled
     pub tcp: String,
@@ -145,10 +136,7 @@ pub struct ProbeEvidenceData {
 }
 
 /// POST /api/monitor/test 响应载荷（`TestNetworkResult` 线格式镜像）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TestNetworkResultData {
     /// 探测结论：online / captive_portal / offline / unknown
     pub status: String,
@@ -167,10 +155,7 @@ pub struct TestNetworkResultData {
 }
 
 /// 各探测方法的详细结果（`ProbeDetails` 线格式镜像）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProbeDetailsData {
     /// TCP 探测结果描述
     pub tcp: Vec<String>,
@@ -181,10 +166,7 @@ pub struct ProbeDetailsData {
 }
 
 /// POST /api/monitor/test-redirect 响应载荷（`RedirectTestResult` 线格式镜像）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RedirectTestResultData {
     /// 机器可读结论
     pub status: RedirectTestStatus,
@@ -193,10 +175,7 @@ pub struct RedirectTestResultData {
 }
 
 /// GET /api/network/interfaces 响应条目（`EgressAdapter` 线格式镜像）
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NetworkInterfaceData {
     /// 稳定标识：Windows 使用接口 GUID，Unix 优先使用 MAC
     pub id: String,

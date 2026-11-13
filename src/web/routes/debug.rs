@@ -11,6 +11,7 @@ use axum::extract::Path;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
+use serde::Serialize;
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 
@@ -29,10 +30,7 @@ use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 // 二进制产物载体（范式同 repo 域 `RepoImageBody`）。
 
 /// GET /api/debug/status 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DebugStatusData {
     /// 是否存在活跃调试会话
     pub active: bool,

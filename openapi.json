@@ -32,6 +32,137 @@
     ],
     "type": "object"
    },
+   "AutostartToggleData": {
+    "description": "POST /api/autostart/enable 与 /api/autostart/disable 响应载荷",
+    "properties": {
+     "message": {
+      "description": "操作结果提示",
+      "type": "string"
+     },
+     "warning": {
+      "description": "配置缓存保存失败时的告警（系统状态已生效，不反向覆盖用户选择）；\n仅 Windows/macOS 携带该字段（其他平台缓存失败按 400 报错并回滚系统注册）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "message"
+    ],
+    "type": "object"
+   },
+   "BackgroundFetchBody": {
+    "description": "POST /api/background/fetch-url 请求体：待拉取的远程图片地址（仅允许 HTTPS，走 SSRF 防护通道）",
+    "properties": {
+     "url": {
+      "description": "图片 URL",
+      "type": "string"
+     }
+    },
+    "required": [
+     "url"
+    ],
+    "type": "object"
+   },
+   "BackgroundImageBody": {
+    "description": "GET /api/background/{filename} 200 响应体 schema 载体\n\nwire 上是原始图片字节流（按存储扩展名对应的 MIME 下发），不是 JSON 包裹；\n本类型仅用于把 OpenAPI schema 声明为\n`{\"type\": \"string\", \"format\": \"binary\"}`，不参与序列化。",
+    "format": "binary",
+    "type": "string"
+   },
+   "BackgroundUploadData": {
+    "description": "POST /api/background/upload 与 /api/background/fetch-url 响应载荷",
+    "properties": {
+     "filename": {
+      "description": "落盘文件名（`bg-<stem>-<uuid>.<ext>`，已做 Windows 设备名/ADS 消毒）",
+      "type": "string"
+     },
+     "url": {
+      "description": "可直接引用的相对 URL（`/api/background/<filename>`）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "filename",
+     "url"
+    ],
+    "type": "object"
+   },
+   "BackgroundUploadFile": {
+    "description": "POST /api/background/upload multipart `file` 字段的 schema 载体\n\n`multipart/form-data` 单字段 `file`；字段值是图片字节，schema 声明为 binary。",
+    "format": "binary",
+    "type": "string"
+   },
+   "CaptureBody": {
+    "description": "POST /api/ai/capture 请求体",
+    "properties": {
+     "url": {
+      "description": "待捕获页面 URL（http/https）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "url"
+    ],
+    "type": "object"
+   },
+   "CaptureBundleBody": {
+    "description": "GET /api/ai/capture/bundle 200 响应体 schema 载体（zip 字节流）\n\n同 repo 域 `RepoImageBody` 的二进制载体范式，不参与序列化。",
+    "format": "binary",
+    "type": "string"
+   },
+   "CaptureScreenshotBody": {
+    "description": "GET /api/ai/capture/screenshot 200 响应体 schema 载体（PNG 字节流）\n\n同 repo 域 `RepoImageBody` 的二进制载体范式，不参与序列化。",
+    "format": "binary",
+    "type": "string"
+   },
+   "CaptureStatusData": {
+    "description": "GET /api/ai/capture/status 响应载荷",
+    "properties": {
+     "available": {
+      "description": "最近一次捕获产物是否完整可用（meta + page.html + screenshot.png 齐备且 meta 可解析）",
+      "type": "boolean"
+     },
+     "final_url": {
+      "description": "导航最终 URL（不可用时缺省）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "request_url": {
+      "description": "原始请求 URL（不可用时缺省）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "structure_summary": {
+      "description": "页面结构摘要（捕获时原值透传，不可用时缺省）"
+     },
+     "title": {
+      "description": "页面标题（不可用时缺省）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "available"
+    ],
+    "type": "object"
+   },
+   "CleanupRequest": {
+    "description": "POST /api/uninstall — 清理系统残留（卸载第一步）\n\n依次执行：关闭开机自启动 → 删除用户数据目录 → 清理 Playwright 浏览器缓存。\n每一步尽力而为、互不阻断，逐项返回结果。\n\nPOST /api/uninstall 的请求体（可选：不带 body 时按\"不保留\"处理，老调用方不受影响）",
+    "properties": {
+     "keep_user_data": {
+      "description": "与 [`PurgeRequest::keep_user_data`] 同一个开关\n\n勾选时**不删**加密密钥目录（`~/.campus_network_auth`）：被保留的 `config/`\n里方案密码是 `ENC:` 密文，密钥一删这些密码就再也解不开（下次启动会生成新密钥，\n解密失败 → 用户得把所有方案密码重填一遍）。\"保留配置与任务\"必须真的能读。",
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   },
    "ConfigSessionStartData": {
     "description": "POST /api/profiles/{id}/config-session/start 响应载荷",
     "properties": {
@@ -107,6 +238,108 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_AutostartToggleData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/autostart/enable 与 /api/autostart/disable 响应载荷",
+      "properties": {
+       "message": {
+        "description": "操作结果提示",
+        "type": "string"
+       },
+       "warning": {
+        "description": "配置缓存保存失败时的告警（系统状态已生效，不反向覆盖用户选择）；\n仅 Windows/macOS 携带该字段（其他平台缓存失败按 400 报错并回滚系统注册）",
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      },
+      "required": [
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_BackgroundUploadData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/background/upload 与 /api/background/fetch-url 响应载荷",
+      "properties": {
+       "filename": {
+        "description": "落盘文件名（`bg-<stem>-<uuid>.<ext>`，已做 Windows 设备名/ADS 消毒）",
+        "type": "string"
+       },
+       "url": {
+        "description": "可直接引用的相对 URL（`/api/background/<filename>`）",
+        "type": "string"
+       }
+      },
+      "required": [
+       "filename",
+       "url"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_CaptureStatusData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/ai/capture/status 响应载荷",
+      "properties": {
+       "available": {
+        "description": "最近一次捕获产物是否完整可用（meta + page.html + screenshot.png 齐备且 meta 可解析）",
+        "type": "boolean"
+       },
+       "final_url": {
+        "description": "导航最终 URL（不可用时缺省）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "request_url": {
+        "description": "原始请求 URL（不可用时缺省）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "structure_summary": {
+        "description": "页面结构摘要（捕获时原值透传，不可用时缺省）"
+       },
+       "title": {
+        "description": "页面标题（不可用时缺省）",
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      },
+      "required": [
+       "available"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_ConfigSessionStartData": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -163,6 +396,38 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_DebugStatusData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/debug/status 响应载荷",
+      "properties": {
+       "active": {
+        "description": "是否存在活跃调试会话",
+        "type": "boolean"
+       },
+       "screenshot_url": {
+        "description": "最近一次调试截图的免鉴权 URL（`/api/debug/screenshot/<filename>`）；尚无截图时为 null",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "session": {
+        "description": "会话详情（步骤列表/执行结果，形状由 Worker 定义）；会话不活跃或 Worker 查询失败时缺省/null"
+       }
+      },
+      "required": [
+       "active"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_DefaultStealthScriptData": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -205,6 +470,31 @@
        "version"
       ],
       "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_HistoryResponseData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/history 200 响应 data 形状（schema 载体）：不传 `page` 时为裸数组\n（向后兼容），传 `page` 时为分页对象；以 untagged 枚举声明为 oneOf。",
+      "oneOf": [
+       {
+        "description": "裸数组形态（不传 page）",
+        "items": {
+         "$ref": "#/components/schemas/HistoryItemData"
+        },
+        "type": "array"
+       },
+       {
+        "$ref": "#/components/schemas/HistoryPageData",
+        "description": "分页对象形态（传 page）"
+       }
+      ]
      }
     },
     "required": [
@@ -369,6 +659,132 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_LlmConfigData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET/PUT /api/ai/llm-config 响应载荷（脱敏视图）",
+      "properties": {
+       "base_url": {
+        "description": "API Base URL",
+        "type": "string"
+       },
+       "configured_providers": {
+        "description": "已保存过 Key 的服务商列表",
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       "has_api_key": {
+        "description": "是否已设置 API Key（Key 本体永不出站）",
+        "type": "boolean"
+       },
+       "max_tokens": {
+        "description": "单次生成 max_tokens 上限；null 表示交由服务商默认",
+        "format": "int32",
+        "minimum": 0,
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "model": {
+        "description": "模型名",
+        "type": "string"
+       },
+       "provider": {
+        "description": "服务商标识（glm / deepseek / custom 等，`crate::ai::validate_provider` 口径）",
+        "type": "string"
+       }
+      },
+      "required": [
+       "provider",
+       "base_url",
+       "model",
+       "has_api_key",
+       "configured_providers"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_LlmConnectionTestData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/ai/llm-config/test 响应载荷",
+      "properties": {
+       "connected": {
+        "description": "链路与凭据是否连通（回复被测试上限截断也算连通，附 note）",
+        "type": "boolean"
+       },
+       "latency_ms": {
+        "description": "测试耗时（毫秒）",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "note": {
+        "description": "截断说明（回复被 256 token 测试上限截断时出现）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "request_url": {
+        "description": "实际请求的 chat/completions 端点",
+        "type": "string"
+       }
+      },
+      "required": [
+       "connected",
+       "latency_ms",
+       "request_url"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_LlmModelsData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/ai/models 响应载荷",
+      "properties": {
+       "count": {
+        "description": "模型数量",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "models": {
+        "description": "模型 ID 列表",
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       }
+      },
+      "required": [
+       "count",
+       "models"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_LogLevelData": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -447,6 +863,287 @@
        "success",
        "message",
        "duration"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_MonitorStatusData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/monitor/status 响应载荷（`StatusSnapshot` 线格式镜像）",
+      "properties": {
+       "active_profile": {
+        "description": "当前活跃 Profile ID",
+        "type": "string"
+       },
+       "connectivity": {
+        "$ref": "#/components/schemas/MonitorConnectivityData",
+        "description": "最近一次连通性解释"
+       },
+       "consecutive_failures": {
+        "description": "连续失败次数",
+        "format": "int32",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "cooling_down": {
+        "description": "是否处于冷却期（连续失败后的等待）",
+        "type": "boolean"
+       },
+       "cooling_down_remaining": {
+        "description": "冷却剩余秒数",
+        "format": "int32",
+        "minimum": 0,
+        "type": [
+         "integer",
+         "null"
+        ]
+       },
+       "engine_state": {
+        "description": "引擎运行状态：running / stopped / dead",
+        "type": "string"
+       },
+       "environment_progress": {
+        "oneOf": [
+         {
+          "type": "null"
+         },
+         {
+          "$ref": "#/components/schemas/EnvProgress",
+          "description": "环境安装进度"
+         }
+        ]
+       },
+       "last_check_time": {
+        "description": "上次网络检测时间（本地时区 ISO 8601）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "last_probe_evidence": {
+        "oneOf": [
+         {
+          "type": "null"
+         },
+         {
+          "$ref": "#/components/schemas/ProbeEvidenceData",
+          "description": "最近一次原始探测证据；尚未执行探测时为 null"
+         }
+        ]
+       },
+       "login_message": {
+        "description": "登录结果消息",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "login_source": {
+        "description": "登录来源：auto / manual / login_once / browser；无在途登录时为 null",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "login_status": {
+        "description": "登录状态：idle / running / success / failed / cancelled",
+        "type": "string"
+       },
+       "login_total": {
+        "description": "累计登录尝试次数",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "monitor_enabled": {
+        "description": "监测是否启用",
+        "type": "boolean"
+       },
+       "monitoring_seconds": {
+        "description": "本次监控连续运行时长（秒）；未监控时为 0",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "network_status": {
+        "description": "网络状态：online / captive_portal / offline / unknown",
+        "type": "string"
+       },
+       "pause_active": {
+        "description": "是否处于暂停时段",
+        "type": "boolean"
+       },
+       "probe_total": {
+        "description": "累计网络检测次数",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "retry_count": {
+        "description": "当前登录重试次数",
+        "format": "int32",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "scheduler_next_fire_at": {
+        "description": "调度器下次触发时间（ISO 8601 字符串）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "scheduler_running": {
+        "description": "调度器是否运行中",
+        "type": "boolean"
+       },
+       "scheduler_task_count": {
+        "description": "调度器管理的任务数量",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "snapshot_version": {
+        "description": "快照单调版本号（每次 merge +1，前端据此判断状态新旧）",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "update_available": {
+        "description": "是否有新版本",
+        "type": "boolean"
+       },
+       "update_progress": {
+        "oneOf": [
+         {
+          "type": "null"
+         },
+         {
+          "$ref": "#/components/schemas/EnvProgress",
+          "description": "更新下载进度（下载期间有值，结束/失败后为 null）"
+         }
+        ]
+       },
+       "uptime_seconds": {
+        "description": "应用运行时长（秒）",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "worker_state": {
+        "description": "Python Worker 状态：not_installed / stopped / starting / ready / busy / error",
+        "type": "string"
+       }
+      },
+      "required": [
+       "snapshot_version",
+       "engine_state",
+       "cooling_down",
+       "consecutive_failures",
+       "network_status",
+       "connectivity",
+       "login_status",
+       "retry_count",
+       "active_profile",
+       "monitor_enabled",
+       "pause_active",
+       "update_available",
+       "worker_state",
+       "uptime_seconds",
+       "monitoring_seconds",
+       "scheduler_running",
+       "scheduler_task_count",
+       "probe_total",
+       "login_total"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_OcrInstallData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/ocr/install 响应载荷",
+      "properties": {
+       "message": {
+        "description": "面向用户的提示消息",
+        "type": "string"
+       }
+      },
+      "required": [
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_OcrRecognizeData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/ocr/recognize 响应载荷",
+      "properties": {
+       "text": {
+        "description": "识别出的文本",
+        "type": "string"
+       }
+      },
+      "required": [
+       "text"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_OcrStatusData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/ocr/status 响应载荷",
+      "properties": {
+       "declared": {
+        "description": "Worker 工程是否支持 OCR（按需 add/remove，不等于已安装）",
+        "type": "boolean"
+       },
+       "installed": {
+        "description": "OCR 依赖（ddddocr）是否已实际装入 venv（不依赖浏览器就绪）",
+        "type": "boolean"
+       },
+       "runtime_ocr": {
+        "description": "Worker 最近一次健康检查上报的运行时 OCR 能力；Worker 未存活/未上报时为 null",
+        "type": [
+         "boolean",
+         "null"
+        ]
+       },
+       "size_mb": {
+        "description": "environment 目录估算体积（MB，四舍五入）",
+        "format": "double",
+        "type": "number"
+       }
+      },
+      "required": [
+       "installed",
+       "declared",
+       "size_mb"
       ],
       "type": "object"
      }
@@ -674,6 +1371,83 @@
       },
       "required": [
        "enabled",
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_PurgeUninstallData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/uninstall/purge 响应载荷",
+      "properties": {
+       "cancelled_pending_update": {
+        "description": "待应用更新是否已成功取消",
+        "type": "boolean"
+       },
+       "data_dirs": {
+        "description": "计划删除的用户数据目录（勾选保留时为空数组）",
+        "items": {
+         "$ref": "#/components/schemas/UninstallPurgeDirData"
+        },
+        "type": "array"
+       },
+       "install_dir": {
+        "description": "实际删除的程序目录",
+        "type": "string"
+       },
+       "kept_user_data": {
+        "description": "是否勾选了保留用户数据",
+        "type": "boolean"
+       },
+       "message": {
+        "description": "汇总提示（按需追加「待应用更新未能取消」与「加密密钥尚未清理」警示）",
+        "type": "string"
+       },
+       "pending_update_left": {
+        "description": "取消失败时为 true（退出后更新助手仍可能把程序装回来）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "message",
+       "kept_user_data",
+       "install_dir",
+       "data_dirs",
+       "cancelled_pending_update",
+       "pending_update_left"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_RedirectTestResultData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/monitor/test-redirect 响应载荷（`RedirectTestResult` 线格式镜像）",
+      "properties": {
+       "message": {
+        "description": "前端直接展示的用户提示",
+        "type": "string"
+       },
+       "status": {
+        "$ref": "#/components/schemas/RedirectTestStatus",
+        "description": "机器可读结论"
+       }
+      },
+      "required": [
+       "status",
        "message"
       ],
       "type": "object"
@@ -942,10 +1716,206 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_TestNetworkResultData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/monitor/test 响应载荷（`TestNetworkResult` 线格式镜像）",
+      "properties": {
+       "auth_endpoint": {
+        "description": "认证入口状态（取值同连通性解释的 `auth_endpoint` 枚举）",
+        "type": "string"
+       },
+       "confidence": {
+        "description": "判断置信度：high / medium / low",
+        "type": "string"
+       },
+       "details": {
+        "$ref": "#/components/schemas/ProbeDetailsData",
+        "description": "各探测方法的详细结果"
+       },
+       "duration_ms": {
+        "description": "探测耗时（毫秒）",
+        "format": "int64",
+        "minimum": 0,
+        "type": "integer"
+       },
+       "local_link": {
+        "description": "本地链路诊断：not_checked / available / unavailable / probe_failed",
+        "type": "string"
+       },
+       "reason": {
+        "description": "主判断原因（取值同连通性解释的 `reason` 枚举）",
+        "type": "string"
+       },
+       "status": {
+        "description": "探测结论：online / captive_portal / offline / unknown",
+        "type": "string"
+       }
+      },
+      "required": [
+       "status",
+       "confidence",
+       "reason",
+       "local_link",
+       "auth_endpoint",
+       "details",
+       "duration_ms"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_UninstallCleanupData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/uninstall 响应载荷",
+      "properties": {
+       "message": {
+        "description": "汇总提示（全部成功 / 部分失败）",
+        "type": "string"
+       },
+       "results": {
+        "description": "三步执行结果（互不阻断，逐项返回）",
+        "items": {
+         "$ref": "#/components/schemas/UninstallStepData"
+        },
+        "type": "array"
+       }
+      },
+      "required": [
+       "results",
+       "message"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_UninstallDetectData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "GET /api/uninstall/detect 响应载荷",
+      "properties": {
+       "blocked": {
+        "description": "非 null 表示拒绝卸载及原因（源码仓库 / cargo 构建输出等守卫）",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "data": {
+        "description": "base_path 下的用户数据目录（勾选「保留配置与任务」则保留）",
+        "items": {
+         "$ref": "#/components/schemas/UninstallDataDirData"
+        },
+        "type": "array"
+       },
+       "helper": {
+        "$ref": "#/components/schemas/UninstallEntryData",
+        "description": "卸载助手是否在位（不在位时 purge 必失败，界面据此先拦下）"
+       },
+       "items": {
+        "description": "base_path 之外的系统残留清单（用户数据目录 / Playwright 缓存 / 自启动）",
+        "items": {
+         "$ref": "#/components/schemas/UninstallDetectItem"
+        },
+        "type": "array"
+       },
+       "keep_data_blocked": {
+        "description": "「保留数据」变体的拒绝原因；`blocked` 非 null 时恒为 null",
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "program": {
+        "$ref": "#/components/schemas/UninstallEntryData",
+        "description": "程序目录（保留数据时只移除程序文件）"
+       }
+      },
+      "required": [
+       "items",
+       "program",
+       "helper",
+       "data"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_Value": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
      "data": {}
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_Vec_NetworkInterfaceData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "items": {
+       "description": "GET /api/network/interfaces 响应条目（`EgressAdapter` 线格式镜像）",
+       "properties": {
+        "dns_servers": {
+         "description": "当前接口配置的 IPv4 DNS",
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "id": {
+         "description": "稳定标识：Windows 使用接口 GUID，Unix 优先使用 MAC",
+         "type": "string"
+        },
+        "index": {
+         "description": "当前接口索引",
+         "format": "int32",
+         "minimum": 0,
+         "type": "integer"
+        },
+        "ipv4": {
+         "description": "当前 IPv4 地址",
+         "type": "string"
+        },
+        "mac": {
+         "description": "当前接口 MAC，供门户凭据变换使用",
+         "type": "string"
+        },
+        "name": {
+         "description": "用户可识别的接口名称",
+         "type": "string"
+        }
+       },
+       "required": [
+        "id",
+        "name",
+        "index",
+        "ipv4",
+        "mac",
+        "dns_servers"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     }
     },
     "required": [
      "data"
@@ -1240,6 +2210,34 @@
     ],
     "type": "object"
    },
+   "DebugScreenshotBody": {
+    "description": "GET /api/debug/screenshot/{filename} 200 响应体 schema 载体\n\nwire 上是原始图片字节流（按 magic bytes 以 image/png 或 image/jpeg 下发），\n不是 JSON 包裹；本类型仅用于把 OpenAPI schema 声明为\n`{\"type\": \"string\", \"format\": \"binary\"}`，不参与序列化。",
+    "format": "binary",
+    "type": "string"
+   },
+   "DebugStatusData": {
+    "description": "GET /api/debug/status 响应载荷",
+    "properties": {
+     "active": {
+      "description": "是否存在活跃调试会话",
+      "type": "boolean"
+     },
+     "screenshot_url": {
+      "description": "最近一次调试截图的免鉴权 URL（`/api/debug/screenshot/<filename>`）；尚无截图时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "session": {
+      "description": "会话详情（步骤列表/执行结果，形状由 Worker 定义）；会话不活跃或 Worker 查询失败时缺省/null"
+     }
+    },
+    "required": [
+     "active"
+    ],
+    "type": "object"
+   },
    "DefaultStealthScriptData": {
     "description": "GET /api/config/default-stealth-script 响应载荷",
     "properties": {
@@ -1393,6 +2391,28 @@
     ],
     "type": "object"
    },
+   "FeedbackBundleBody": {
+    "description": "POST /api/debug/feedback-bundle 200 响应体 schema 载体（zip 字节流）\n\n同 [`DebugScreenshotBody`] 的二进制载体范式，不参与序列化。",
+    "format": "binary",
+    "type": "string"
+   },
+   "GenerateStreamBody": {
+    "description": "POST /api/ai/generate/stream 请求体",
+    "properties": {
+     "extra_prompt": {
+      "description": "追加到提示词的用户补充说明（≤4000 字符，可省略）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "GenerateStreamFrame": {
+    "description": "POST /api/ai/generate/stream 200 响应体 schema 载体\n\nwire 上是 `text/event-stream` 逐帧文本（`data: <json>\\n\\n`），非 JSON 信封；\n本类型仅声明帧的文本形态（`{\"type\": \"string\"}`，非 Binary）。事件帧 type 枚举\n（started / attempt_start / delta / attempt_delta_done / validation_failed /\nretrying / validated / done / error）的字段级契约由 T5-4 流事件批次钉死。",
+    "type": "string"
+   },
    "HealthData": {
     "description": "GET /api/health 响应载荷",
     "properties": {
@@ -1410,6 +2430,107 @@
      "version"
     ],
     "type": "object"
+   },
+   "HistoryItemData": {
+    "description": "GET /api/history 条目（`LoginHistoryEntry` 线格式镜像 + `success` 计算字段）",
+    "properties": {
+     "channel": {
+      "description": "实际执行的登录渠道：browser / http / script；旧记录与执行前失败的记录不含该字段（null）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "duration_secs": {
+      "description": "耗时（秒，浮点）",
+      "format": "double",
+      "type": "number"
+     },
+     "message": {
+      "description": "结果消息",
+      "type": "string"
+     },
+     "profile_id": {
+      "description": "关联 Profile ID",
+      "type": "string"
+     },
+     "result": {
+      "description": "结果分类：success / failed / cancelled",
+      "type": "string"
+     },
+     "source": {
+      "description": "登录来源：auto / manual / login_once / browser",
+      "type": "string"
+     },
+     "success": {
+      "description": "计算字段：`result == \"success\"`（前端显示成功/失败状态用）",
+      "type": "boolean"
+     },
+     "timestamp": {
+      "description": "记录时间戳（本地时区 ISO 8601）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "timestamp",
+     "source",
+     "profile_id",
+     "result",
+     "message",
+     "duration_secs",
+     "success"
+    ],
+    "type": "object"
+   },
+   "HistoryPageData": {
+    "description": "GET /api/history 分页形态（传 `page` 时的 200 载荷）",
+    "properties": {
+     "items": {
+      "description": "当前页条目",
+      "items": {
+       "$ref": "#/components/schemas/HistoryItemData"
+      },
+      "type": "array"
+     },
+     "page": {
+      "description": "页码（从 1 开始）",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "page_size": {
+      "description": "每页条数（钳制 1..=200，默认 50）",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "total": {
+      "description": "总条数（在 limit 截断之后取值，与可翻页条目数一致）",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "total",
+     "page",
+     "page_size",
+     "items"
+    ],
+    "type": "object"
+   },
+   "HistoryResponseData": {
+    "description": "GET /api/history 200 响应 data 形状（schema 载体）：不传 `page` 时为裸数组\n（向后兼容），传 `page` 时为分页对象；以 untagged 枚举声明为 oneOf。",
+    "oneOf": [
+     {
+      "description": "裸数组形态（不传 page）",
+      "items": {
+       "$ref": "#/components/schemas/HistoryItemData"
+      },
+      "type": "array"
+     },
+     {
+      "$ref": "#/components/schemas/HistoryPageData",
+      "description": "分页对象形态（传 page）"
+     }
+    ]
    },
    "HttpStepReportData": {
     "description": "POST /api/http-tasks/test 步骤报告条目（镜像 `HttpStepReport` 的线格式）",
@@ -1842,6 +2963,173 @@
     },
     "type": "object"
    },
+   "LlmConfigData": {
+    "description": "GET/PUT /api/ai/llm-config 响应载荷（脱敏视图）",
+    "properties": {
+     "base_url": {
+      "description": "API Base URL",
+      "type": "string"
+     },
+     "configured_providers": {
+      "description": "已保存过 Key 的服务商列表",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "has_api_key": {
+      "description": "是否已设置 API Key（Key 本体永不出站）",
+      "type": "boolean"
+     },
+     "max_tokens": {
+      "description": "单次生成 max_tokens 上限；null 表示交由服务商默认",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "model": {
+      "description": "模型名",
+      "type": "string"
+     },
+     "provider": {
+      "description": "服务商标识（glm / deepseek / custom 等，`crate::ai::validate_provider` 口径）",
+      "type": "string"
+     }
+    },
+    "required": [
+     "provider",
+     "base_url",
+     "model",
+     "has_api_key",
+     "configured_providers"
+    ],
+    "type": "object"
+   },
+   "LlmConfigUpdateBody": {
+    "description": "PUT /api/ai/llm-config 请求体",
+    "properties": {
+     "api_key": {
+      "description": "API Key 三态：缺省保持不变、空串清除、非空更新（AES-256-GCM 加密落盘）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "base_url": {
+      "description": "API Base URL（必填；做 URL 规范化与 provider 匹配校验）",
+      "type": "string"
+     },
+     "max_tokens": {
+      "description": "单次生成 max_tokens 上限（1..=200000）：缺省保持不变、null 恢复服务商默认",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "model": {
+      "description": "模型名（必填）",
+      "type": "string"
+     },
+     "provider": {
+      "description": "服务商标识；缺省时按 base_url 推断",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "base_url",
+     "model"
+    ],
+    "type": "object"
+   },
+   "LlmConnectionTestData": {
+    "description": "POST /api/ai/llm-config/test 响应载荷",
+    "properties": {
+     "connected": {
+      "description": "链路与凭据是否连通（回复被测试上限截断也算连通，附 note）",
+      "type": "boolean"
+     },
+     "latency_ms": {
+      "description": "测试耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "note": {
+      "description": "截断说明（回复被 256 token 测试上限截断时出现）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "request_url": {
+      "description": "实际请求的 chat/completions 端点",
+      "type": "string"
+     }
+    },
+    "required": [
+     "connected",
+     "latency_ms",
+     "request_url"
+    ],
+    "type": "object"
+   },
+   "LlmModelsBody": {
+    "description": "POST /api/ai/models 请求体",
+    "properties": {
+     "api_key": {
+      "description": "API Key；缺省或空串回退该服务商已保存的 Key",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "base_url": {
+      "description": "API Base URL（必填）",
+      "type": "string"
+     },
+     "provider": {
+      "description": "服务商标识；缺省时按 base_url 推断",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "base_url"
+    ],
+    "type": "object"
+   },
+   "LlmModelsData": {
+    "description": "POST /api/ai/models 响应载荷",
+    "properties": {
+     "count": {
+      "description": "模型数量",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "models": {
+      "description": "模型 ID 列表",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "count",
+     "models"
+    ],
+    "type": "object"
+   },
    "LogLevelData": {
     "description": "GET /api/config/log-levels 响应载荷",
     "properties": {
@@ -1980,6 +3268,347 @@
     ],
     "type": "object"
    },
+   "MonitorConnectivityData": {
+    "description": "连通性解释（`ConnectivityAssessment` 线格式镜像）",
+    "properties": {
+     "auth_endpoint": {
+      "description": "认证入口补充证据：not_checked / reachable / unreachable / invalid / missing /\nskipped_redirect_mode",
+      "type": "string"
+     },
+     "confidence": {
+      "description": "判断置信度：high / medium / low",
+      "type": "string"
+     },
+     "reason": {
+      "description": "主判断原因：not_checked / internet_verified / captive_detected /\nexternal_failed_auth_reachable / link_up_login_assumed / redirect_login_assumed /\nall_probes_failed / weak_evidence_only / inconclusive_evidence /\nconflicting_evidence / no_probes_enabled",
+      "type": "string"
+     },
+     "recovery_advice": {
+      "description": "自动恢复建议：no_action / attempt_login / attempt_login_once / wait_for_network /\nwait_for_more_evidence / fix_configuration / no_probe_evidence / not_evaluated",
+      "type": "string"
+     },
+     "status": {
+      "description": "网络连通性状态：online / captive_portal / offline / unknown",
+      "type": "string"
+     }
+    },
+    "required": [
+     "status",
+     "confidence",
+     "reason",
+     "auth_endpoint",
+     "recovery_advice"
+    ],
+    "type": "object"
+   },
+   "MonitorStatusData": {
+    "description": "GET /api/monitor/status 响应载荷（`StatusSnapshot` 线格式镜像）",
+    "properties": {
+     "active_profile": {
+      "description": "当前活跃 Profile ID",
+      "type": "string"
+     },
+     "connectivity": {
+      "$ref": "#/components/schemas/MonitorConnectivityData",
+      "description": "最近一次连通性解释"
+     },
+     "consecutive_failures": {
+      "description": "连续失败次数",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "cooling_down": {
+      "description": "是否处于冷却期（连续失败后的等待）",
+      "type": "boolean"
+     },
+     "cooling_down_remaining": {
+      "description": "冷却剩余秒数",
+      "format": "int32",
+      "minimum": 0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "engine_state": {
+      "description": "引擎运行状态：running / stopped / dead",
+      "type": "string"
+     },
+     "environment_progress": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/components/schemas/EnvProgress",
+        "description": "环境安装进度"
+       }
+      ]
+     },
+     "last_check_time": {
+      "description": "上次网络检测时间（本地时区 ISO 8601）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "last_probe_evidence": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/components/schemas/ProbeEvidenceData",
+        "description": "最近一次原始探测证据；尚未执行探测时为 null"
+       }
+      ]
+     },
+     "login_message": {
+      "description": "登录结果消息",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "login_source": {
+      "description": "登录来源：auto / manual / login_once / browser；无在途登录时为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "login_status": {
+      "description": "登录状态：idle / running / success / failed / cancelled",
+      "type": "string"
+     },
+     "login_total": {
+      "description": "累计登录尝试次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "monitor_enabled": {
+      "description": "监测是否启用",
+      "type": "boolean"
+     },
+     "monitoring_seconds": {
+      "description": "本次监控连续运行时长（秒）；未监控时为 0",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "network_status": {
+      "description": "网络状态：online / captive_portal / offline / unknown",
+      "type": "string"
+     },
+     "pause_active": {
+      "description": "是否处于暂停时段",
+      "type": "boolean"
+     },
+     "probe_total": {
+      "description": "累计网络检测次数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "retry_count": {
+      "description": "当前登录重试次数",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "scheduler_next_fire_at": {
+      "description": "调度器下次触发时间（ISO 8601 字符串）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "scheduler_running": {
+      "description": "调度器是否运行中",
+      "type": "boolean"
+     },
+     "scheduler_task_count": {
+      "description": "调度器管理的任务数量",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "snapshot_version": {
+      "description": "快照单调版本号（每次 merge +1，前端据此判断状态新旧）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "update_available": {
+      "description": "是否有新版本",
+      "type": "boolean"
+     },
+     "update_progress": {
+      "oneOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/components/schemas/EnvProgress",
+        "description": "更新下载进度（下载期间有值，结束/失败后为 null）"
+       }
+      ]
+     },
+     "uptime_seconds": {
+      "description": "应用运行时长（秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "worker_state": {
+      "description": "Python Worker 状态：not_installed / stopped / starting / ready / busy / error",
+      "type": "string"
+     }
+    },
+    "required": [
+     "snapshot_version",
+     "engine_state",
+     "cooling_down",
+     "consecutive_failures",
+     "network_status",
+     "connectivity",
+     "login_status",
+     "retry_count",
+     "active_profile",
+     "monitor_enabled",
+     "pause_active",
+     "update_available",
+     "worker_state",
+     "uptime_seconds",
+     "monitoring_seconds",
+     "scheduler_running",
+     "scheduler_task_count",
+     "probe_total",
+     "login_total"
+    ],
+    "type": "object"
+   },
+   "NetworkInterfaceData": {
+    "description": "GET /api/network/interfaces 响应条目（`EgressAdapter` 线格式镜像）",
+    "properties": {
+     "dns_servers": {
+      "description": "当前接口配置的 IPv4 DNS",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "id": {
+      "description": "稳定标识：Windows 使用接口 GUID，Unix 优先使用 MAC",
+      "type": "string"
+     },
+     "index": {
+      "description": "当前接口索引",
+      "format": "int32",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "ipv4": {
+      "description": "当前 IPv4 地址",
+      "type": "string"
+     },
+     "mac": {
+      "description": "当前接口 MAC，供门户凭据变换使用",
+      "type": "string"
+     },
+     "name": {
+      "description": "用户可识别的接口名称",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "name",
+     "index",
+     "ipv4",
+     "mac",
+     "dns_servers"
+    ],
+    "type": "object"
+   },
+   "OcrInstallData": {
+    "description": "POST /api/ocr/install 响应载荷",
+    "properties": {
+     "message": {
+      "description": "面向用户的提示消息",
+      "type": "string"
+     }
+    },
+    "required": [
+     "message"
+    ],
+    "type": "object"
+   },
+   "OcrRecognizeBody": {
+    "description": "POST /api/ocr/recognize 请求体\n\n除声明字段外其余键原样透传 Worker（Worker 当前只消费下列两键与\n服务端注入的 `cancel_id`）。",
+    "properties": {
+     "image_base64": {
+      "description": "待识别图片的 base64 编码（原图 ≤ ~1.5 MiB 时请求体才不触 15 MiB 上限）",
+      "type": "string"
+     },
+     "old": {
+      "description": "是否使用 ddddocr 旧版识别模式（透传 Worker，缺省 false）",
+      "type": [
+       "boolean",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "image_base64"
+    ],
+    "type": "object"
+   },
+   "OcrRecognizeData": {
+    "description": "POST /api/ocr/recognize 响应载荷",
+    "properties": {
+     "text": {
+      "description": "识别出的文本",
+      "type": "string"
+     }
+    },
+    "required": [
+     "text"
+    ],
+    "type": "object"
+   },
+   "OcrStatusData": {
+    "description": "GET /api/ocr/status 响应载荷",
+    "properties": {
+     "declared": {
+      "description": "Worker 工程是否支持 OCR（按需 add/remove，不等于已安装）",
+      "type": "boolean"
+     },
+     "installed": {
+      "description": "OCR 依赖（ddddocr）是否已实际装入 venv（不依赖浏览器就绪）",
+      "type": "boolean"
+     },
+     "runtime_ocr": {
+      "description": "Worker 最近一次健康检查上报的运行时 OCR 能力；Worker 未存活/未上报时为 null",
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
+     "size_mb": {
+      "description": "environment 目录估算体积（MB，四舍五入）",
+      "format": "double",
+      "type": "number"
+     }
+    },
+    "required": [
+     "installed",
+     "declared",
+     "size_mb"
+    ],
+    "type": "object"
+   },
    "OrderBody": {
     "description": "任务排序请求体（对齐前端 `{ all, scripts, http }` 契约）\n\n`all` 是**浏览器任务**的历史字段名（三类任务里它曾是唯一一类），刻意不改名：\n改名会让「旧后端 + 新前端」这种组合（调试构建运行时读盘、前端先于后端更新时\n真实存在）在拖拽排序时因缺字段而 400。",
     "properties": {
@@ -2008,6 +3637,66 @@
     "required": [
      "all",
      "scripts"
+    ],
+    "type": "object"
+   },
+   "ProbeDetailsData": {
+    "description": "各探测方法的详细结果（`ProbeDetails` 线格式镜像）",
+    "properties": {
+     "http": {
+      "description": "HTTP 探测结果描述",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "tcp": {
+      "description": "TCP 探测结果描述",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "url": {
+      "description": "URL 探测结果描述",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "tcp",
+     "http",
+     "url"
+    ],
+    "type": "object"
+   },
+   "ProbeEvidenceData": {
+    "description": "原始探测证据（`ProbeEvidence` 线格式镜像）",
+    "properties": {
+     "http": {
+      "description": "HTTP 204 门户探测：同 `tcp` 枚举",
+      "type": "string"
+     },
+     "local_link": {
+      "description": "本地链路诊断：not_checked / available / unavailable / probe_failed",
+      "type": "string"
+     },
+     "tcp": {
+      "description": "TCP 弱连通探测：pass / captive / inconclusive / fail / disabled",
+      "type": "string"
+     },
+     "url": {
+      "description": "URL 内容探测：同 `tcp` 枚举",
+      "type": "string"
+     }
+    },
+    "required": [
+     "tcp",
+     "http",
+     "url",
+     "local_link"
     ],
     "type": "object"
    },
@@ -2495,6 +4184,101 @@
      "message"
     ],
     "type": "object"
+   },
+   "PurgeRequest": {
+    "description": "POST /api/uninstall/purge 的请求体\n\n**本端点不处理用户数据目录（加密密钥 `~/.campus_network_auth`）**——那由第一步\n`POST /api/uninstall` 负责；完整卸载须先调 `POST /api/uninstall` 且两步的\n`keep_user_data` 传同一个值。",
+    "properties": {
+     "keep_user_data": {
+      "description": "保留用户数据（`config` / `tasks` / `logs` / `environment` / `update`）\n\n默认 `false` = 真卸载。勾选它只为\"把便携版换个目录再装一次\"的场景服务：\n程序文件照样删掉，但方案/任务/日志留着，重装后直接可用。",
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   },
+   "PurgeUninstallData": {
+    "description": "POST /api/uninstall/purge 响应载荷",
+    "properties": {
+     "cancelled_pending_update": {
+      "description": "待应用更新是否已成功取消",
+      "type": "boolean"
+     },
+     "data_dirs": {
+      "description": "计划删除的用户数据目录（勾选保留时为空数组）",
+      "items": {
+       "$ref": "#/components/schemas/UninstallPurgeDirData"
+      },
+      "type": "array"
+     },
+     "install_dir": {
+      "description": "实际删除的程序目录",
+      "type": "string"
+     },
+     "kept_user_data": {
+      "description": "是否勾选了保留用户数据",
+      "type": "boolean"
+     },
+     "message": {
+      "description": "汇总提示（按需追加「待应用更新未能取消」与「加密密钥尚未清理」警示）",
+      "type": "string"
+     },
+     "pending_update_left": {
+      "description": "取消失败时为 true（退出后更新助手仍可能把程序装回来）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "message",
+     "kept_user_data",
+     "install_dir",
+     "data_dirs",
+     "cancelled_pending_update",
+     "pending_update_left"
+    ],
+    "type": "object"
+   },
+   "RedirectTestRequest": {
+    "description": "`POST /api/monitor/test-redirect` 请求体。",
+    "properties": {
+     "network": {
+      "description": "方案编辑器尚未保存的出口配置（`NetworkSettings`，形状见\n`crate::network::settings`，契约快照独立于 ToSchema 体系故以泛型对象标注）。",
+      "type": "object"
+     },
+     "trigger_url": {
+      "description": "用户尚未保存的自定义触发地址；空值使用内置默认地址。",
+      "type": "string"
+     }
+    },
+    "required": [
+     "network"
+    ],
+    "type": "object"
+   },
+   "RedirectTestResultData": {
+    "description": "POST /api/monitor/test-redirect 响应载荷（`RedirectTestResult` 线格式镜像）",
+    "properties": {
+     "message": {
+      "description": "前端直接展示的用户提示",
+      "type": "string"
+     },
+     "status": {
+      "$ref": "#/components/schemas/RedirectTestStatus",
+      "description": "机器可读结论"
+     }
+    },
+    "required": [
+     "status",
+     "message"
+    ],
+    "type": "object"
+   },
+   "RedirectTestStatus": {
+    "description": "重定向检测结论。",
+    "enum": [
+     "detected",
+     "online",
+     "not_detected"
+    ],
+    "type": "string"
    },
    "RepoImageBody": {
     "description": "GET /api/repo/image 200 响应体 schema 载体\n\nwire 上是原始图片字节流（按 magic bytes 识别的真实 MIME 下发），不是\nJSON 包裹；本类型仅用于把 OpenAPI schema 声明为\n`{\"type\": \"string\", \"format\": \"binary\"}`，不参与序列化。",
@@ -3038,6 +4822,250 @@
     ],
     "type": "object"
    },
+   "TestNetworkResultData": {
+    "description": "POST /api/monitor/test 响应载荷（`TestNetworkResult` 线格式镜像）",
+    "properties": {
+     "auth_endpoint": {
+      "description": "认证入口状态（取值同连通性解释的 `auth_endpoint` 枚举）",
+      "type": "string"
+     },
+     "confidence": {
+      "description": "判断置信度：high / medium / low",
+      "type": "string"
+     },
+     "details": {
+      "$ref": "#/components/schemas/ProbeDetailsData",
+      "description": "各探测方法的详细结果"
+     },
+     "duration_ms": {
+      "description": "探测耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "local_link": {
+      "description": "本地链路诊断：not_checked / available / unavailable / probe_failed",
+      "type": "string"
+     },
+     "reason": {
+      "description": "主判断原因（取值同连通性解释的 `reason` 枚举）",
+      "type": "string"
+     },
+     "status": {
+      "description": "探测结论：online / captive_portal / offline / unknown",
+      "type": "string"
+     }
+    },
+    "required": [
+     "status",
+     "confidence",
+     "reason",
+     "local_link",
+     "auth_endpoint",
+     "details",
+     "duration_ms"
+    ],
+    "type": "object"
+   },
+   "UninstallCleanupData": {
+    "description": "POST /api/uninstall 响应载荷",
+    "properties": {
+     "message": {
+      "description": "汇总提示（全部成功 / 部分失败）",
+      "type": "string"
+     },
+     "results": {
+      "description": "三步执行结果（互不阻断，逐项返回）",
+      "items": {
+       "$ref": "#/components/schemas/UninstallStepData"
+      },
+      "type": "array"
+     }
+    },
+    "required": [
+     "results",
+     "message"
+    ],
+    "type": "object"
+   },
+   "UninstallDataDirData": {
+    "description": "base_path 下的用户数据目录条目",
+    "properties": {
+     "exists": {
+      "description": "是否存在（不存在的目录如实标注）",
+      "type": "boolean"
+     },
+     "key": {
+      "description": "目录标识（`crate::uninstall::DATA_DIR_NAMES` 七项之一）",
+      "type": "string"
+     },
+     "label": {
+      "description": "展示名称",
+      "type": "string"
+     },
+     "path": {
+      "description": "完整路径",
+      "type": "string"
+     }
+    },
+    "required": [
+     "key",
+     "label",
+     "path",
+     "exists"
+    ],
+    "type": "object"
+   },
+   "UninstallDetectData": {
+    "description": "GET /api/uninstall/detect 响应载荷",
+    "properties": {
+     "blocked": {
+      "description": "非 null 表示拒绝卸载及原因（源码仓库 / cargo 构建输出等守卫）",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "data": {
+      "description": "base_path 下的用户数据目录（勾选「保留配置与任务」则保留）",
+      "items": {
+       "$ref": "#/components/schemas/UninstallDataDirData"
+      },
+      "type": "array"
+     },
+     "helper": {
+      "$ref": "#/components/schemas/UninstallEntryData",
+      "description": "卸载助手是否在位（不在位时 purge 必失败，界面据此先拦下）"
+     },
+     "items": {
+      "description": "base_path 之外的系统残留清单（用户数据目录 / Playwright 缓存 / 自启动）",
+      "items": {
+       "$ref": "#/components/schemas/UninstallDetectItem"
+      },
+      "type": "array"
+     },
+     "keep_data_blocked": {
+      "description": "「保留数据」变体的拒绝原因；`blocked` 非 null 时恒为 null",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "program": {
+      "$ref": "#/components/schemas/UninstallEntryData",
+      "description": "程序目录（保留数据时只移除程序文件）"
+     }
+    },
+    "required": [
+     "items",
+     "program",
+     "helper",
+     "data"
+    ],
+    "type": "object"
+   },
+   "UninstallDetectItem": {
+    "description": "GET /api/uninstall/detect 的单项系统残留",
+    "properties": {
+     "description": {
+      "description": "补充说明（路径或状态描述）",
+      "type": "string"
+     },
+     "exists": {
+      "description": "是否存在（自启动项为是否已注册）",
+      "type": "boolean"
+     },
+     "key": {
+      "description": "项标识：user_data / playwright / autostart",
+      "type": "string"
+     },
+     "label": {
+      "description": "展示名称",
+      "type": "string"
+     }
+    },
+    "required": [
+     "key",
+     "label",
+     "exists",
+     "description"
+    ],
+    "type": "object"
+   },
+   "UninstallEntryData": {
+    "description": "程序目录 / 卸载助手条目",
+    "properties": {
+     "exists": {
+      "description": "是否存在",
+      "type": "boolean"
+     },
+     "label": {
+      "description": "展示名称（\"程序目录\" / \"卸载助手\"）",
+      "type": "string"
+     },
+     "path": {
+      "description": "完整路径",
+      "type": "string"
+     }
+    },
+    "required": [
+     "label",
+     "path",
+     "exists"
+    ],
+    "type": "object"
+   },
+   "UninstallPurgeDirData": {
+    "description": "POST /api/uninstall/purge 计划删除的用户数据目录条目",
+    "properties": {
+     "key": {
+      "description": "目录标识（`crate::uninstall::DATA_DIR_NAMES` 之一）",
+      "type": "string"
+     },
+     "label": {
+      "description": "展示名称",
+      "type": "string"
+     },
+     "path": {
+      "description": "完整路径",
+      "type": "string"
+     }
+    },
+    "required": [
+     "key",
+     "label",
+     "path"
+    ],
+    "type": "object"
+   },
+   "UninstallStepData": {
+    "description": "POST /api/uninstall 单步结果",
+    "properties": {
+     "key": {
+      "description": "步骤标识：autostart / user_data / playwright",
+      "type": "string"
+     },
+     "label": {
+      "description": "展示名称",
+      "type": "string"
+     },
+     "message": {
+      "description": "结果说明",
+      "type": "string"
+     },
+     "success": {
+      "description": "该步是否成功",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "key",
+     "label",
+     "success",
+     "message"
+    ],
+    "type": "object"
+   },
    "WorkerStopData": {
     "description": "POST /api/worker/stop 响应载荷",
     "properties": {
@@ -3101,21 +5129,13 @@
   },
   "/api/ai/capture": {
    "post": {
-    "operationId": "post___api_ai_capture",
+    "description": "body: `{ url }`。产物固定写入 `captures/latest/`（Worker 侧落盘，响应只回\n轻量元数据——NDJSON 单行上限 1 MiB，门户页 HTML/JS 普遍超限）。",
+    "operationId": "post_api_ai_capture",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {
-        "properties": {
-         "url": {
-          "description": "登录页地址（http/https）",
-          "type": "string"
-         }
-        },
-        "required": [
-         "url"
-        ],
-        "type": "object"
+        "$ref": "#/components/schemas/CaptureBody"
        }
       }
      },
@@ -3125,252 +5145,256 @@
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
+      "description": "捕获完成：Worker 捕获元数据（形状由 Worker page_capture 定义）+ screenshot_url（固定 /api/ai/capture/screenshot）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "缺少 url 或协议非 http/https"
      },
      "409": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Worker Busy（调试会话互斥）"
+      "description": "页面捕获或任务生成正在进行（单飞登记）或 Worker 忙"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "捕获失败（透传 Worker 错误）"
      },
      "503": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Service Unavailable（Python 环境未就绪）"
+      "description": "Python 环境未就绪或 Worker 不可用（未安装/启动超时/网络出口受限）"
      }
-    }
+    },
+    "summary": "POST /api/ai/capture — 捕获登录页面（导航 + 截图 + HTML/JS 落盘）",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/ai/capture/bundle": {
    "get": {
-    "operationId": "get___api_ai_capture_bundle",
+    "description": "内容：MHTML 完整布局（自包含样式/图片，仅 Chromium 渠道）+ page.html（原始\n活 DOM，喂给 LLM 的材质）+ page.offline.html（资源引用改写到 resources/ 的\n离线还原副本）+ page_structure.json + CSS/JS 资源快照 + 截图 + meta.json。\n供离线分析或分享适配；需鉴权。",
+    "operationId": "get_api_ai_capture_bundle",
     "responses": {
      "200": {
       "content": {
        "application/zip": {
         "schema": {
-         "format": "binary",
-         "type": "string"
+         "$ref": "#/components/schemas/CaptureBundleBody"
         }
        }
       },
-      "description": "zip（MHTML + 原始 HTML + 结构化页面摘要 + resources + 截图 + meta）"
+      "description": "最近一次捕获的完整页面文件 zip（MHTML / page.html / 离线副本 / 结构 JSON / CSS-JS 资源 / 截图 / meta.json；超 50 MiB 预算的文件跳过并附 _skipped_by_quota.txt 清单）"
      },
      "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "尚无捕获产物"
+      "description": "尚无捕获产物，请先执行页面捕获"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "压缩包写入失败"
      }
-    }
+    },
+    "summary": "GET /api/ai/capture/bundle — 下载最近一次捕获的完整页面文件（zip）",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/ai/capture/screenshot": {
    "get": {
-    "operationId": "get___api_ai_capture_screenshot",
+    "description": "`<img>` 引用无法携带自定义鉴权头（同 debug 截图豁免先例），路径固定于\n`captures/latest/`，无用户输入参与，不存在穿越面。",
+    "operationId": "get_api_ai_capture_screenshot",
     "responses": {
      "200": {
       "content": {
        "image/png": {
         "schema": {
-         "format": "binary",
-         "type": "string"
+         "$ref": "#/components/schemas/CaptureScreenshotBody"
         }
        }
       },
-      "description": "PNG 截图"
+      "description": "最近一次捕获的截图 PNG 原始字节（非 JSON 信封）"
      },
      "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "尚无捕获截图"
+      "description": "尚无捕获截图，请先执行捕获"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "截图文件读取失败"
      }
-    }
+    },
+    "summary": "GET /api/ai/capture/screenshot — 读取最近一次捕获的截图（只读 PNG）",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/ai/capture/status": {
    "get": {
-    "description": "查询最近一次捕获产物是否可用（页面刷新后恢复状态用）",
-    "operationId": "get___api_ai_capture_status",
+    "description": "页面刷新后前端据此恢复捕获状态（避免强制重新捕获）；meta 损坏按不可用处理。",
+    "operationId": "get_api_ai_capture_status",
     "responses": {
      "200": {
       "content": {
        "application/json": {
         "schema": {
-         "properties": {
-          "available": {
-           "description": "meta.json、page.html 与 screenshot.png 是否齐备",
-           "type": "boolean"
-          },
-          "final_url": {
-           "description": "捕获结束 URL（不可用时缺省）",
-           "type": "string"
-          },
-          "request_url": {
-           "description": "捕获请求 URL（不可用时缺省）",
-           "type": "string"
-          },
-          "structure_summary": {
-           "description": "frame、表单、控件和验证码候选数量",
-           "type": "object"
-          },
-          "title": {
-           "description": "页面标题（不可用时缺省）",
-           "type": "string"
-          }
-         },
-         "type": "object"
+         "$ref": "#/components/schemas/DataEnvelope_CaptureStatusData"
         }
        }
       },
-      "description": "捕获状态与 meta 回显字段"
+      "description": "最近一次捕获产物可用性与元信息（不可用时仅 available=false）"
      }
-    }
+    },
+    "summary": "GET /api/ai/capture/status — 查询最近一次捕获产物是否可用",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/ai/generate/stream": {
    "post": {
-    "description": "流式生成（SSE text/event-stream）：增量推送 LLM 输出与校验状态，含传输重试和自纠轮在内的全流程总预算为 10 分钟。事件帧（data: <json>）type 枚举：started / attempt_start / delta / attempt_delta_done / validation_failed / retrying / validated / done / error；\": keepalive\" 注释帧仅证明连接存活不重置前端空闲计时。同一时刻至多一个生成任务（重复发起返回 409）；客户端断连将取消后端 LLM 调用",
-    "operationId": "post___api_ai_generate_stream",
+    "description": "与 `generate` 语义一致，但以 `text/event-stream` 实时推送进度：\n每个 LLM 增量、校验/重试状态均以 `data: <json>` 帧发出，前端据此在\n最下方同步展示进度（流式文本预览 + 步骤状态）。请求同时受分块空闲超时与\n10 分钟总预算约束，持续输出也不会超过总预算。",
+    "operationId": "post_api_ai_generate_stream",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {
-        "properties": {
-         "extra_prompt": {
-          "maxLength": 4000,
-          "type": "string"
-         }
-        },
-        "type": "object"
+        "$ref": "#/components/schemas/GenerateStreamBody"
        }
       }
      },
-     "required": false
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "text/event-stream": {
         "schema": {
-         "description": "SSE 帧序列：data: {type: started|attempt_start{attempt,max}|delta{attempt,text}|attempt_delta_done{attempt,text_len}|validation_failed{attempt,errors}|retrying{attempt,next}|validated{attempt}|done{attempts,warnings,task}|error{message}}",
-         "type": "string"
+         "$ref": "#/components/schemas/GenerateStreamFrame"
         }
        }
       },
-      "description": "SSE stream（事件帧 schema 见 description；每帧 JSON 带 type 标签）"
+      "description": "SSE 流（text/event-stream）：`data: <json>` 帧推送 LLM 增量与校验/重试状态，全流程总预算 10 分钟，`: keepalive` 注释帧保活；同一时刻至多一个生成任务，客户端断连将取消后端 LLM 调用；帧 type 枚举 started/attempt_start/delta/attempt_delta_done/validation_failed/retrying/validated/done/error 的字段级契约由 T5-4 钉死"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "未配置 LLM / API Key 解密失败 / 尚无捕获产物或截图缺失"
      },
      "409": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "已有生成任务进行中"
+      "description": "页面捕获或任务生成正在进行（单飞登记）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "捕获元数据损坏或 HTML 读取失败"
      }
-    }
+    },
+    "summary": "POST /api/ai/generate/stream — 流式生成（SSE）",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/ai/llm-config": {
    "get": {
-    "operationId": "get___api_ai_llm_config",
+    "operationId": "get_api_ai_llm_config",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_LlmConfigData"
+        }
        }
       },
-      "description": "OK"
+      "description": "脱敏后的 LLM 配置（API Key 永不出站，仅 has_api_key 布尔位）"
      }
-    }
+    },
+    "summary": "GET /api/ai/llm-config — 读取 LLM 配置（脱敏）",
+    "tags": [
+     "ai"
+    ]
    },
    "put": {
-    "operationId": "put___api_ai_llm_config",
+    "description": "body: `{ provider?, base_url, model, api_key?, max_tokens? }`。`api_key` 缺省表示保持不变，\n空串表示清除，非空表示更新（AES-256-GCM 加密落盘）；`max_tokens` 为整数或\n`null`（不携带该字段，交由服务商默认），缺省表示保持不变。",
+    "operationId": "put_api_ai_llm_config",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {
-        "properties": {
-         "api_key": {
-          "description": "缺省=保持不变；空串=清除；非空=更新（AES-GCM 加密落盘，响应永不回显）",
-          "type": "string"
-         },
-         "base_url": {
-          "description": "OpenAI 兼容 API 根地址；不允许 query、fragment 或 userinfo",
-          "type": "string"
-         },
-         "max_tokens": {
-          "description": "最长输出 token；默认 16384，null 表示交由服务商决定",
-          "maximum": 200000,
-          "minimum": 1,
-          "nullable": true,
-          "type": "integer"
-         },
-         "model": {
-          "description": "视觉模型名",
-          "type": "string"
-         },
-         "provider": {
-          "description": "服务商标识；API Key 按服务商独立保存",
-          "enum": [
-           "glm",
-           "deepseek",
-           "custom"
-          ],
-          "type": "string"
-         }
-        },
-        "required": [
-         "base_url",
-         "model"
-        ],
-        "type": "object"
+        "$ref": "#/components/schemas/LlmConfigUpdateBody"
        }
       }
      },
@@ -3380,92 +5404,132 @@
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_LlmConfigData"
+        }
        }
       },
-      "description": "OK"
+      "description": "已保存，返回脱敏视图"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "请求体非对象 / 缺 base_url / 模型名为空 / URL 非法（userinfo、非 http(s)）/ 服务商与地址不匹配 / max_tokens 越界"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "API Key 加密或配置落盘失败"
      }
-    }
+    },
+    "summary": "PUT /api/ai/llm-config — 保存 LLM 配置",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/ai/llm-config/test": {
    "post": {
-    "description": "使用已保存配置向实际 chat/completions 地址发送最小请求；30 秒超时",
-    "operationId": "post___api_ai_llm_config_test",
+    "description": "判定口径是\"能通\"而非\"输出完整\"：模型回复被 max_tokens 截断（推理/话痨模型的\n常见表现）、或 HTTP 200 却没吐正文，都说明链路与凭据正常，按连通返回并附 `note`\n说明；只有真正的传输/鉴权/协议错误才判失败。",
+    "operationId": "post_api_ai_llm_config_test",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_LlmConnectionTestData"
+        }
        }
       },
-      "description": "连接成功，返回实际请求地址与耗时"
+      "description": "链路与凭据连通（回复被 256 token 测试上限截断也判连通并附 note）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "配置缺失或 Key 无法解密"
+      "description": "未保存 LLM 配置或 API Key 解密失败"
      },
      "503": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "连接、鉴权或模型请求失败"
+      "description": "连接测试超时（30 秒）、传输/协议错误或远端返回错误状态（含 4xx/5xx）"
      }
-    }
+    },
+    "summary": "POST /api/ai/llm-config/test — 用已保存配置发送极小请求，验证接口与凭据。",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/ai/models": {
    "post": {
-    "description": "拉取服务商 GET {base_url}/models 的模型列表（AI 页模型下拉框）；api_key 缺省或为空时回退到该服务商已保存的 Key",
-    "operationId": "post___api_ai_models",
+    "description": "body: `{ provider, base_url, api_key? }`。`api_key` 缺省或为空时回退到该服务商\n**已保存** 的 Key，因此「选服务商 → 拉列表 → 选模型 → 保存」这条顺序可用，\n不必为了看列表先存一次配置（GLM/DeepSeek 的 `/models` 需要鉴权）。",
+    "operationId": "post_api_ai_models",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/LlmModelsBody"
+       }
+      }
+     },
+     "required": true
+    },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_LlmModelsData"
+        }
        }
       },
-      "description": "返回 { count, models[] }，顺序与服务端一致"
+      "description": "当前服务商可用模型 ID 列表"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "base_url 缺失或非法、服务商与地址不匹配、Key 无法解密、远端非 2xx 或响应中无模型 id"
+      "description": "请求体非对象 / 缺 base_url / URL 或服务商校验失败 / Key 解密失败 / 远端返回 4xx（原文透传）"
      },
      "503": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "连接失败、超时或远端 5xx"
+      "description": "模型列表请求超时、建连失败或远端返回 5xx"
      }
-    }
+    },
+    "summary": "POST /api/ai/models — 拉取当前服务商的模型列表（供前端模型下拉框）",
+    "tags": [
+     "ai"
+    ]
    }
   },
   "/api/auth/exchange": {
@@ -3510,250 +5574,371 @@
   },
   "/api/autostart/disable": {
    "post": {
-    "operationId": "post___api_autostart_disable",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_autostart_disable",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_AutostartToggleData"
+        }
        }
       },
-      "description": "OK"
+      "description": "已取消并通过系统状态复核（Windows/macOS 配置缓存保存失败时附 warning，仍为 200）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "配置落盘校验失败（非 Windows/macOS；系统注册已回滚）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "取消系统注册失败（配置未改动）或注册任务异常"
      }
-    }
+    },
+    "summary": "POST /api/autostart/disable — 禁用自启动",
+    "tags": [
+     "autostart"
+    ]
    }
   },
   "/api/autostart/enable": {
    "post": {
-    "operationId": "post___api_autostart_enable",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_autostart_enable",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_AutostartToggleData"
+        }
        }
       },
-      "description": "OK"
+      "description": "已启用并通过系统状态复核（Windows/macOS 配置缓存保存失败时附 warning，仍为 200）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "配置落盘校验失败（非 Windows/macOS；系统注册已回滚）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "系统注册失败（配置未改动）或注册任务异常"
      }
-    }
+    },
+    "summary": "POST /api/autostart/enable — 启用自启动",
+    "tags": [
+     "autostart"
+    ]
    }
   },
   "/api/autostart/status": {
    "get": {
-    "description": "Windows 读取 HKCU Run 与 StartupApproved；enabled 由路径、数据目录、参数及审批观测计算，配置位仅为 cached_enabled。未知审批不判为启用，读取失败返回 500。其它平台沿用既有口径，source 标注 system 或 config。",
-    "operationId": "get___api_autostart_status",
+    "operationId": "get_api_autostart_status",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "自启动状态（Windows/macOS 的 enabled 以系统观测为准，配置位仅为 cached_enabled）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "系统自启动状态读取失败（Windows/macOS 观测路径）"
      }
-    }
+    },
+    "summary": "GET /api/autostart/status — 获取自启动状态",
+    "tags": [
+     "autostart"
+    ]
    }
   },
   "/api/background/fetch-url": {
    "post": {
-    "operationId": "post___api_background_fetch-url",
+    "operationId": "post_api_background_fetch_url",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/BackgroundFetchBody"
+       }
       }
      },
-     "required": false
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_BackgroundUploadData"
+        }
        }
       },
-      "description": "OK"
+      "description": "图片已落盘并返回可访问 URL"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "URL 非法 / 非 HTTPS、SSRF 防护拒绝、返回非图片 Content-Type、超过 10 MiB、SVG 或声明类型与实际内容不一致"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "图片字节读取或落盘失败"
      }
-    }
+    },
+    "summary": "POST /api/background/fetch-url — 从 URL 获取背景图",
+    "tags": [
+     "background"
+    ]
    }
   },
   "/api/background/upload": {
    "post": {
-    "operationId": "post___api_background_upload",
+    "operationId": "post_api_background_upload",
     "requestBody": {
      "content": {
-      "application/json": {
-       "schema": {}
+      "multipart/form-data": {
+       "schema": {
+        "$ref": "#/components/schemas/BackgroundUploadFile"
+       }
       }
      },
-     "required": false
+     "description": "字段名 file：图片文件（PNG/JPEG/GIF/WebP/BMP/ICO，≤10 MiB，拒绝 SVG，声明类型须与 magic bytes 一致）",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_BackgroundUploadData"
+        }
        }
       },
-      "description": "OK"
+      "description": "已落盘并返回可访问 URL"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "multipart 解析失败、缺 file 字段、文件为空、超过 10 MiB、SVG、格式无法识别或声明类型与实际内容不一致"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "文件落盘失败"
      }
-    }
+    },
+    "summary": "POST /api/background/upload — 上传背景图（multipart/form-data，字段名 file）",
+    "tags": [
+     "background"
+    ]
    }
   },
   "/api/background/{filename}": {
    "delete": {
-    "operationId": "delete___api_background_filename",
+    "operationId": "delete_api_background_filename",
+    "parameters": [
+     {
+      "description": "背景图文件名（拒绝路径穿越）",
+      "in": "path",
+      "name": "filename",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
+      "description": "已删除（data 为 \"ok\"）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "文件名非法"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "背景图不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "文件删除失败"
      }
-    }
+    },
+    "summary": "DELETE /api/background/{filename} — 删除背景图",
+    "tags": [
+     "background"
+    ]
    },
    "get": {
-    "operationId": "get___api_background_filename",
+    "description": "返回原始图片字节 + 正确 Content-Type，供前端 CSS url() 直接引用。",
+    "operationId": "get_api_background_filename",
+    "parameters": [
+     {
+      "description": "背景图文件名（拒绝路径穿越）",
+      "in": "path",
+      "name": "filename",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
-       "application/json": {
-        "schema": {}
+       "application/octet-stream": {
+        "schema": {
+         "$ref": "#/components/schemas/BackgroundImageBody"
+        }
+       },
+       "image/bmp": {
+        "schema": {
+         "$ref": "#/components/schemas/BackgroundImageBody"
+        }
+       },
+       "image/gif": {
+        "schema": {
+         "$ref": "#/components/schemas/BackgroundImageBody"
+        }
+       },
+       "image/jpeg": {
+        "schema": {
+         "$ref": "#/components/schemas/BackgroundImageBody"
+        }
+       },
+       "image/png": {
+        "schema": {
+         "$ref": "#/components/schemas/BackgroundImageBody"
+        }
+       },
+       "image/webp": {
+        "schema": {
+         "$ref": "#/components/schemas/BackgroundImageBody"
+        }
+       },
+       "image/x-icon": {
+        "schema": {
+         "$ref": "#/components/schemas/BackgroundImageBody"
+        }
        }
       },
-      "description": "OK"
+      "description": "背景图原始字节（MIME 按存储扩展名下发，非 JSON 信封）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "文件名非法或 SVG 背景图"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "背景图不存在"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "文件读取失败"
      }
-    }
+    },
+    "summary": "GET /api/background/{filename} — 获取背景图",
+    "tags": [
+     "background"
+    ]
    }
   },
   "/api/browsers": {
@@ -3838,7 +6023,7 @@
     ]
    },
    "patch": {
-    "description": "前端发送扁平结构 { browser, monitor, pause, logging, retry, app_settings, ... }\n后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }\n扁平 key → global 子结构 / 活跃 Profile 的映射由\n[`apply_flat_settings_patch`] 统一实现（与 PUT 共用）\n\n契约注解：请求体为宽松 `Value`（未知键交由 schema 丢弃、历史字段\n`carrier_custom` 显式忽略），响应与 GET 同形，均待强类型化批次收敛。",
+    "description": "前端发送扁平结构 { browser, monitor, pause, logging, retry, app_settings, ... }\n后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }\n扁平 key → global 子结构 / 活跃 Profile 的映射由\n[`apply_flat_settings_patch`] 统一实现（与 PUT 共用）\n\n过渡期说明：单段更新推荐改用 [`patch_settings_section`]（PATCH /api/config/{section}），\n语义与把该段包成单键全量 PATCH 完全一致；本端点在过渡期原样保留，现有客户端\n（引导向导 / 运行模式预设 / 登录渠道绑定切换）不受影响。\n\n契约注解：请求体为宽松 `Value`（未知键交由 schema 丢弃、历史字段\n`carrier_custom` 显式忽略），响应与 GET 同形，均待强类型化批次收敛。",
     "operationId": "patch_api_config",
     "requestBody": {
      "content": {
@@ -4012,90 +6197,94 @@
   },
   "/api/debug/feedback-bundle": {
    "post": {
-    "operationId": "post___api_debug_feedback-bundle",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "description": "收集：日志尾段 + 当前活动任务 JSON + 脱敏配置快照 + 调试页 MHTML/page.html/\n截图/CSS-JS 资源快照（若有会话；Chromium MHTML 不含 JS，资源由 Worker 经 CDP 补齐）。\n失败项写占位 txt，不以 500 打断整包；无活跃调试会话时页面项为占位说明。",
+    "operationId": "post_api_debug_feedback_bundle",
     "responses": {
      "200": {
       "content": {
        "application/zip": {
         "schema": {
-         "format": "binary",
-         "type": "string"
+         "$ref": "#/components/schemas/FeedbackBundleBody"
         }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "问题报告 zip（日志尾段 + 活动任务 JSON + 脱敏配置摘要 + 调试页面快照，随附 Content-Disposition 文件名）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "压缩包写入失败"
      }
-    }
+    },
+    "summary": "POST /api/debug/feedback-bundle — 导出问题报告（zip）",
+    "tags": [
+     "debug"
+    ]
    }
   },
   "/api/debug/run-all": {
    "post": {
-    "operationId": "post___api_debug_run-all",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_debug_run_all",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
+      "description": "剩余步骤执行结果（形状由 Worker debug_run_all 定义）"
      },
-     "400": {
+     "409": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "Worker 忙（其他会话占用）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "其他 Bridge/Worker 内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Worker 不可用（未安装/启动超时/网络出口受限）"
      }
-    }
+    },
+    "summary": "POST /api/debug/run-all — 执行调试会话中全部剩余步骤",
+    "tags": [
+     "debug"
+    ]
    }
   },
   "/api/debug/screenshot/{filename}": {
    "get": {
-    "operationId": "get___api_debug_screenshot__filename_",
+    "description": "`<img>` 引用无法携带自定义鉴权头（同背景图 GET 豁免先例），且 Worker 侧\n截图落盘路径对浏览器不可达，必须经 HTTP 暴露；文件名做防穿越校验。",
+    "operationId": "get_api_debug_screenshot_filename",
     "parameters": [
      {
+      "description": "调试截图文件名（拒绝路径穿越与符号链接）",
       "in": "path",
       "name": "filename",
       "required": true,
@@ -4107,172 +6296,259 @@
     "responses": {
      "200": {
       "content": {
+       "image/jpeg": {
+        "schema": {
+         "$ref": "#/components/schemas/DebugScreenshotBody"
+        }
+       },
        "image/png": {
         "schema": {
-         "format": "binary",
-         "type": "string"
+         "$ref": "#/components/schemas/DebugScreenshotBody"
         }
        }
       },
-      "description": "OK"
+      "description": "截图原始字节（按真实 magic bytes 以 PNG/JPEG 下发，非 JSON 信封）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "文件名非法、超出大小上限、符号链接或不是有效 PNG/JPEG"
      },
      "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Not Found"
+      "description": "截图不存在"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "文件读取失败"
      }
-    }
+    },
+    "summary": "GET /api/debug/screenshot/{filename} — 读取调试截图文件",
+    "tags": [
+     "debug"
+    ]
    }
   },
   "/api/debug/start": {
    "post": {
-    "operationId": "post___api_debug_start",
+    "description": "前端仅提供 `task_id` 时，按 id 加载浏览器任务配置并嵌入 `task_config` 键，\n与 Python Worker 的 `debug_start` 契约一致（步骤载体为 `task_config`）。\n同时注入活跃 Profile 的系统保留变量，使登录类任务的 {{USERNAME}}/{{LOGIN_URL}}\n等模板在调试时的行为与真实执行一致（此前不注入会导航到 `{{LOGIN_URL}}` 字面量）。\n\n未配置登录网址（走内置默认触发地址）时先做一次\"已联网\"预检：命中直接 409，\n避免已联网状态下白拉一次只会显示探测页面的浏览器。",
+    "operationId": "post_api_debug_start",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "Worker 调试启动参数（自由形状对象，至少含 task_id 或 task_config）；缺省的 username/password/isp/auth_url/trigger_url（明文字符串）与 browser_settings 由服务端按活跃方案注入",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
+      "description": "调试会话已启动（data 为 Worker 会话状态，形状由 Worker debug_start 定义）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "请求体不是 JSON 对象"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "已联网且未配置登录网址的预检拦截，或 Worker 忙（其他会话占用）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "其他 Bridge/Worker 内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Python 环境未就绪、出口网络准备失败或 Worker 不可用（未安装/启动超时/网络出口受限）"
      }
-    }
+    },
+    "summary": "POST /api/debug/start — 启动调试会话",
+    "tags": [
+     "debug"
+    ]
    }
   },
   "/api/debug/status": {
    "get": {
-    "operationId": "get___api_debug_status",
+    "description": "调试会话是 Worker 侧的持久状态：前端刷新/换页后内存状态丢失，界面上无法\n停止会话，登录等命令会一直撞上\"Worker 忙: 调试会话进行中\"。此端点供前端\n启动时恢复会话感知（配合\"停止调试\"入口自助解除占用）。",
+    "operationId": "get_api_debug_status",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_DebugStatusData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "会话感知快照（active=false 时不查询 Worker；active=true 时附 Worker 会话详情，查询失败 session 为 null）"
      }
-    }
+    },
+    "summary": "GET /api/debug/status — 查询是否存在活跃调试会话",
+    "tags": [
+     "debug"
+    ]
    }
   },
   "/api/debug/step": {
    "post": {
-    "operationId": "post___api_debug_step",
+    "description": "透传请求体（可携带 `step` 完整配置或 `step_index`）。前端“下一步”无显式索引时，\n由 Python Worker 依据会话内游标自动执行下一个尚未运行的步骤。",
+    "operationId": "post_api_debug_step",
     "requestBody": {
      "content": {
       "application/json": {
        "schema": {}
       }
      },
-     "required": false
+     "description": "Worker 调试单步参数（可携带 step 完整配置或 step_index）；null/空体等价空对象，由 Worker 按会话内游标自动执行下一步",
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
+      "description": "单步执行结果（形状由 Worker debug_step 定义）"
      },
-     "400": {
+     "409": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "Worker 忙（其他会话占用）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "其他 Bridge/Worker 内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Worker 不可用（未安装/启动超时/网络出口受限）"
      }
-    }
+    },
+    "summary": "POST /api/debug/step — 调试单步执行",
+    "tags": [
+     "debug"
+    ]
    }
   },
   "/api/debug/stop": {
    "post": {
-    "operationId": "post___api_debug_stop",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_debug_stop",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Value"
+        }
        }
       },
-      "description": "OK"
+      "description": "调试会话已停止（data 为 Worker 确认负载，常为 null）"
      },
-     "400": {
+     "409": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "Worker 忙（其他会话占用）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "其他 Bridge/Worker 内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Worker 不可用（未安装/启动超时/网络出口受限）"
      }
-    }
+    },
+    "summary": "POST /api/debug/stop — 停止调试会话",
+    "tags": [
+     "debug"
+    ]
    }
   },
   "/api/diagnostics/bundle": {
@@ -4470,6 +6746,30 @@
     }
    }
   },
+  "/api/events": {
+   "get": {
+    "description": "手写占位条目（T8-6a 预置，待集成批切生成源）：近 N 天事件流读回，days 钳制 1..=30",
+    "operationId": "get___api_events",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "近 N 天事件流（时间升序；缺失文件与损坏行跳过）"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "days 参数非法"
+     }
+    }
+   }
+  },
   "/api/health": {
    "get": {
     "description": "样板域全链路参考实现：handler 直接返回强类型 `Json<DataEnvelope<HealthData>>`，\n线格式与旧 `data(json!({...}))` 完全一致（`{\"data\":{\"status\":\"ok\",\"version\":…}}`），\n后续域批次可照此把注解 DTO 升级为真实返回类型。",
@@ -4494,62 +6794,104 @@
   },
   "/api/history": {
    "delete": {
-    "operationId": "delete___api_history",
+    "operationId": "delete_api_history",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "已清空全部登录历史（不可恢复，data 为 \"ok\"）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "历史文件清理失败"
      }
-    }
+    },
+    "summary": "DELETE /api/history — 清除登录历史",
+    "tags": [
+     "history"
+    ]
    },
    "get": {
-    "operationId": "get___api_history",
+    "description": "响应中每条记录额外包含 `success: boolean` 字段（`result == \"success\"` 时为 true），\n前端 `LoginHistoryItem` 依赖此字段显示成功/失败状态。\n\n响应格式：\n- 不传 `page` 时：返回裸数组 `LoginHistoryItem[]`（向后兼容）\n- 传 `page` 时：返回 `{ total, page, page_size, items }` 分页结构",
+    "operationId": "get_api_history",
+    "parameters": [
+     {
+      "description": "返回最近 N 条记录（None 表示不限制）",
+      "in": "query",
+      "name": "limit",
+      "required": false,
+      "schema": {
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     },
+     {
+      "description": "页码（从 1 开始），与 page_size 同时存在时启用分页响应格式",
+      "in": "query",
+      "name": "page",
+      "required": false,
+      "schema": {
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     },
+     {
+      "description": "每页条数（默认 50），仅 page 存在时生效",
+      "in": "query",
+      "name": "page_size",
+      "required": false,
+      "schema": {
+       "minimum": 0,
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     }
+    ],
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_HistoryResponseData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "最近 30 天登录历史（两种形态见 data schema 的 oneOf；分页从最新一页开始）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "历史文件读取失败"
      }
-    }
+    },
+    "summary": "GET /api/history — 查询最近 30 天登录历史",
+    "tags": [
+     "history"
+    ]
    }
   },
   "/api/http-tasks/test": {
@@ -4871,202 +7213,260 @@
   },
   "/api/monitor/start": {
    "post": {
-    "operationId": "post___api_monitor_start",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_monitor_start",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "检测已启动"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "其他引擎内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口）"
      }
-    }
+    },
+    "summary": "POST /api/monitor/start — 启动网络监测",
+    "tags": [
+     "monitor"
+    ]
    }
   },
   "/api/monitor/status": {
    "get": {
-    "operationId": "get___api_monitor_status",
+    "operationId": "get_api_monitor_status",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_MonitorStatusData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "全局状态快照（引擎/网络/登录/调度/Worker/环境进度）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "快照序列化失败"
      }
-    }
+    },
+    "summary": "GET /api/monitor/status — 获取当前系统状态快照",
+    "tags": [
+     "monitor"
+    ]
    }
   },
   "/api/monitor/stop": {
    "post": {
-    "operationId": "post___api_monitor_stop",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "operationId": "post_api_monitor_stop",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "检测已停止"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "其他引擎内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口）"
      }
-    }
+    },
+    "summary": "POST /api/monitor/stop — 停止网络监测",
+    "tags": [
+     "monitor"
+    ]
    }
   },
   "/api/monitor/test": {
    "post": {
-    "operationId": "post___api_monitor_test",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "description": "经 EngineApi 派发到「当前活跃」Engine（崩溃重启后自动指向新实例），\noneshot 回复与 30s 超时封装在实现内。",
+    "operationId": "post_api_monitor_test",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_TestNetworkResultData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "一轮手动网络探测结果（结论 + 置信度 + 分项探测描述）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "探测执行失败（ProbeError / 网络测试超时）"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口，稍后重试）"
      }
-    }
+    },
+    "summary": "POST /api/monitor/test — 网络连通性测试",
+    "tags": [
+     "monitor"
+    ]
    }
   },
   "/api/monitor/test-redirect": {
    "post": {
-    "operationId": "post___api_monitor_test-redirect",
+    "description": "先用既有 HTTP 探测确认“已正常联网”，命中时直接提示先退出登录；其余情况\n强制 `headless=false` 启动独立临时浏览器。Worker 只返回页面分类，不返回或保存\n最终 URL / 页面正文，避免门户一次性 token 进入配置、日志或前端状态。",
+    "operationId": "post_api_monitor_test_redirect",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/RedirectTestRequest"
+       }
       }
      },
-     "required": false
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_RedirectTestResultData"
+        }
        }
       },
-      "description": "OK"
+      "description": "重定向检测结论（不含最终 URL，防门户临时 token 外泄）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "触发地址过长 / 格式无效 / 非 http(s) / 内嵌用户名或密码"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Worker 忙（调试会话或浏览器任务占用）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "浏览器返回未知结果或内部错误"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "出口网络准备失败、Python 环境未就绪、Worker 不可用（未安装/启动超时/网络出口受限）或浏览器检测失败"
      }
-    }
+    },
+    "summary": "POST /api/monitor/test-redirect — 用可见浏览器验证校园网重定向。",
+    "tags": [
+     "monitor"
+    ]
    }
   },
   "/api/network/interfaces": {
    "get": {
+    "operationId": "get_api_network_interfaces",
     "responses": {
      "200": {
-      "description": "当前 IPv4 网卡及 DNS"
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_Vec_NetworkInterfaceData"
+        }
+       }
+      },
+      "description": "可用于校园网出口的 IPv4 物理网卡清单"
      },
      "503": {
-      "description": "网卡枚举失败"
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "网卡枚举失败或超时"
      }
     },
-    "summary": "列出校园网可用物理出口接口"
+    "summary": "GET /api/network/interfaces：物理网卡及当前 IPv4 / DNS，供方案选择出口。",
+    "tags": [
+     "monitor"
+    ]
    }
   },
   "/api/notification/test": {
@@ -5118,158 +7518,163 @@
   },
   "/api/ocr/install": {
    "post": {
-    "operationId": "post___api_ocr_install",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
+    "description": "后台只准备 Python/Worker 核心（不要求浏览器二进制）并 `uv add` ddddocr，\n进度通过 StatusManager 推送。",
+    "operationId": "post_api_ocr_install",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_OcrInstallData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "安装已在后台启动（失败不抛 HTTP 错误，可通过再次点击重试）"
      }
-    }
+    },
+    "summary": "POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖",
+    "tags": [
+     "ocr"
+    ]
    }
   },
   "/api/ocr/recognize": {
    "post": {
-    "operationId": "post___api_ocr_recognize",
+    "description": "Worker 返回的是 IpcResponse `{ id, result: { success, data, error } }`，\n而前端契约只认 `{ data: <负载> }` / `{ error: {...} }` 两种信封：\n- success=true：提取 `result.data`（形如 `{\"text\": \"...\"}`）作为业务负载返回；\n- success=false：把 worker 的 error 消息转为 HTTP 错误（否则错误被埋在 200\n  响应体里，前端既不显示识别结果也不提示失败）。",
+    "operationId": "post_api_ocr_recognize",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/OcrRecognizeBody"
+       }
       }
      },
-     "required": false
+     "required": true
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_OcrRecognizeData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
-     }
-    }
-   }
-  },
-  "/api/ocr/status": {
-   "get": {
-    "operationId": "get___api_ocr_status",
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
-     }
-    }
-   }
-  },
-  "/api/ocr/uninstall": {
-   "post": {
-    "operationId": "post___api_ocr_uninstall",
-    "requestBody": {
-     "content": {
-      "application/json": {
-       "schema": {}
-      }
-     },
-     "required": false
-    },
-    "responses": {
-     "200": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "识别文本"
      },
      "409": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "有任务正在执行，请稍后再试"
+      "description": "OCR 正在卸载、并发识别已达上限或 Worker 忙（调试会话占用）"
+     },
+     "413": {
+      "description": "请求体超过 15 MiB（IPC 单行安全上限；axum 请求体上限拒绝，响应为纯文本非统一信封）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "识别失败（模型加载/图片解码/推理失败或超时，消息透传 Worker）"
+     },
+     "503": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "Worker 未安装、启动超时或网络出口受限"
      }
-    }
+    },
+    "summary": "POST /api/ocr/recognize — 执行 OCR 识别",
+    "tags": [
+     "ocr"
+    ]
+   }
+  },
+  "/api/ocr/status": {
+   "get": {
+    "description": "返回：\n- `installed`：OCR **依赖（ddddocr）** 是否已实际安装（仅需 Python venv 就绪 +\n  dddddcr 已装入 venv，不依赖 Playwright 浏览器是否就绪——OCR 识别只用 CPU 推理）。\n- `declared`：Worker 工程存在即支持 OCR（按需 add/remove，不预声明），不等于已安装。\n- `size_mb`：environment 目录估算体积。\n- `runtime_ocr`（任务 10，向后兼容新增）：Worker 存活时最近一次健康检查\n  上报的运行时 OCR 能力（`capabilities.ocr`）；Worker 未存活/未上报时为\n  `null`，前端未消费该字段前不破坏既有契约。",
+    "operationId": "get_api_ocr_status",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_OcrStatusData"
+        }
+       }
+      },
+      "description": "OCR 依赖安装状态与 environment 目录体积"
+     }
+    },
+    "summary": "GET /api/ocr/status — 获取 OCR 状态",
+    "tags": [
+     "ocr"
+    ]
+   }
+  },
+  "/api/ocr/uninstall": {
+   "post": {
+    "description": " 取消全部在途 OCR 识别任务，并 `uv remove` 项目主依赖中的 ddddocr\n（见 `environment.remove_ocr_dep`）。卸载完成前拒绝新的识别请求。\n\n 若有**其他**类型的会话在途（定时浏览器任务 / 登录 / 调试），直接拒绝而不是\n 照样回收：卸载必须在 Windows 上释放 onnxruntime DLL，`recycle_if_running`\n 是无条件强杀，会把对方的在途执行连带取消为 `Cancelled`（用户可见\n 「请求已取消」，看起来像自己取消的），根因却在 OCR 路径上。",
+    "operationId": "post_api_ocr_uninstall",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_String"
+        }
+       }
+      },
+      "description": "OCR 依赖已卸载"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "当前平台不支持依赖移除"
+     },
+     "409": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "有任务正在执行（定时浏览器任务 / 登录 / 调试在途）"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "uv remove 依赖移除失败"
+     }
+    },
+    "summary": " POST /api/ocr/uninstall — 卸载 OCR（取消在途 OCR 识别任务并移除依赖）",
+    "tags": [
+     "ocr"
+    ]
    }
   },
   "/api/profiles": {
@@ -7604,112 +10009,126 @@
   },
   "/api/tools/task-recorder.user.js": {
    "get": {
-    "operationId": "get___api_tools_task-recorder_user_js",
+    "description": "从 `resources/tools/task-recorder.user.js` 读取并返回 Tampermonkey 用户脚本。\n文件缺失时返回 404。",
+    "operationId": "get_api_tools_task_recorder_user_js",
     "responses": {
      "200": {
       "content": {
-       "application/json": {
-        "schema": {}
+       "application/javascript": {
+        "schema": {
+         "type": "string"
+        }
        }
       },
-      "description": "OK"
+      "description": "Tampermonkey 任务录制用户脚本原文"
      },
-     "400": {
+     "404": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "脚本文件缺失，可能需要重新安装或更新软件"
      }
-    }
+    },
+    "summary": "GET /api/tools/task-recorder.user.js — 任务录制用户脚本",
+    "tags": [
+     "tools"
+    ]
    }
   },
   "/api/uninstall": {
    "post": {
-    "operationId": "post___api_uninstall",
+    "description": "依次执行：关闭开机自启动 → 删除用户数据目录（勾选「保留配置与任务」时跳过）→\n清理 Playwright 浏览器缓存。每一步尽力而为、互不阻断，逐项返回结果。\n\n**不删程序本身**（那需要主进程先退出，见 [`purge_uninstall`]）。保留这个只清残留的\n端点是有意的：它同时是\"重置环境\"的入口——清掉浏览器缓存与自启动注册后程序照常可用，\n不必卸载。前端「卸载」流程会紧接着调用 `purge`。",
+    "operationId": "post_api_uninstall",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "oneOf": [
+         {
+          "type": "null"
+         },
+         {
+          "$ref": "#/components/schemas/CleanupRequest"
+         }
+        ]
+       }
       }
-     },
-     "required": false
+     }
     },
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_UninstallCleanupData"
+        }
        }
       },
-      "description": "OK"
+      "description": "三步清理结果（关闭自启动 → 用户数据目录 → Playwright 缓存，互不阻断；部分失败仍为 200，见各步 success）"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
-     },
-     "500": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Internal Error"
+      "description": "OpenWrt 版不支持本端点"
      }
-    }
+    },
+    "summary": "POST /api/uninstall — 清理系统残留（卸载第一步）",
+    "tags": [
+     "uninstall"
+    ]
    }
   },
   "/api/uninstall/detect": {
    "get": {
-    "operationId": "get___api_uninstall_detect",
+    "description": "返回卸载时将清理的**全部**内容（不执行任何删除）：\n- `items`：`base_path` 之外的系统残留（用户数据目录 / Playwright 缓存 / 自启动）；\n- `program`：程序目录（保留数据时只移除程序文件）；\n- `helper`：卸载助手是否在位（不在位时 `purge` 必失败，界面据此先拦下）；\n- `data`：`base_path` 下的用户数据目录（勾选「保留配置与任务」则保留）；\n- `blocked`：非 `null` 表示**拒绝卸载**及原因（如该目录是源码仓库、cargo 构建输出）。\n  界面据此禁用卸载按钮并显示原因——守卫在这里先跑一次，用户还在界面上能看到。",
+    "operationId": "get_api_uninstall_detect",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_UninstallDetectData"
+        }
        }
       },
-      "description": "OK"
-     },
-     "400": {
-      "content": {
-       "application/json": {
-        "schema": {}
-       }
-      },
-      "description": "Bad Request"
+      "description": "卸载将清理的全部内容清单（不执行任何删除）"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "无法确定程序所在目录"
      }
-    }
+    },
+    "summary": "GET /api/uninstall/detect — 卸载检测",
+    "tags": [
+     "uninstall"
+    ]
    }
   },
   "/api/uninstall/purge": {
    "post": {
-    "operationId": "post___api_uninstall_purge",
+    "description": "顺序是**刻意的**，每一步都有具体理由：\n\n1. **守卫先跑**（`build_plan`）：用户还在界面上，拒绝原因（如\"这是源码仓库，不是\n   安装目录\"）能当场看到；助手侧还会再校验一次，防 CLI 参数被绕过。\n2. **取消待应用更新**：不取消的话，退出时 `graceful_shutdown` 的\n   `ensure_helper_for_shutdown` 见到 pending 存在就会唤醒**更新**助手，把用户刚卸载\n   的程序又\"更新\"回来并重启——卸载直接失效。\n3. **spawn 卸载助手**：它等待本进程退出后才动手（Windows 上运行中的 exe 删不掉自己）。\n4. **优雅关闭本进程**：走完整清理流程，而不是 `exit(0)`。看门狗兜底防挂死。\n\n响应在关闭信号发出前构造：watch 的 `send` 只做通知，Axum 的优雅关闭会把这一个\n响应发完再停（与 `restart_app` 同一模式）。",
+    "operationId": "post_api_uninstall_purge",
     "requestBody": {
      "content": {
       "application/json": {
-       "schema": {}
+       "schema": {
+        "$ref": "#/components/schemas/PurgeRequest"
+       }
       }
      },
      "required": true
@@ -7718,28 +10137,38 @@
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_PurgeUninstallData"
+        }
        }
       },
-      "description": "OK"
+      "description": "卸载助手已启动，本进程即将退出以放行删除"
      },
      "400": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "OpenWrt 版不支持、目录守卫拒绝（源码仓库 / cargo 构建输出）或卸载助手缺失"
      },
      "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Internal Error"
+      "description": "卸载助手启动失败（程序文件未被删除，更新入口已恢复）"
      }
-    }
+    },
+    "summary": "POST /api/uninstall/purge — 删除程序本身并退出（卸载第二步）",
+    "tags": [
+     "uninstall"
+    ]
    }
   },
   "/api/update-state": {

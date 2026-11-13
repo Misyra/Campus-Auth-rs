@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
@@ -28,10 +29,7 @@ use crate::web::operations::{OperationRegistry, RegisterError, WebOperations};
 ///
 /// 除声明字段外其余键原样透传 Worker（Worker 当前只消费下列两键与
 /// 服务端注入的 `cancel_id`）。
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OcrRecognizeBody {
     /// 待识别图片的 base64 编码（原图 ≤ ~1.5 MiB 时请求体才不触 15 MiB 上限）
     pub image_base64: String,
@@ -40,20 +38,14 @@ pub struct OcrRecognizeBody {
 }
 
 /// POST /api/ocr/recognize 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OcrRecognizeData {
     /// 识别出的文本
     pub text: String,
 }
 
 /// GET /api/ocr/status 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OcrStatusData {
     /// OCR 依赖（ddddocr）是否已实际装入 venv（不依赖浏览器就绪）
     pub installed: bool,
@@ -66,10 +58,7 @@ pub struct OcrStatusData {
 }
 
 /// POST /api/ocr/install 响应载荷
-// 待集成批在 openapi.rs 注册 paths/components 后移除本 allow（当前仅被
-// #[utoipa::path] 注解引用，运行时未构造）
-#[allow(dead_code)]
-#[derive(Debug, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OcrInstallData {
     /// 面向用户的提示消息
     pub message: String,
