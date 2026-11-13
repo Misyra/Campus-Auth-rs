@@ -30,7 +30,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_ai_capture"];
+        /**
+         * POST /api/ai/capture — 捕获登录页面（导航 + 截图 + HTML/JS 落盘）
+         * @description body: `{ url }`。产物固定写入 `captures/latest/`（Worker 侧落盘，响应只回
+         *     轻量元数据——NDJSON 单行上限 1 MiB，门户页 HTML/JS 普遍超限）。
+         */
+        post: operations["post_api_ai_capture"];
         delete?: never;
         options?: never;
         head?: never;
@@ -44,7 +49,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_ai_capture_bundle"];
+        /**
+         * GET /api/ai/capture/bundle — 下载最近一次捕获的完整页面文件（zip）
+         * @description 内容：MHTML 完整布局（自包含样式/图片，仅 Chromium 渠道）+ page.html（原始
+         *     活 DOM，喂给 LLM 的材质）+ page.offline.html（资源引用改写到 resources/ 的
+         *     离线还原副本）+ page_structure.json + CSS/JS 资源快照 + 截图 + meta.json。
+         *     供离线分析或分享适配；需鉴权。
+         */
+        get: operations["get_api_ai_capture_bundle"];
         put?: never;
         post?: never;
         delete?: never;
@@ -60,7 +72,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_ai_capture_screenshot"];
+        /**
+         * GET /api/ai/capture/screenshot — 读取最近一次捕获的截图（只读 PNG）
+         * @description `<img>` 引用无法携带自定义鉴权头（同 debug 截图豁免先例），路径固定于
+         *     `captures/latest/`，无用户输入参与，不存在穿越面。
+         */
+        get: operations["get_api_ai_capture_screenshot"];
         put?: never;
         post?: never;
         delete?: never;
@@ -76,8 +93,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description 查询最近一次捕获产物是否可用（页面刷新后恢复状态用） */
-        get: operations["get___api_ai_capture_status"];
+        /**
+         * GET /api/ai/capture/status — 查询最近一次捕获产物是否可用
+         * @description 页面刷新后前端据此恢复捕获状态（避免强制重新捕获）；meta 损坏按不可用处理。
+         */
+        get: operations["get_api_ai_capture_status"];
         put?: never;
         post?: never;
         delete?: never;
@@ -95,8 +115,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 流式生成（SSE text/event-stream）：增量推送 LLM 输出与校验状态，含传输重试和自纠轮在内的全流程总预算为 10 分钟。事件帧（data: <json>）type 枚举：started / attempt_start / delta / attempt_delta_done / validation_failed / retrying / validated / done / error；": keepalive" 注释帧仅证明连接存活不重置前端空闲计时。同一时刻至多一个生成任务（重复发起返回 409）；客户端断连将取消后端 LLM 调用 */
-        post: operations["post___api_ai_generate_stream"];
+        /**
+         * POST /api/ai/generate/stream — 流式生成（SSE）
+         * @description 与 `generate` 语义一致，但以 `text/event-stream` 实时推送进度：
+         *     每个 LLM 增量、校验/重试状态均以 `data: <json>` 帧发出，前端据此在
+         *     最下方同步展示进度（流式文本预览 + 步骤状态）。请求同时受分块空闲超时与
+         *     10 分钟总预算约束，持续输出也不会超过总预算。
+         */
+        post: operations["post_api_ai_generate_stream"];
         delete?: never;
         options?: never;
         head?: never;
@@ -110,8 +136,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_ai_llm_config"];
-        put: operations["put___api_ai_llm_config"];
+        /** GET /api/ai/llm-config — 读取 LLM 配置（脱敏） */
+        get: operations["get_api_ai_llm_config"];
+        /**
+         * PUT /api/ai/llm-config — 保存 LLM 配置
+         * @description body: `{ provider?, base_url, model, api_key?, max_tokens? }`。`api_key` 缺省表示保持不变，
+         *     空串表示清除，非空表示更新（AES-256-GCM 加密落盘）；`max_tokens` 为整数或
+         *     `null`（不携带该字段，交由服务商默认），缺省表示保持不变。
+         */
+        put: operations["put_api_ai_llm_config"];
         post?: never;
         delete?: never;
         options?: never;
@@ -128,8 +161,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 使用已保存配置向实际 chat/completions 地址发送最小请求；30 秒超时 */
-        post: operations["post___api_ai_llm_config_test"];
+        /**
+         * POST /api/ai/llm-config/test — 用已保存配置发送极小请求，验证接口与凭据。
+         * @description 判定口径是"能通"而非"输出完整"：模型回复被 max_tokens 截断（推理/话痨模型的
+         *     常见表现）、或 HTTP 200 却没吐正文，都说明链路与凭据正常，按连通返回并附 `note`
+         *     说明；只有真正的传输/鉴权/协议错误才判失败。
+         */
+        post: operations["post_api_ai_llm_config_test"];
         delete?: never;
         options?: never;
         head?: never;
@@ -145,8 +183,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 拉取服务商 GET {base_url}/models 的模型列表（AI 页模型下拉框）；api_key 缺省或为空时回退到该服务商已保存的 Key */
-        post: operations["post___api_ai_models"];
+        /**
+         * POST /api/ai/models — 拉取当前服务商的模型列表（供前端模型下拉框）
+         * @description body: `{ provider, base_url, api_key? }`。`api_key` 缺省或为空时回退到该服务商
+         *     **已保存** 的 Key，因此「选服务商 → 拉列表 → 选模型 → 保存」这条顺序可用，
+         *     不必为了看列表先存一次配置（GLM/DeepSeek 的 `/models` 需要鉴权）。
+         */
+        post: operations["post_api_ai_models"];
         delete?: never;
         options?: never;
         head?: never;
@@ -179,7 +222,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_autostart_disable"];
+        /** POST /api/autostart/disable — 禁用自启动 */
+        post: operations["post_api_autostart_disable"];
         delete?: never;
         options?: never;
         head?: never;
@@ -195,7 +239,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_autostart_enable"];
+        /** POST /api/autostart/enable — 启用自启动 */
+        post: operations["post_api_autostart_enable"];
         delete?: never;
         options?: never;
         head?: never;
@@ -209,8 +254,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description Windows 读取 HKCU Run 与 StartupApproved；enabled 由路径、数据目录、参数及审批观测计算，配置位仅为 cached_enabled。未知审批不判为启用，读取失败返回 500。其它平台沿用既有口径，source 标注 system 或 config。 */
-        get: operations["get___api_autostart_status"];
+        /** GET /api/autostart/status — 获取自启动状态 */
+        get: operations["get_api_autostart_status"];
         put?: never;
         post?: never;
         delete?: never;
@@ -228,7 +273,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_background_fetch-url"];
+        /** POST /api/background/fetch-url — 从 URL 获取背景图 */
+        post: operations["post_api_background_fetch_url"];
         delete?: never;
         options?: never;
         head?: never;
@@ -244,7 +290,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_background_upload"];
+        /** POST /api/background/upload — 上传背景图（multipart/form-data，字段名 file） */
+        post: operations["post_api_background_upload"];
         delete?: never;
         options?: never;
         head?: never;
@@ -258,10 +305,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_background_filename"];
+        /**
+         * GET /api/background/{filename} — 获取背景图
+         * @description 返回原始图片字节 + 正确 Content-Type，供前端 CSS url() 直接引用。
+         */
+        get: operations["get_api_background_filename"];
         put?: never;
         post?: never;
-        delete: operations["delete___api_background_filename"];
+        /** DELETE /api/background/{filename} — 删除背景图 */
+        delete: operations["delete_api_background_filename"];
         options?: never;
         head?: never;
         patch?: never;
@@ -327,6 +379,10 @@ export interface paths {
          *     后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }
          *     扁平 key → global 子结构 / 活跃 Profile 的映射由
          *     [`apply_flat_settings_patch`] 统一实现（与 PUT 共用）
+         *
+         *     过渡期说明：单段更新推荐改用 [`patch_settings_section`]（PATCH /api/config/{section}），
+         *     语义与把该段包成单键全量 PATCH 完全一致；本端点在过渡期原样保留，现有客户端
+         *     （引导向导 / 运行模式预设 / 登录渠道绑定切换）不受影响。
          *
          *     契约注解：请求体为宽松 `Value`（未知键交由 schema 丢弃、历史字段
          *     `carrier_custom` 显式忽略），响应与 GET 同形，均待强类型化批次收敛。
@@ -411,7 +467,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_debug_feedback-bundle"];
+        /**
+         * POST /api/debug/feedback-bundle — 导出问题报告（zip）
+         * @description 收集：日志尾段 + 当前活动任务 JSON + 脱敏配置快照 + 调试页 MHTML/page.html/
+         *     截图/CSS-JS 资源快照（若有会话；Chromium MHTML 不含 JS，资源由 Worker 经 CDP 补齐）。
+         *     失败项写占位 txt，不以 500 打断整包；无活跃调试会话时页面项为占位说明。
+         */
+        post: operations["post_api_debug_feedback_bundle"];
         delete?: never;
         options?: never;
         head?: never;
@@ -427,7 +489,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_debug_run-all"];
+        /** POST /api/debug/run-all — 执行调试会话中全部剩余步骤 */
+        post: operations["post_api_debug_run_all"];
         delete?: never;
         options?: never;
         head?: never;
@@ -441,7 +504,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_debug_screenshot__filename_"];
+        /**
+         * GET /api/debug/screenshot/{filename} — 读取调试截图文件
+         * @description `<img>` 引用无法携带自定义鉴权头（同背景图 GET 豁免先例），且 Worker 侧
+         *     截图落盘路径对浏览器不可达，必须经 HTTP 暴露；文件名做防穿越校验。
+         */
+        get: operations["get_api_debug_screenshot_filename"];
         put?: never;
         post?: never;
         delete?: never;
@@ -459,7 +527,17 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_debug_start"];
+        /**
+         * POST /api/debug/start — 启动调试会话
+         * @description 前端仅提供 `task_id` 时，按 id 加载浏览器任务配置并嵌入 `task_config` 键，
+         *     与 Python Worker 的 `debug_start` 契约一致（步骤载体为 `task_config`）。
+         *     同时注入活跃 Profile 的系统保留变量，使登录类任务的 {{USERNAME}}/{{LOGIN_URL}}
+         *     等模板在调试时的行为与真实执行一致（此前不注入会导航到 `{{LOGIN_URL}}` 字面量）。
+         *
+         *     未配置登录网址（走内置默认触发地址）时先做一次"已联网"预检：命中直接 409，
+         *     避免已联网状态下白拉一次只会显示探测页面的浏览器。
+         */
+        post: operations["post_api_debug_start"];
         delete?: never;
         options?: never;
         head?: never;
@@ -473,7 +551,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_debug_status"];
+        /**
+         * GET /api/debug/status — 查询是否存在活跃调试会话
+         * @description 调试会话是 Worker 侧的持久状态：前端刷新/换页后内存状态丢失，界面上无法
+         *     停止会话，登录等命令会一直撞上"Worker 忙: 调试会话进行中"。此端点供前端
+         *     启动时恢复会话感知（配合"停止调试"入口自助解除占用）。
+         */
+        get: operations["get_api_debug_status"];
         put?: never;
         post?: never;
         delete?: never;
@@ -491,7 +575,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_debug_step"];
+        /**
+         * POST /api/debug/step — 调试单步执行
+         * @description 透传请求体（可携带 `step` 完整配置或 `step_index`）。前端“下一步”无显式索引时，
+         *     由 Python Worker 依据会话内游标自动执行下一个尚未运行的步骤。
+         */
+        post: operations["post_api_debug_step"];
         delete?: never;
         options?: never;
         head?: never;
@@ -507,7 +596,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_debug_stop"];
+        /** POST /api/debug/stop — 停止调试会话 */
+        post: operations["post_api_debug_stop"];
         delete?: never;
         options?: never;
         head?: never;
@@ -521,7 +611,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_diagnostics_bundle"];
+        /**
+         * GET /api/diagnostics/bundle — 一键导出诊断包（zip 附件下载）
+         * @description 包内容与信任边界见 `monitor::diagnostics::build_diagnostics_bundle`：
+         *     manifest + 深度脱敏配置快照 + 事件流 JSONL（30 天）+ 运行日志（7 天）+
+         *     环境观测文本，白名单式收集、总量 20MB 软上限。收集为阻塞 I/O，整体放
+         *     spawn_blocking；分项失败写 manifest 说明而非整包报错。
+         */
+        get: operations["get_api_diagnostics_bundle"];
         put?: never;
         post?: never;
         delete?: never;
@@ -539,7 +636,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_diagnostics_run"];
+        /**
+         * POST /api/diagnostics/run — 一键网络诊断
+         * @description 五项检查并发执行（本机网卡 / 默认网关 / DNS / 认证门户 / 近期登录失败
+         *     归因），整体受 15s 总限时约束；结果已脱敏（不含凭据 / token / 带查询串的
+         *     URL），失败项以结构化明细返回而非 HTTP 错误——诊断失败是「数据」不是
+         *     「请求出错」。
+         */
+        post: operations["post_api_diagnostics_run"];
         delete?: never;
         options?: never;
         head?: never;
@@ -610,6 +714,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 手写占位条目（T8-6a 预置，待集成批切生成源）：近 N 天事件流读回，days 钳制 1..=30 */
+        get: operations["get___api_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -639,10 +760,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_history"];
+        /**
+         * GET /api/history — 查询最近 30 天登录历史
+         * @description 响应中每条记录额外包含 `success: boolean` 字段（`result == "success"` 时为 true），
+         *     前端 `LoginHistoryItem` 依赖此字段显示成功/失败状态。
+         *
+         *     响应格式：
+         *     - 不传 `page` 时：返回裸数组 `LoginHistoryItem[]`（向后兼容）
+         *     - 传 `page` 时：返回 `{ total, page, page_size, items }` 分页结构
+         */
+        get: operations["get_api_history"];
         put?: never;
         post?: never;
-        delete: operations["delete___api_history"];
+        /** DELETE /api/history — 清除登录历史 */
+        delete: operations["delete_api_history"];
         options?: never;
         head?: never;
         patch?: never;
@@ -829,7 +960,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_monitor_start"];
+        /** POST /api/monitor/start — 启动网络监测 */
+        post: operations["post_api_monitor_start"];
         delete?: never;
         options?: never;
         head?: never;
@@ -843,7 +975,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_monitor_status"];
+        /** GET /api/monitor/status — 获取当前系统状态快照 */
+        get: operations["get_api_monitor_status"];
         put?: never;
         post?: never;
         delete?: never;
@@ -861,7 +994,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_monitor_stop"];
+        /** POST /api/monitor/stop — 停止网络监测 */
+        post: operations["post_api_monitor_stop"];
         delete?: never;
         options?: never;
         head?: never;
@@ -877,7 +1011,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_monitor_test"];
+        /**
+         * POST /api/monitor/test — 网络连通性测试
+         * @description 经 EngineApi 派发到「当前活跃」Engine（崩溃重启后自动指向新实例），
+         *     oneshot 回复与 30s 超时封装在实现内。
+         */
+        post: operations["post_api_monitor_test"];
         delete?: never;
         options?: never;
         head?: never;
@@ -893,7 +1032,13 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_monitor_test-redirect"];
+        /**
+         * POST /api/monitor/test-redirect — 用可见浏览器验证校园网重定向。
+         * @description 先用既有 HTTP 探测确认“已正常联网”，命中时直接提示先退出登录；其余情况
+         *     强制 `headless=false` 启动独立临时浏览器。Worker 只返回页面分类，不返回或保存
+         *     最终 URL / 页面正文，避免门户一次性 token 进入配置、日志或前端状态。
+         */
+        post: operations["post_api_monitor_test_redirect"];
         delete?: never;
         options?: never;
         head?: never;
@@ -907,32 +1052,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 列出校园网可用物理出口接口 */
-        get: {
-            parameters: {
-                query?: never;
-                header?: never;
-                path?: never;
-                cookie?: never;
-            };
-            requestBody?: never;
-            responses: {
-                /** @description 当前 IPv4 网卡及 DNS */
-                200: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-                /** @description 网卡枚举失败 */
-                503: {
-                    headers: {
-                        [name: string]: unknown;
-                    };
-                    content?: never;
-                };
-            };
-        };
+        /** GET /api/network/interfaces：物理网卡及当前 IPv4 / DNS，供方案选择出口。 */
+        get: operations["get_api_network_interfaces"];
         put?: never;
         post?: never;
         delete?: never;
@@ -950,7 +1071,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_notification_test"];
+        /**
+         * POST /api/notification/test — 用测试消息实际发送一次，返回逐通道结果
+         * @description 测试发送不受推送总开关（`notification.enabled`）限制——用户在开启总开关
+         *     前就要能验证通道；单次最多 3 个通道、单通道超时截断到 15s（快速反馈）。
+         */
+        post: operations["post_api_notification_test"];
         delete?: never;
         options?: never;
         head?: never;
@@ -966,7 +1092,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_ocr_install"];
+        /**
+         * POST /api/ocr/install — 安装 OCR 环境并增量补装 OCR 依赖
+         * @description 后台只准备 Python/Worker 核心（不要求浏览器二进制）并 `uv add` ddddocr，
+         *     进度通过 StatusManager 推送。
+         */
+        post: operations["post_api_ocr_install"];
         delete?: never;
         options?: never;
         head?: never;
@@ -982,7 +1113,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_ocr_recognize"];
+        /**
+         * POST /api/ocr/recognize — 执行 OCR 识别
+         * @description Worker 返回的是 IpcResponse `{ id, result: { success, data, error } }`，
+         *     而前端契约只认 `{ data: <负载> }` / `{ error: {...} }` 两种信封：
+         *     - success=true：提取 `result.data`（形如 `{"text": "..."}`）作为业务负载返回；
+         *     - success=false：把 worker 的 error 消息转为 HTTP 错误（否则错误被埋在 200
+         *       响应体里，前端既不显示识别结果也不提示失败）。
+         */
+        post: operations["post_api_ocr_recognize"];
         delete?: never;
         options?: never;
         head?: never;
@@ -996,7 +1135,18 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_ocr_status"];
+        /**
+         * GET /api/ocr/status — 获取 OCR 状态
+         * @description 返回：
+         *     - `installed`：OCR **依赖（ddddocr）** 是否已实际安装（仅需 Python venv 就绪 +
+         *       dddddcr 已装入 venv，不依赖 Playwright 浏览器是否就绪——OCR 识别只用 CPU 推理）。
+         *     - `declared`：Worker 工程存在即支持 OCR（按需 add/remove，不预声明），不等于已安装。
+         *     - `size_mb`：environment 目录估算体积。
+         *     - `runtime_ocr`（任务 10，向后兼容新增）：Worker 存活时最近一次健康检查
+         *       上报的运行时 OCR 能力（`capabilities.ocr`）；Worker 未存活/未上报时为
+         *       `null`，前端未消费该字段前不破坏既有契约。
+         */
+        get: operations["get_api_ocr_status"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1014,7 +1164,17 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_ocr_uninstall"];
+        /**
+         * POST /api/ocr/uninstall — 卸载 OCR（取消在途 OCR 识别任务并移除依赖）
+         * @description 取消全部在途 OCR 识别任务，并 `uv remove` 项目主依赖中的 ddddocr
+         *     （见 `environment.remove_ocr_dep`）。卸载完成前拒绝新的识别请求。
+         *
+         *      若有**其他**类型的会话在途（定时浏览器任务 / 登录 / 调试），直接拒绝而不是
+         *      照样回收：卸载必须在 Windows 上释放 onnxruntime DLL，`recycle_if_running`
+         *      是无条件强杀，会把对方的在途执行连带取消为 `Cancelled`（用户可见
+         *      「请求已取消」，看起来像自己取消的），根因却在 OCR 路径上。
+         */
+        post: operations["post_api_ocr_uninstall"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1744,7 +1904,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_tools_task-recorder_user_js"];
+        /**
+         * GET /api/tools/task-recorder.user.js — 任务录制用户脚本
+         * @description 从 `resources/tools/task-recorder.user.js` 读取并返回 Tampermonkey 用户脚本。
+         *     文件缺失时返回 404。
+         */
+        get: operations["get_api_tools_task_recorder_user_js"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1762,7 +1927,16 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_uninstall"];
+        /**
+         * POST /api/uninstall — 清理系统残留（卸载第一步）
+         * @description 依次执行：关闭开机自启动 → 删除用户数据目录（勾选「保留配置与任务」时跳过）→
+         *     清理 Playwright 浏览器缓存。每一步尽力而为、互不阻断，逐项返回结果。
+         *
+         *     **不删程序本身**（那需要主进程先退出，见 [`purge_uninstall`]）。保留这个只清残留的
+         *     端点是有意的：它同时是"重置环境"的入口——清掉浏览器缓存与自启动注册后程序照常可用，
+         *     不必卸载。前端「卸载」流程会紧接着调用 `purge`。
+         */
+        post: operations["post_api_uninstall"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1776,7 +1950,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_uninstall_detect"];
+        /**
+         * GET /api/uninstall/detect — 卸载检测
+         * @description 返回卸载时将清理的**全部**内容（不执行任何删除）：
+         *     - `items`：`base_path` 之外的系统残留（用户数据目录 / Playwright 缓存 / 自启动）；
+         *     - `program`：程序目录（保留数据时只移除程序文件）；
+         *     - `helper`：卸载助手是否在位（不在位时 `purge` 必失败，界面据此先拦下）；
+         *     - `data`：`base_path` 下的用户数据目录（勾选「保留配置与任务」则保留）；
+         *     - `blocked`：非 `null` 表示**拒绝卸载**及原因（如该目录是源码仓库、cargo 构建输出）。
+         *       界面据此禁用卸载按钮并显示原因——守卫在这里先跑一次，用户还在界面上能看到。
+         */
+        get: operations["get_api_uninstall_detect"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1794,7 +1978,22 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        post: operations["post___api_uninstall_purge"];
+        /**
+         * POST /api/uninstall/purge — 删除程序本身并退出（卸载第二步）
+         * @description 顺序是**刻意的**，每一步都有具体理由：
+         *
+         *     1. **守卫先跑**（`build_plan`）：用户还在界面上，拒绝原因（如"这是源码仓库，不是
+         *        安装目录"）能当场看到；助手侧还会再校验一次，防 CLI 参数被绕过。
+         *     2. **取消待应用更新**：不取消的话，退出时 `graceful_shutdown` 的
+         *        `ensure_helper_for_shutdown` 见到 pending 存在就会唤醒**更新**助手，把用户刚卸载
+         *        的程序又"更新"回来并重启——卸载直接失效。
+         *     3. **spawn 卸载助手**：它等待本进程退出后才动手（Windows 上运行中的 exe 删不掉自己）。
+         *     4. **优雅关闭本进程**：走完整清理流程，而不是 `exit(0)`。看门狗兜底防挂死。
+         *
+         *     响应在关闭信号发出前构造：watch 的 `send` 只做通知，Axum 的优雅关闭会把这一个
+         *     响应发完再停（与 `restart_app` 同一模式）。
+         */
+        post: operations["post_api_uninstall_purge"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1871,6 +2070,94 @@ export interface components {
             /** @description 面向用户的提示消息 */
             message: string;
         };
+        /** @description POST /api/autostart/enable 与 /api/autostart/disable 响应载荷 */
+        AutostartToggleData: {
+            /** @description 操作结果提示 */
+            message: string;
+            /**
+             * @description 配置缓存保存失败时的告警（系统状态已生效，不反向覆盖用户选择）；
+             *     仅 Windows/macOS 携带该字段（其他平台缓存失败按 400 报错并回滚系统注册）
+             */
+            warning?: string | null;
+        };
+        /** @description POST /api/background/fetch-url 请求体：待拉取的远程图片地址（仅允许 HTTPS，走 SSRF 防护通道） */
+        BackgroundFetchBody: {
+            /** @description 图片 URL */
+            url: string;
+        };
+        /**
+         * Format: binary
+         * @description GET /api/background/{filename} 200 响应体 schema 载体
+         *
+         *     wire 上是原始图片字节流（按存储扩展名对应的 MIME 下发），不是 JSON 包裹；
+         *     本类型仅用于把 OpenAPI schema 声明为
+         *     `{"type": "string", "format": "binary"}`，不参与序列化。
+         */
+        BackgroundImageBody: string;
+        /** @description POST /api/background/upload 与 /api/background/fetch-url 响应载荷 */
+        BackgroundUploadData: {
+            /** @description 落盘文件名（`bg-<stem>-<uuid>.<ext>`，已做 Windows 设备名/ADS 消毒） */
+            filename: string;
+            /** @description 可直接引用的相对 URL（`/api/background/<filename>`） */
+            url: string;
+        };
+        /**
+         * Format: binary
+         * @description POST /api/background/upload multipart `file` 字段的 schema 载体
+         *
+         *     `multipart/form-data` 单字段 `file`；字段值是图片字节，schema 声明为 binary。
+         */
+        BackgroundUploadFile: string;
+        /** @description POST /api/ai/capture 请求体 */
+        CaptureBody: {
+            /** @description 待捕获页面 URL（http/https） */
+            url: string;
+        };
+        /**
+         * Format: binary
+         * @description GET /api/ai/capture/bundle 200 响应体 schema 载体（zip 字节流）
+         *
+         *     同 repo 域 `RepoImageBody` 的二进制载体范式，不参与序列化。
+         */
+        CaptureBundleBody: string;
+        /**
+         * Format: binary
+         * @description GET /api/ai/capture/screenshot 200 响应体 schema 载体（PNG 字节流）
+         *
+         *     同 repo 域 `RepoImageBody` 的二进制载体范式，不参与序列化。
+         */
+        CaptureScreenshotBody: string;
+        /** @description GET /api/ai/capture/status 响应载荷 */
+        CaptureStatusData: {
+            /** @description 最近一次捕获产物是否完整可用（meta + page.html + screenshot.png 齐备且 meta 可解析） */
+            available: boolean;
+            /** @description 导航最终 URL（不可用时缺省） */
+            final_url?: string | null;
+            /** @description 原始请求 URL（不可用时缺省） */
+            request_url?: string | null;
+            /** @description 页面结构摘要（捕获时原值透传，不可用时缺省） */
+            structure_summary?: unknown;
+            /** @description 页面标题（不可用时缺省） */
+            title?: string | null;
+        };
+        /**
+         * @description POST /api/uninstall — 清理系统残留（卸载第一步）
+         *
+         *     依次执行：关闭开机自启动 → 删除用户数据目录 → 清理 Playwright 浏览器缓存。
+         *     每一步尽力而为、互不阻断，逐项返回结果。
+         *
+         *     POST /api/uninstall 的请求体（可选：不带 body 时按"不保留"处理，老调用方不受影响）
+         */
+        CleanupRequest: {
+            /**
+             * @description 与 [`PurgeRequest::keep_user_data`] 同一个开关
+             *
+             *     勾选时**不删**加密密钥目录（`~/.campus_network_auth`）：被保留的 `config/`
+             *     里方案密码是 `ENC:` 密文，密钥一删这些密码就再也解不开（下次启动会生成新密钥，
+             *     解密失败 → 用户得把所有方案密码重填一遍）。"保留配置与任务"必须真的能读。
+             */
+            keep_user_data?: boolean;
+        };
         /** @description POST /api/profiles/{id}/config-session/start 响应载荷 */
         ConfigSessionStartData: {
             /** @description 配置浏览器是否已拉起且录制已开启（成功响应恒为 true） */
@@ -1910,6 +2197,45 @@ export interface components {
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_AutostartToggleData: {
+            /** @description POST /api/autostart/enable 与 /api/autostart/disable 响应载荷 */
+            data: {
+                /** @description 操作结果提示 */
+                message: string;
+                /**
+                 * @description 配置缓存保存失败时的告警（系统状态已生效，不反向覆盖用户选择）；
+                 *     仅 Windows/macOS 携带该字段（其他平台缓存失败按 400 报错并回滚系统注册）
+                 */
+                warning?: string | null;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_BackgroundUploadData: {
+            /** @description POST /api/background/upload 与 /api/background/fetch-url 响应载荷 */
+            data: {
+                /** @description 落盘文件名（`bg-<stem>-<uuid>.<ext>`，已做 Windows 设备名/ADS 消毒） */
+                filename: string;
+                /** @description 可直接引用的相对 URL（`/api/background/<filename>`） */
+                url: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_CaptureStatusData: {
+            /** @description GET /api/ai/capture/status 响应载荷 */
+            data: {
+                /** @description 最近一次捕获产物是否完整可用（meta + page.html + screenshot.png 齐备且 meta 可解析） */
+                available: boolean;
+                /** @description 导航最终 URL（不可用时缺省） */
+                final_url?: string | null;
+                /** @description 原始请求 URL（不可用时缺省） */
+                request_url?: string | null;
+                /** @description 页面结构摘要（捕获时原值透传，不可用时缺省） */
+                structure_summary?: unknown;
+                /** @description 页面标题（不可用时缺省） */
+                title?: string | null;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
         DataEnvelope_ConfigSessionStartData: {
             /** @description POST /api/profiles/{id}/config-session/start 响应载荷 */
             data: {
@@ -1936,11 +2262,40 @@ export interface components {
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_DebugStatusData: {
+            /** @description GET /api/debug/status 响应载荷 */
+            data: {
+                /** @description 是否存在活跃调试会话 */
+                active: boolean;
+                /** @description 最近一次调试截图的免鉴权 URL（`/api/debug/screenshot/<filename>`）；尚无截图时为 null */
+                screenshot_url?: string | null;
+                /** @description 会话详情（步骤列表/执行结果，形状由 Worker 定义）；会话不活跃或 Worker 查询失败时缺省/null */
+                session?: unknown;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
         DataEnvelope_DefaultStealthScriptData: {
             /** @description GET /api/config/default-stealth-script 响应载荷 */
             data: {
                 /** @description 默认反检测脚本全文（JavaScript，任务页「恢复默认」的数据源） */
                 script: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_DiagnosticReportData: {
+            /** @description POST /api/diagnostics/run 响应载荷（DiagnosticReport 线格式镜像） */
+            data: {
+                /** @description 逐项检查结果（顺序固定：interfaces → gateway → dns → portal → history） */
+                checks: components["schemas"]["DiagnosticCheckData"][];
+                /** @description 总结论一句话（面向用户直接展示） */
+                conclusion: string;
+                /**
+                 * Format: int64
+                 * @description 整体耗时（毫秒）
+                 */
+                total_ms: number;
+                /** @description 总结论：healthy / degraded / faulty */
+                verdict: string;
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
@@ -1952,6 +2307,14 @@ export interface components {
                 /** @description 主程序版本 */
                 version: string;
             };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_HistoryResponseData: {
+            /**
+             * @description GET /api/history 200 响应 data 形状（schema 载体）：不传 `page` 时为裸数组
+             *     （向后兼容），传 `page` 时为分页对象；以 untagged 枚举声明为 oneOf。
+             */
+            data: components["schemas"]["HistoryItemData"][] | components["schemas"]["HistoryPageData"];
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
         DataEnvelope_HttpTaskTestData: {
@@ -2016,6 +2379,54 @@ export interface components {
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_LlmConfigData: {
+            /** @description GET/PUT /api/ai/llm-config 响应载荷（脱敏视图） */
+            data: {
+                /** @description API Base URL */
+                base_url: string;
+                /** @description 已保存过 Key 的服务商列表 */
+                configured_providers: string[];
+                /** @description 是否已设置 API Key（Key 本体永不出站） */
+                has_api_key: boolean;
+                /**
+                 * Format: int32
+                 * @description 单次生成 max_tokens 上限；null 表示交由服务商默认
+                 */
+                max_tokens?: number | null;
+                /** @description 模型名 */
+                model: string;
+                /** @description 服务商标识（glm / deepseek / custom 等，`crate::ai::validate_provider` 口径） */
+                provider: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_LlmConnectionTestData: {
+            /** @description POST /api/ai/llm-config/test 响应载荷 */
+            data: {
+                /** @description 链路与凭据是否连通（回复被测试上限截断也算连通，附 note） */
+                connected: boolean;
+                /**
+                 * Format: int64
+                 * @description 测试耗时（毫秒）
+                 */
+                latency_ms: number;
+                /** @description 截断说明（回复被 256 token 测试上限截断时出现） */
+                note?: string | null;
+                /** @description 实际请求的 chat/completions 端点 */
+                request_url: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_LlmModelsData: {
+            /** @description POST /api/ai/models 响应载荷 */
+            data: {
+                /** @description 模型数量 */
+                count: number;
+                /** @description 模型 ID 列表 */
+                models: string[];
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
         DataEnvelope_LogLevelData: {
             /** @description GET /api/config/log-levels 响应载荷 */
             data: {
@@ -2048,6 +2459,128 @@ export interface components {
                 message: string;
                 /** @description 登录是否成功（失败也是 200 响应：业务终态而非服务端错误） */
                 success: boolean;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_MonitorStatusData: {
+            /** @description GET /api/monitor/status 响应载荷（`StatusSnapshot` 线格式镜像） */
+            data: {
+                /** @description 当前活跃 Profile ID */
+                active_profile: string;
+                /** @description 最近一次连通性解释 */
+                connectivity: components["schemas"]["MonitorConnectivityData"];
+                /**
+                 * Format: int32
+                 * @description 连续失败次数
+                 */
+                consecutive_failures: number;
+                /** @description 是否处于冷却期（连续失败后的等待） */
+                cooling_down: boolean;
+                /**
+                 * Format: int32
+                 * @description 冷却剩余秒数
+                 */
+                cooling_down_remaining?: number | null;
+                /** @description 引擎运行状态：running / stopped / dead */
+                engine_state: string;
+                environment_progress?: null | components["schemas"]["EnvProgress"];
+                /** @description 上次网络检测时间（本地时区 ISO 8601） */
+                last_check_time?: string | null;
+                last_probe_evidence?: null | components["schemas"]["ProbeEvidenceData"];
+                /** @description 登录结果消息 */
+                login_message?: string | null;
+                /** @description 登录来源：auto / manual / login_once / browser；无在途登录时为 null */
+                login_source?: string | null;
+                /** @description 登录状态：idle / running / success / failed / cancelled */
+                login_status: string;
+                /**
+                 * Format: int64
+                 * @description 累计登录尝试次数
+                 */
+                login_total: number;
+                /** @description 监测是否启用 */
+                monitor_enabled: boolean;
+                /**
+                 * Format: int64
+                 * @description 本次监控连续运行时长（秒）；未监控时为 0
+                 */
+                monitoring_seconds: number;
+                /** @description 网络状态：online / captive_portal / offline / unknown */
+                network_status: string;
+                /** @description 是否处于暂停时段 */
+                pause_active: boolean;
+                /**
+                 * Format: int64
+                 * @description 累计网络检测次数
+                 */
+                probe_total: number;
+                /**
+                 * Format: int32
+                 * @description 当前登录重试次数
+                 */
+                retry_count: number;
+                /** @description 调度器下次触发时间（ISO 8601 字符串） */
+                scheduler_next_fire_at?: string | null;
+                /** @description 调度器是否运行中 */
+                scheduler_running: boolean;
+                /** @description 调度器管理的任务数量 */
+                scheduler_task_count: number;
+                /**
+                 * Format: int64
+                 * @description 快照单调版本号（每次 merge +1，前端据此判断状态新旧）
+                 */
+                snapshot_version: number;
+                /** @description 是否有新版本 */
+                update_available: boolean;
+                update_progress?: null | components["schemas"]["EnvProgress"];
+                /**
+                 * Format: int64
+                 * @description 应用运行时长（秒）
+                 */
+                uptime_seconds: number;
+                /** @description Python Worker 状态：not_installed / stopped / starting / ready / busy / error */
+                worker_state: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_NotificationTestData: {
+            /** @description POST /api/notification/test 响应载荷：逐通道测试回执 */
+            data: {
+                /** @description 逐通道发送结果（顺序与请求通道顺序一致） */
+                results: components["schemas"]["NotificationTestChannelResult"][];
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_OcrInstallData: {
+            /** @description POST /api/ocr/install 响应载荷 */
+            data: {
+                /** @description 面向用户的提示消息 */
+                message: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_OcrRecognizeData: {
+            /** @description POST /api/ocr/recognize 响应载荷 */
+            data: {
+                /** @description 识别出的文本 */
+                text: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_OcrStatusData: {
+            /** @description GET /api/ocr/status 响应载荷 */
+            data: {
+                /** @description Worker 工程是否支持 OCR（按需 add/remove，不等于已安装） */
+                declared: boolean;
+                /** @description OCR 依赖（ddddocr）是否已实际装入 venv（不依赖浏览器就绪） */
+                installed: boolean;
+                /** @description Worker 最近一次健康检查上报的运行时 OCR 能力；Worker 未存活/未上报时为 null */
+                runtime_ocr?: boolean | null;
+                /**
+                 * Format: double
+                 * @description environment 目录估算体积（MB，四舍五入）
+                 */
+                size_mb: number;
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
@@ -2137,6 +2670,34 @@ export interface components {
                 enabled: boolean;
                 /** @description 面向用户的提示消息 */
                 message: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_PurgeUninstallData: {
+            /** @description POST /api/uninstall/purge 响应载荷 */
+            data: {
+                /** @description 待应用更新是否已成功取消 */
+                cancelled_pending_update: boolean;
+                /** @description 计划删除的用户数据目录（勾选保留时为空数组） */
+                data_dirs: components["schemas"]["UninstallPurgeDirData"][];
+                /** @description 实际删除的程序目录 */
+                install_dir: string;
+                /** @description 是否勾选了保留用户数据 */
+                kept_user_data: boolean;
+                /** @description 汇总提示（按需追加「待应用更新未能取消」与「加密密钥尚未清理」警示） */
+                message: string;
+                /** @description 取消失败时为 true（退出后更新助手仍可能把程序装回来） */
+                pending_update_left: boolean;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_RedirectTestResultData: {
+            /** @description POST /api/monitor/test-redirect 响应载荷（`RedirectTestResult` 线格式镜像） */
+            data: {
+                /** @description 前端直接展示的用户提示 */
+                message: string;
+                /** @description 机器可读结论 */
+                status: components["schemas"]["RedirectTestStatus"];
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
@@ -2249,8 +2810,79 @@ export interface components {
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_TestNetworkResultData: {
+            /** @description POST /api/monitor/test 响应载荷（`TestNetworkResult` 线格式镜像） */
+            data: {
+                /** @description 认证入口状态（取值同连通性解释的 `auth_endpoint` 枚举） */
+                auth_endpoint: string;
+                /** @description 判断置信度：high / medium / low */
+                confidence: string;
+                /** @description 各探测方法的详细结果 */
+                details: components["schemas"]["ProbeDetailsData"];
+                /**
+                 * Format: int64
+                 * @description 探测耗时（毫秒）
+                 */
+                duration_ms: number;
+                /** @description 本地链路诊断：not_checked / available / unavailable / probe_failed */
+                local_link: string;
+                /** @description 主判断原因（取值同连通性解释的 `reason` 枚举） */
+                reason: string;
+                /** @description 探测结论：online / captive_portal / offline / unknown */
+                status: string;
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_UninstallCleanupData: {
+            /** @description POST /api/uninstall 响应载荷 */
+            data: {
+                /** @description 汇总提示（全部成功 / 部分失败） */
+                message: string;
+                /** @description 三步执行结果（互不阻断，逐项返回） */
+                results: components["schemas"]["UninstallStepData"][];
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_UninstallDetectData: {
+            /** @description GET /api/uninstall/detect 响应载荷 */
+            data: {
+                /** @description 非 null 表示拒绝卸载及原因（源码仓库 / cargo 构建输出等守卫） */
+                blocked?: string | null;
+                /** @description base_path 下的用户数据目录（勾选「保留配置与任务」则保留） */
+                data: components["schemas"]["UninstallDataDirData"][];
+                /** @description 卸载助手是否在位（不在位时 purge 必失败，界面据此先拦下） */
+                helper: components["schemas"]["UninstallEntryData"];
+                /** @description base_path 之外的系统残留清单（用户数据目录 / Playwright 缓存 / 自启动） */
+                items: components["schemas"]["UninstallDetectItem"][];
+                /** @description 「保留数据」变体的拒绝原因；`blocked` 非 null 时恒为 null */
+                keep_data_blocked?: string | null;
+                /** @description 程序目录（保留数据时只移除程序文件） */
+                program: components["schemas"]["UninstallEntryData"];
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
         DataEnvelope_Value: {
             data: unknown;
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_Vec_NetworkInterfaceData: {
+            data: {
+                /** @description 当前接口配置的 IPv4 DNS */
+                dns_servers: string[];
+                /** @description 稳定标识：Windows 使用接口 GUID，Unix 优先使用 MAC */
+                id: string;
+                /**
+                 * Format: int32
+                 * @description 当前接口索引
+                 */
+                index: number;
+                /** @description 当前 IPv4 地址 */
+                ipv4: string;
+                /** @description 当前接口 MAC，供门户凭据变换使用 */
+                mac: string;
+                /** @description 用户可识别的接口名称 */
+                name: string;
+            }[];
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
         DataEnvelope_Vec_SchedulerHistoryData: {
@@ -2358,11 +2990,70 @@ export interface components {
                 stopped: boolean;
             };
         };
+        /**
+         * Format: binary
+         * @description GET /api/debug/screenshot/{filename} 200 响应体 schema 载体
+         *
+         *     wire 上是原始图片字节流（按 magic bytes 以 image/png 或 image/jpeg 下发），
+         *     不是 JSON 包裹；本类型仅用于把 OpenAPI schema 声明为
+         *     `{"type": "string", "format": "binary"}`，不参与序列化。
+         */
+        DebugScreenshotBody: string;
+        /** @description GET /api/debug/status 响应载荷 */
+        DebugStatusData: {
+            /** @description 是否存在活跃调试会话 */
+            active: boolean;
+            /** @description 最近一次调试截图的免鉴权 URL（`/api/debug/screenshot/<filename>`）；尚无截图时为 null */
+            screenshot_url?: string | null;
+            /** @description 会话详情（步骤列表/执行结果，形状由 Worker 定义）；会话不活跃或 Worker 查询失败时缺省/null */
+            session?: unknown;
+        };
         /** @description GET /api/config/default-stealth-script 响应载荷 */
         DefaultStealthScriptData: {
             /** @description 默认反检测脚本全文（JavaScript，任务页「恢复默认」的数据源） */
             script: string;
         };
+        /** @description 单项检查结果（DiagnosticCheck 线格式镜像） */
+        DiagnosticCheckData: {
+            /** @description 结构化细节（已脱敏，随检查项而异） */
+            details: Record<string, never>;
+            /**
+             * Format: int64
+             * @description 耗时（毫秒）
+             */
+            elapsed_ms: number;
+            /** @description 检查项标识（机器可读）：interfaces / gateway / dns / portal / history */
+            key: string;
+            /** @description 检查项中文名（前端直接展示） */
+            name: string;
+            /** @description 单项结论：ok / warn / fail / skip */
+            status: string;
+            /** @description 一句话摘要 */
+            summary: string;
+        };
+        /** @description POST /api/diagnostics/run 响应载荷（DiagnosticReport 线格式镜像） */
+        DiagnosticReportData: {
+            /** @description 逐项检查结果（顺序固定：interfaces → gateway → dns → portal → history） */
+            checks: components["schemas"]["DiagnosticCheckData"][];
+            /** @description 总结论一句话（面向用户直接展示） */
+            conclusion: string;
+            /**
+             * Format: int64
+             * @description 整体耗时（毫秒）
+             */
+            total_ms: number;
+            /** @description 总结论：healthy / degraded / faulty */
+            verdict: string;
+        };
+        /**
+         * Format: binary
+         * @description GET /api/diagnostics/bundle 200 响应体 schema 载体
+         *
+         *     wire 上是 zip 字节流（`application/zip` + `attachment` 下载头），不是
+         *     JSON 包裹；本类型仅用于把 OpenAPI schema 声明为
+         *     `{"type": "string", "format": "binary"}`，不参与序列化。
+         */
+        DiagnosticsBundleBody: string;
         /** @description 安装进度（对齐 `crate::status::snapshot::InstallProgress` 的线格式） */
         EnvProgress: {
             /** @description 人类可读消息 */
@@ -2418,6 +3109,27 @@ export interface components {
             /** @description 错误对象 */
             error: components["schemas"]["ErrorDetail"];
         };
+        /**
+         * Format: binary
+         * @description POST /api/debug/feedback-bundle 200 响应体 schema 载体（zip 字节流）
+         *
+         *     同 [`DebugScreenshotBody`] 的二进制载体范式，不参与序列化。
+         */
+        FeedbackBundleBody: string;
+        /** @description POST /api/ai/generate/stream 请求体 */
+        GenerateStreamBody: {
+            /** @description 追加到提示词的用户补充说明（≤4000 字符，可省略） */
+            extra_prompt?: string | null;
+        };
+        /**
+         * @description POST /api/ai/generate/stream 200 响应体 schema 载体
+         *
+         *     wire 上是 `text/event-stream` 逐帧文本（`data: <json>\n\n`），非 JSON 信封；
+         *     本类型仅声明帧的文本形态（`{"type": "string"}`，非 Binary）。事件帧 type 枚举
+         *     （started / attempt_start / delta / attempt_delta_done / validation_failed /
+         *     retrying / validated / done / error）的字段级契约由 T5-4 流事件批次钉死。
+         */
+        GenerateStreamFrame: string;
         /** @description GET /api/health 响应载荷 */
         HealthData: {
             /** @description 固定为 "ok" */
@@ -2425,6 +3137,44 @@ export interface components {
             /** @description 主程序版本 */
             version: string;
         };
+        /** @description GET /api/history 条目（`LoginHistoryEntry` 线格式镜像 + `success` 计算字段） */
+        HistoryItemData: {
+            /** @description 实际执行的登录渠道：browser / http / script；旧记录与执行前失败的记录不含该字段（null） */
+            channel?: string | null;
+            /**
+             * Format: double
+             * @description 耗时（秒，浮点）
+             */
+            duration_secs: number;
+            /** @description 结果消息 */
+            message: string;
+            /** @description 关联 Profile ID */
+            profile_id: string;
+            /** @description 结果分类：success / failed / cancelled */
+            result: string;
+            /** @description 登录来源：auto / manual / login_once / browser */
+            source: string;
+            /** @description 计算字段：`result == "success"`（前端显示成功/失败状态用） */
+            success: boolean;
+            /** @description 记录时间戳（本地时区 ISO 8601） */
+            timestamp: string;
+        };
+        /** @description GET /api/history 分页形态（传 `page` 时的 200 载荷） */
+        HistoryPageData: {
+            /** @description 当前页条目 */
+            items: components["schemas"]["HistoryItemData"][];
+            /** @description 页码（从 1 开始） */
+            page: number;
+            /** @description 每页条数（钳制 1..=200，默认 50） */
+            page_size: number;
+            /** @description 总条数（在 limit 截断之后取值，与可翻页条目数一致） */
+            total: number;
+        };
+        /**
+         * @description GET /api/history 200 响应 data 形状（schema 载体）：不传 `page` 时为裸数组
+         *     （向后兼容），传 `page` 时为分页对象；以 untagged 枚举声明为 oneOf。
+         */
+        HistoryResponseData: components["schemas"]["HistoryItemData"][] | components["schemas"]["HistoryPageData"];
         /** @description POST /api/http-tasks/test 步骤报告条目（镜像 `HttpStepReport` 的线格式） */
         HttpStepReportData: {
             /**
@@ -2607,6 +3357,70 @@ export interface components {
             /** @description 触发方式（"cron"/"startup"） */
             trigger?: string | null;
         };
+        /** @description GET/PUT /api/ai/llm-config 响应载荷（脱敏视图） */
+        LlmConfigData: {
+            /** @description API Base URL */
+            base_url: string;
+            /** @description 已保存过 Key 的服务商列表 */
+            configured_providers: string[];
+            /** @description 是否已设置 API Key（Key 本体永不出站） */
+            has_api_key: boolean;
+            /**
+             * Format: int32
+             * @description 单次生成 max_tokens 上限；null 表示交由服务商默认
+             */
+            max_tokens?: number | null;
+            /** @description 模型名 */
+            model: string;
+            /** @description 服务商标识（glm / deepseek / custom 等，`crate::ai::validate_provider` 口径） */
+            provider: string;
+        };
+        /** @description PUT /api/ai/llm-config 请求体 */
+        LlmConfigUpdateBody: {
+            /** @description API Key 三态：缺省保持不变、空串清除、非空更新（AES-256-GCM 加密落盘） */
+            api_key?: string | null;
+            /** @description API Base URL（必填；做 URL 规范化与 provider 匹配校验） */
+            base_url: string;
+            /**
+             * Format: int32
+             * @description 单次生成 max_tokens 上限（1..=200000）：缺省保持不变、null 恢复服务商默认
+             */
+            max_tokens?: number | null;
+            /** @description 模型名（必填） */
+            model: string;
+            /** @description 服务商标识；缺省时按 base_url 推断 */
+            provider?: string | null;
+        };
+        /** @description POST /api/ai/llm-config/test 响应载荷 */
+        LlmConnectionTestData: {
+            /** @description 链路与凭据是否连通（回复被测试上限截断也算连通，附 note） */
+            connected: boolean;
+            /**
+             * Format: int64
+             * @description 测试耗时（毫秒）
+             */
+            latency_ms: number;
+            /** @description 截断说明（回复被 256 token 测试上限截断时出现） */
+            note?: string | null;
+            /** @description 实际请求的 chat/completions 端点 */
+            request_url: string;
+        };
+        /** @description POST /api/ai/models 请求体 */
+        LlmModelsBody: {
+            /** @description API Key；缺省或空串回退该服务商已保存的 Key */
+            api_key?: string | null;
+            /** @description API Base URL（必填） */
+            base_url: string;
+            /** @description 服务商标识；缺省时按 base_url 推断 */
+            provider?: string | null;
+        };
+        /** @description POST /api/ai/models 响应载荷 */
+        LlmModelsData: {
+            /** @description 模型数量 */
+            count: number;
+            /** @description 模型 ID 列表 */
+            models: string[];
+        };
         /** @description GET /api/config/log-levels 响应载荷 */
         LogLevelData: {
             /** @description 当前落盘的日志级别（TRACE/DEBUG/INFO/WARN/ERROR） */
@@ -2686,6 +3500,200 @@ export interface components {
              */
             worker_spawn_total: number;
         };
+        /** @description 连通性解释（`ConnectivityAssessment` 线格式镜像） */
+        MonitorConnectivityData: {
+            /**
+             * @description 认证入口补充证据：not_checked / reachable / unreachable / invalid / missing /
+             *     skipped_redirect_mode
+             */
+            auth_endpoint: string;
+            /** @description 判断置信度：high / medium / low */
+            confidence: string;
+            /**
+             * @description 主判断原因：not_checked / internet_verified / captive_detected /
+             *     external_failed_auth_reachable / link_up_login_assumed / redirect_login_assumed /
+             *     all_probes_failed / weak_evidence_only / inconclusive_evidence /
+             *     conflicting_evidence / no_probes_enabled
+             */
+            reason: string;
+            /**
+             * @description 自动恢复建议：no_action / attempt_login / attempt_login_once / wait_for_network /
+             *     wait_for_more_evidence / fix_configuration / no_probe_evidence / not_evaluated
+             */
+            recovery_advice: string;
+            /** @description 网络连通性状态：online / captive_portal / offline / unknown */
+            status: string;
+        };
+        /** @description GET /api/monitor/status 响应载荷（`StatusSnapshot` 线格式镜像） */
+        MonitorStatusData: {
+            /** @description 当前活跃 Profile ID */
+            active_profile: string;
+            /** @description 最近一次连通性解释 */
+            connectivity: components["schemas"]["MonitorConnectivityData"];
+            /**
+             * Format: int32
+             * @description 连续失败次数
+             */
+            consecutive_failures: number;
+            /** @description 是否处于冷却期（连续失败后的等待） */
+            cooling_down: boolean;
+            /**
+             * Format: int32
+             * @description 冷却剩余秒数
+             */
+            cooling_down_remaining?: number | null;
+            /** @description 引擎运行状态：running / stopped / dead */
+            engine_state: string;
+            environment_progress?: null | components["schemas"]["EnvProgress"];
+            /** @description 上次网络检测时间（本地时区 ISO 8601） */
+            last_check_time?: string | null;
+            last_probe_evidence?: null | components["schemas"]["ProbeEvidenceData"];
+            /** @description 登录结果消息 */
+            login_message?: string | null;
+            /** @description 登录来源：auto / manual / login_once / browser；无在途登录时为 null */
+            login_source?: string | null;
+            /** @description 登录状态：idle / running / success / failed / cancelled */
+            login_status: string;
+            /**
+             * Format: int64
+             * @description 累计登录尝试次数
+             */
+            login_total: number;
+            /** @description 监测是否启用 */
+            monitor_enabled: boolean;
+            /**
+             * Format: int64
+             * @description 本次监控连续运行时长（秒）；未监控时为 0
+             */
+            monitoring_seconds: number;
+            /** @description 网络状态：online / captive_portal / offline / unknown */
+            network_status: string;
+            /** @description 是否处于暂停时段 */
+            pause_active: boolean;
+            /**
+             * Format: int64
+             * @description 累计网络检测次数
+             */
+            probe_total: number;
+            /**
+             * Format: int32
+             * @description 当前登录重试次数
+             */
+            retry_count: number;
+            /** @description 调度器下次触发时间（ISO 8601 字符串） */
+            scheduler_next_fire_at?: string | null;
+            /** @description 调度器是否运行中 */
+            scheduler_running: boolean;
+            /** @description 调度器管理的任务数量 */
+            scheduler_task_count: number;
+            /**
+             * Format: int64
+             * @description 快照单调版本号（每次 merge +1，前端据此判断状态新旧）
+             */
+            snapshot_version: number;
+            /** @description 是否有新版本 */
+            update_available: boolean;
+            update_progress?: null | components["schemas"]["EnvProgress"];
+            /**
+             * Format: int64
+             * @description 应用运行时长（秒）
+             */
+            uptime_seconds: number;
+            /** @description Python Worker 状态：not_installed / stopped / starting / ready / busy / error */
+            worker_state: string;
+        };
+        /** @description GET /api/network/interfaces 响应条目（`EgressAdapter` 线格式镜像） */
+        NetworkInterfaceData: {
+            /** @description 当前接口配置的 IPv4 DNS */
+            dns_servers: string[];
+            /** @description 稳定标识：Windows 使用接口 GUID，Unix 优先使用 MAC */
+            id: string;
+            /**
+             * Format: int32
+             * @description 当前接口索引
+             */
+            index: number;
+            /** @description 当前 IPv4 地址 */
+            ipv4: string;
+            /** @description 当前接口 MAC，供门户凭据变换使用 */
+            mac: string;
+            /** @description 用户可识别的接口名称 */
+            name: string;
+        };
+        /**
+         * @description POST /api/notification/test 请求体（schema 镜像，handler 按 Value 解析）
+         *
+         *     `channels`（草稿通道配置，优先）与 `channel_id`（已保存通道）二选一，
+         *     两者均缺省时 400。
+         */
+        NotificationTestBody: {
+            /**
+             * @description 已保存通道唯一 id（`channels` 缺省时按 id 从已保存设置查找，不存在为
+             *     404；空串按未提供处理）
+             */
+            channel_id?: string | null;
+            /**
+             * @description 待测试的草稿通道配置数组（1..=3 个；数组项为 serde tagged 对象，`type`
+             *     为判别字段：webhook / bark / serverchan / telegram / os，字段级形状同
+             *     GET /api/config 的 `notification.channels` 数组项——契约快照在
+             *     `crate::config::schema` 且未接入 ToSchema 体系，故以对象数组标注）
+             */
+            channels: Record<string, never>;
+        };
+        /** @description 单通道测试发送回执（不回显任何凭据字段，错误摘要经脱敏） */
+        NotificationTestChannelResult: {
+            /** @description 失败原因摘要（已脱敏：URL 去 query/userinfo 等）；成功时为 null */
+            error?: string | null;
+            /** @description 通道唯一 id（草稿通道取配置内 id，已保存通道为其保存 id） */
+            id: string;
+            /** @description 通道显示名（`name` 留空时回退类型中文名，如「Server酱」） */
+            name: string;
+            /** @description 本通道是否发送成功 */
+            success: boolean;
+            /** @description 通道类型：webhook / bark / serverchan / telegram / os */
+            type: string;
+        };
+        /** @description POST /api/notification/test 响应载荷：逐通道测试回执 */
+        NotificationTestData: {
+            /** @description 逐通道发送结果（顺序与请求通道顺序一致） */
+            results: components["schemas"]["NotificationTestChannelResult"][];
+        };
+        /** @description POST /api/ocr/install 响应载荷 */
+        OcrInstallData: {
+            /** @description 面向用户的提示消息 */
+            message: string;
+        };
+        /**
+         * @description POST /api/ocr/recognize 请求体
+         *
+         *     除声明字段外其余键原样透传 Worker（Worker 当前只消费下列两键与
+         *     服务端注入的 `cancel_id`）。
+         */
+        OcrRecognizeBody: {
+            /** @description 待识别图片的 base64 编码（原图 ≤ ~1.5 MiB 时请求体才不触 15 MiB 上限） */
+            image_base64: string;
+            /** @description 是否使用 ddddocr 旧版识别模式（透传 Worker，缺省 false） */
+            old?: boolean | null;
+        };
+        /** @description POST /api/ocr/recognize 响应载荷 */
+        OcrRecognizeData: {
+            /** @description 识别出的文本 */
+            text: string;
+        };
+        /** @description GET /api/ocr/status 响应载荷 */
+        OcrStatusData: {
+            /** @description Worker 工程是否支持 OCR（按需 add/remove，不等于已安装） */
+            declared: boolean;
+            /** @description OCR 依赖（ddddocr）是否已实际装入 venv（不依赖浏览器就绪） */
+            installed: boolean;
+            /** @description Worker 最近一次健康检查上报的运行时 OCR 能力；Worker 未存活/未上报时为 null */
+            runtime_ocr?: boolean | null;
+            /**
+             * Format: double
+             * @description environment 目录估算体积（MB，四舍五入）
+             */
+            size_mb: number;
+        };
         /**
          * @description 任务排序请求体（对齐前端 `{ all, scripts, http }` 契约）
          *
@@ -2705,6 +3713,26 @@ export interface components {
             http?: string[];
             /** @description 脚本任务 ID 顺序 */
             scripts: string[];
+        };
+        /** @description 各探测方法的详细结果（`ProbeDetails` 线格式镜像） */
+        ProbeDetailsData: {
+            /** @description HTTP 探测结果描述 */
+            http: string[];
+            /** @description TCP 探测结果描述 */
+            tcp: string[];
+            /** @description URL 探测结果描述 */
+            url: string[];
+        };
+        /** @description 原始探测证据（`ProbeEvidence` 线格式镜像） */
+        ProbeEvidenceData: {
+            /** @description HTTP 204 门户探测：同 `tcp` 枚举 */
+            http: string;
+            /** @description 本地链路诊断：not_checked / available / unavailable / probe_failed */
+            local_link: string;
+            /** @description TCP 弱连通探测：pass / captive / inconclusive / fail / disabled */
+            tcp: string;
+            /** @description URL 内容探测：同 `tcp` 枚举 */
+            url: string;
         };
         /** @description POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘） */
         ProfileCreateBody: {
@@ -2907,6 +3935,59 @@ export interface components {
             /** @description 面向用户的提示消息 */
             message: string;
         };
+        /**
+         * @description POST /api/uninstall/purge 的请求体
+         *
+         *     **本端点不处理用户数据目录（加密密钥 `~/.campus_network_auth`）**——那由第一步
+         *     `POST /api/uninstall` 负责；完整卸载须先调 `POST /api/uninstall` 且两步的
+         *     `keep_user_data` 传同一个值。
+         */
+        PurgeRequest: {
+            /**
+             * @description 保留用户数据（`config` / `tasks` / `logs` / `environment` / `update`）
+             *
+             *     默认 `false` = 真卸载。勾选它只为"把便携版换个目录再装一次"的场景服务：
+             *     程序文件照样删掉，但方案/任务/日志留着，重装后直接可用。
+             */
+            keep_user_data?: boolean;
+        };
+        /** @description POST /api/uninstall/purge 响应载荷 */
+        PurgeUninstallData: {
+            /** @description 待应用更新是否已成功取消 */
+            cancelled_pending_update: boolean;
+            /** @description 计划删除的用户数据目录（勾选保留时为空数组） */
+            data_dirs: components["schemas"]["UninstallPurgeDirData"][];
+            /** @description 实际删除的程序目录 */
+            install_dir: string;
+            /** @description 是否勾选了保留用户数据 */
+            kept_user_data: boolean;
+            /** @description 汇总提示（按需追加「待应用更新未能取消」与「加密密钥尚未清理」警示） */
+            message: string;
+            /** @description 取消失败时为 true（退出后更新助手仍可能把程序装回来） */
+            pending_update_left: boolean;
+        };
+        /** @description `POST /api/monitor/test-redirect` 请求体。 */
+        RedirectTestRequest: {
+            /**
+             * @description 方案编辑器尚未保存的出口配置（`NetworkSettings`，形状见
+             *     `crate::network::settings`，契约快照独立于 ToSchema 体系故以泛型对象标注）。
+             */
+            network: Record<string, never>;
+            /** @description 用户尚未保存的自定义触发地址；空值使用内置默认地址。 */
+            trigger_url?: string;
+        };
+        /** @description POST /api/monitor/test-redirect 响应载荷（`RedirectTestResult` 线格式镜像） */
+        RedirectTestResultData: {
+            /** @description 前端直接展示的用户提示 */
+            message: string;
+            /** @description 机器可读结论 */
+            status: components["schemas"]["RedirectTestStatus"];
+        };
+        /**
+         * @description 重定向检测结论。
+         * @enum {string}
+         */
+        RedirectTestStatus: "detected" | "online" | "not_detected";
         /**
          * Format: binary
          * @description GET /api/repo/image 200 响应体 schema 载体
@@ -3150,10 +4231,149 @@ export interface components {
             /** @description 任务地址：浏览器任务=登录页地址，直连任务=请求地址，脚本任务为空串 */
             url: string;
         };
+        /** @description POST /api/monitor/test 响应载荷（`TestNetworkResult` 线格式镜像） */
+        TestNetworkResultData: {
+            /** @description 认证入口状态（取值同连通性解释的 `auth_endpoint` 枚举） */
+            auth_endpoint: string;
+            /** @description 判断置信度：high / medium / low */
+            confidence: string;
+            /** @description 各探测方法的详细结果 */
+            details: components["schemas"]["ProbeDetailsData"];
+            /**
+             * Format: int64
+             * @description 探测耗时（毫秒）
+             */
+            duration_ms: number;
+            /** @description 本地链路诊断：not_checked / available / unavailable / probe_failed */
+            local_link: string;
+            /** @description 主判断原因（取值同连通性解释的 `reason` 枚举） */
+            reason: string;
+            /** @description 探测结论：online / captive_portal / offline / unknown */
+            status: string;
+        };
+        /** @description POST /api/uninstall 响应载荷 */
+        UninstallCleanupData: {
+            /** @description 汇总提示（全部成功 / 部分失败） */
+            message: string;
+            /** @description 三步执行结果（互不阻断，逐项返回） */
+            results: components["schemas"]["UninstallStepData"][];
+        };
+        /** @description base_path 下的用户数据目录条目 */
+        UninstallDataDirData: {
+            /** @description 是否存在（不存在的目录如实标注） */
+            exists: boolean;
+            /** @description 目录标识（`crate::uninstall::DATA_DIR_NAMES` 七项之一） */
+            key: string;
+            /** @description 展示名称 */
+            label: string;
+            /** @description 完整路径 */
+            path: string;
+        };
+        /** @description GET /api/uninstall/detect 响应载荷 */
+        UninstallDetectData: {
+            /** @description 非 null 表示拒绝卸载及原因（源码仓库 / cargo 构建输出等守卫） */
+            blocked?: string | null;
+            /** @description base_path 下的用户数据目录（勾选「保留配置与任务」则保留） */
+            data: components["schemas"]["UninstallDataDirData"][];
+            /** @description 卸载助手是否在位（不在位时 purge 必失败，界面据此先拦下） */
+            helper: components["schemas"]["UninstallEntryData"];
+            /** @description base_path 之外的系统残留清单（用户数据目录 / Playwright 缓存 / 自启动） */
+            items: components["schemas"]["UninstallDetectItem"][];
+            /** @description 「保留数据」变体的拒绝原因；`blocked` 非 null 时恒为 null */
+            keep_data_blocked?: string | null;
+            /** @description 程序目录（保留数据时只移除程序文件） */
+            program: components["schemas"]["UninstallEntryData"];
+        };
+        /** @description GET /api/uninstall/detect 的单项系统残留 */
+        UninstallDetectItem: {
+            /** @description 补充说明（路径或状态描述） */
+            description: string;
+            /** @description 是否存在（自启动项为是否已注册） */
+            exists: boolean;
+            /** @description 项标识：user_data / playwright / autostart */
+            key: string;
+            /** @description 展示名称 */
+            label: string;
+        };
+        /** @description 程序目录 / 卸载助手条目 */
+        UninstallEntryData: {
+            /** @description 是否存在 */
+            exists: boolean;
+            /** @description 展示名称（"程序目录" / "卸载助手"） */
+            label: string;
+            /** @description 完整路径 */
+            path: string;
+        };
+        /** @description POST /api/uninstall/purge 计划删除的用户数据目录条目 */
+        UninstallPurgeDirData: {
+            /** @description 目录标识（`crate::uninstall::DATA_DIR_NAMES` 之一） */
+            key: string;
+            /** @description 展示名称 */
+            label: string;
+            /** @description 完整路径 */
+            path: string;
+        };
+        /** @description POST /api/uninstall 单步结果 */
+        UninstallStepData: {
+            /** @description 步骤标识：autostart / user_data / playwright */
+            key: string;
+            /** @description 展示名称 */
+            label: string;
+            /** @description 结果说明 */
+            message: string;
+            /** @description 该步是否成功 */
+            success: boolean;
+        };
         /** @description POST /api/worker/stop 响应载荷 */
         WorkerStopData: {
             /** @description 是否已触发停止 */
             stopped: boolean;
+        };
+        /**
+         * @description WS 日志推送载荷（[`crate::logging::LogEntry`] 线格式镜像）
+         *
+         *     `LogEntry` 是 tracing 管线核心类型，未接入 ToSchema 体系；契约快照按批口径
+         *     在消费面（[`WsMessage`]）定义镜像。字段与源类型一一对应，漂移由
+         *     `ws_log_entry_data_mirror_matches_wire_format` 测试钉住。
+         */
+        WsLogEntryData: {
+            /** @description 日志级别（INFO/WARN/ERROR…） */
+            level: string;
+            /** @description 日志消息 */
+            message: string;
+            /**
+             * Format: int64
+             * @description 全局单调递增序号（进程生命周期内唯一，前端列表稳定 key 与实时去重依据）
+             */
+            seq: number;
+            /** @description 日志来源（归一化后的短模块名：app/auth/task/worker/frontend 等） */
+            source: string;
+            /** @description ISO8601 时间戳 */
+            timestamp: string;
+        };
+        /**
+         * @description WebSocket 消息信封：所有推送消息均包装为 `{ "type": "...", "data": ... }`
+         *
+         *     注：调试截图 / 步骤进度等 Bridge 事件由 Worker 以原始 JSON 形式经 `ws_tx`
+         *     通道推送，不直接经由此枚举构造（契约上不属于本信封变体，为动态 JSON）。
+         *
+         *     契约注册（T5-4）：`LogEntry` / `StatusSnapshot` 为既有 Serialize 类型，未接入
+         *     ToSchema 体系；契约侧经 `value_type` 指向线格式镜像（[`WsLogEntryData`] 与
+         *     monitor 域 `MonitorStatusData`），运行时载荷类型不变。
+         */
+        WsMessage: {
+            /** @description 日志条目 */
+            data: components["schemas"]["WsLogEntryData"];
+            /** @enum {string} */
+            type: "log";
+        } | {
+            /** @description 状态快照 */
+            data: components["schemas"]["MonitorStatusData"];
+            /** @enum {string} */
+            type: "status";
+        } | {
+            /** @enum {string} */
+            type: "pong";
         };
     };
     responses: never;
@@ -3193,7 +4413,7 @@ export interface operations {
             };
         };
     };
-    post___api_ai_capture: {
+    post_api_ai_capture: {
         parameters: {
             query?: never;
             header?: never;
@@ -3202,61 +4422,58 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    /** @description 登录页地址（http/https） */
-                    url: string;
-                };
+                "application/json": components["schemas"]["CaptureBody"];
             };
         };
         responses: {
-            /** @description OK */
+            /** @description 捕获完成：Worker 捕获元数据（形状由 Worker page_capture 定义）+ screenshot_url（固定 /api/ai/capture/screenshot） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_Value"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 缺少 url 或协议非 http/https */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Worker Busy（调试会话互斥） */
+            /** @description 页面捕获或任务生成正在进行（单飞登记）或 Worker 忙 */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 捕获失败（透传 Worker 错误） */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Service Unavailable（Python 环境未就绪） */
+            /** @description Python 环境未就绪或 Worker 不可用（未安装/启动超时/网络出口受限） */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    get___api_ai_capture_bundle: {
+    get_api_ai_capture_bundle: {
         parameters: {
             query?: never;
             header?: never;
@@ -3265,140 +4482,36 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description zip（MHTML + 原始 HTML + 结构化页面摘要 + resources + 截图 + meta） */
+            /** @description 最近一次捕获的完整页面文件 zip（MHTML / page.html / 离线副本 / 结构 JSON / CSS-JS 资源 / 截图 / meta.json；超 50 MiB 预算的文件跳过并附 _skipped_by_quota.txt 清单） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/zip": string;
+                    "application/zip": components["schemas"]["CaptureBundleBody"];
                 };
             };
-            /** @description 尚无捕获产物 */
+            /** @description 尚无捕获产物，请先执行页面捕获 */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-        };
-    };
-    get___api_ai_capture_screenshot: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description PNG 截图 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "image/png": string;
-                };
-            };
-            /** @description 尚无捕获截图 */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get___api_ai_capture_status: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 捕获状态与 meta 回显字段 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** @description meta.json、page.html 与 screenshot.png 是否齐备 */
-                        available?: boolean;
-                        /** @description 捕获结束 URL（不可用时缺省） */
-                        final_url?: string;
-                        /** @description 捕获请求 URL（不可用时缺省） */
-                        request_url?: string;
-                        /** @description frame、表单、控件和验证码候选数量 */
-                        structure_summary?: Record<string, never>;
-                        /** @description 页面标题（不可用时缺省） */
-                        title?: string;
-                    };
-                };
-            };
-        };
-    };
-    post___api_ai_generate_stream: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": {
-                    extra_prompt?: string;
-                };
-            };
-        };
-        responses: {
-            /** @description SSE stream（事件帧 schema 见 description；每帧 JSON 带 type 标签） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "text/event-stream": string;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description 已有生成任务进行中 */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 压缩包写入失败 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    get___api_ai_llm_config: {
+    get_api_ai_capture_screenshot: {
         parameters: {
             query?: never;
             header?: never;
@@ -3407,18 +4520,56 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 最近一次捕获的截图 PNG 原始字节（非 JSON 信封） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "image/png": components["schemas"]["CaptureScreenshotBody"];
+                };
+            };
+            /** @description 尚无捕获截图，请先执行捕获 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 截图文件读取失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    put___api_ai_llm_config: {
+    get_api_ai_capture_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 最近一次捕获产物可用性与元信息（不可用时仅 available=false） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_CaptureStatusData"];
+                };
+            };
+        };
+    };
+    post_api_ai_generate_stream: {
         parameters: {
             query?: never;
             header?: never;
@@ -3427,54 +4578,49 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": {
-                    /** @description 缺省=保持不变；空串=清除；非空=更新（AES-GCM 加密落盘，响应永不回显） */
-                    api_key?: string;
-                    /** @description OpenAI 兼容 API 根地址；不允许 query、fragment 或 userinfo */
-                    base_url: string;
-                    /** @description 最长输出 token；默认 16384，null 表示交由服务商决定 */
-                    max_tokens?: number | null;
-                    /** @description 视觉模型名 */
-                    model: string;
-                    /**
-                     * @description 服务商标识；API Key 按服务商独立保存
-                     * @enum {string}
-                     */
-                    provider?: "glm" | "deepseek" | "custom";
-                };
+                "application/json": components["schemas"]["GenerateStreamBody"];
             };
         };
         responses: {
-            /** @description OK */
+            /** @description SSE 流（text/event-stream）：`data: <json>` 帧推送 LLM 增量与校验/重试状态，全流程总预算 10 分钟，`: keepalive` 注释帧保活；同一时刻至多一个生成任务，客户端断连将取消后端 LLM 调用；帧 type 枚举 started/attempt_start/delta/attempt_delta_done/validation_failed/retrying/validated/done/error 的字段级契约由 T5-4 钉死 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "text/event-stream": components["schemas"]["GenerateStreamFrame"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 未配置 LLM / API Key 解密失败 / 尚无捕获产物或截图缺失 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 页面捕获或任务生成正在进行（单飞登记） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 捕获元数据损坏或 HTML 读取失败 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_ai_llm_config_test: {
+    get_api_ai_llm_config: {
         parameters: {
             query?: never;
             header?: never;
@@ -3483,36 +4629,60 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 连接成功，返回实际请求地址与耗时 */
+            /** @description 脱敏后的 LLM 配置（API Key 永不出站，仅 has_api_key 布尔位） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_LlmConfigData"];
                 };
             };
-            /** @description 配置缺失或 Key 无法解密 */
+        };
+    };
+    put_api_ai_llm_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LlmConfigUpdateBody"];
+            };
+        };
+        responses: {
+            /** @description 已保存，返回脱敏视图 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_LlmConfigData"];
+                };
+            };
+            /** @description 请求体非对象 / 缺 base_url / 模型名为空 / URL 非法（userinfo、非 http(s)）/ 服务商与地址不匹配 / max_tokens 越界 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description 连接、鉴权或模型请求失败 */
-            503: {
+            /** @description API Key 加密或配置落盘失败 */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_ai_models: {
+    post_api_ai_llm_config_test: {
         parameters: {
             query?: never;
             header?: never;
@@ -3521,31 +4691,73 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 返回 { count, models[] }，顺序与服务端一致 */
+            /** @description 链路与凭据连通（回复被 256 token 测试上限截断也判连通并附 note） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_LlmConnectionTestData"];
                 };
             };
-            /** @description base_url 缺失或非法、服务商与地址不匹配、Key 无法解密、远端非 2xx 或响应中无模型 id */
+            /** @description 未保存 LLM 配置或 API Key 解密失败 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description 连接失败、超时或远端 5xx */
+            /** @description 连接测试超时（30 秒）、传输/协议错误或远端返回错误状态（含 4xx/5xx） */
             503: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    post_api_ai_models: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LlmModelsBody"];
+            };
+        };
+        responses: {
+            /** @description 当前服务商可用模型 ID 列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_LlmModelsData"];
+                };
+            };
+            /** @description 请求体非对象 / 缺 base_url / URL 或服务商校验失败 / Key 解密失败 / 远端返回 4xx（原文透传） */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 模型列表请求超时、建连失败或远端返回 5xx */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -3592,91 +4804,7 @@ export interface operations {
             };
         };
     };
-    post___api_autostart_disable: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    post___api_autostart_enable: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get___api_autostart_status: {
+    post_api_autostart_disable: {
         parameters: {
             query?: never;
             header?: never;
@@ -3685,120 +4813,36 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 已取消并通过系统状态复核（Windows/macOS 配置缓存保存失败时附 warning，仍为 200） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_AutostartToggleData"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 配置落盘校验失败（非 Windows/macOS；系统注册已回滚） */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 取消系统注册失败（配置未改动）或注册任务异常 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    "post___api_background_fetch-url": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    post___api_background_upload: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get___api_background_filename: {
+    post_api_autostart_enable: {
         parameters: {
             query?: never;
             header?: never;
@@ -3807,36 +4851,36 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 已启用并通过系统状态复核（Windows/macOS 配置缓存保存失败时附 warning，仍为 200） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_AutostartToggleData"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 配置落盘校验失败（非 Windows/macOS；系统注册已回滚） */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 系统注册失败（配置未改动）或注册任务异常 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    delete___api_background_filename: {
+    get_api_autostart_status: {
         parameters: {
             query?: never;
             header?: never;
@@ -3845,31 +4889,213 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 自启动状态（Windows/macOS 的 enabled 以系统观测为准，配置位仅为 cached_enabled） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_Value"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 系统自启动状态读取失败（Windows/macOS 观测路径） */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    post_api_background_fetch_url: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackgroundFetchBody"];
+            };
+        };
+        responses: {
+            /** @description 图片已落盘并返回可访问 URL */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_BackgroundUploadData"];
+                };
+            };
+            /** @description URL 非法 / 非 HTTPS、SSRF 防护拒绝、返回非图片 Content-Type、超过 10 MiB、SVG 或声明类型与实际内容不一致 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 图片字节读取或落盘失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    post_api_background_upload: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 字段名 file：图片文件（PNG/JPEG/GIF/WebP/BMP/ICO，≤10 MiB，拒绝 SVG，声明类型须与 magic bytes 一致） */
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["BackgroundUploadFile"];
+            };
+        };
+        responses: {
+            /** @description 已落盘并返回可访问 URL */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_BackgroundUploadData"];
+                };
+            };
+            /** @description multipart 解析失败、缺 file 字段、文件为空、超过 10 MiB、SVG、格式无法识别或声明类型与实际内容不一致 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 文件落盘失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_api_background_filename: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 背景图文件名（拒绝路径穿越） */
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 背景图原始字节（MIME 按存储扩展名下发，非 JSON 信封） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": components["schemas"]["BackgroundImageBody"];
+                    "image/bmp": components["schemas"]["BackgroundImageBody"];
+                    "image/gif": components["schemas"]["BackgroundImageBody"];
+                    "image/jpeg": components["schemas"]["BackgroundImageBody"];
+                    "image/png": components["schemas"]["BackgroundImageBody"];
+                    "image/webp": components["schemas"]["BackgroundImageBody"];
+                    "image/x-icon": components["schemas"]["BackgroundImageBody"];
+                };
+            };
+            /** @description 文件名非法或 SVG 背景图 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 背景图不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 文件读取失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_api_background_filename: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 背景图文件名（拒绝路径穿越） */
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已删除（data 为 "ok"） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_String"];
+                };
+            };
+            /** @description 文件名非法 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 背景图不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 文件删除失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -4125,173 +5351,195 @@ export interface operations {
             };
         };
     };
-    "post___api_debug_feedback-bundle": {
+    post_api_debug_feedback_bundle: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 问题报告 zip（日志尾段 + 活动任务 JSON + 脱敏配置摘要 + 调试页面快照，随附 Content-Disposition 文件名） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/zip": string;
+                    "application/zip": components["schemas"]["FeedbackBundleBody"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 压缩包写入失败 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    "post___api_debug_run-all": {
+    post_api_debug_run_all: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 剩余步骤执行结果（形状由 Worker debug_run_all 定义） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_Value"];
                 };
             };
-            /** @description Bad Request */
-            400: {
+            /** @description Worker 忙（其他会话占用） */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 其他 Bridge/Worker 内部错误 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Worker 不可用（未安装/启动超时/网络出口受限） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    get___api_debug_screenshot__filename_: {
+    get_api_debug_screenshot_filename: {
         parameters: {
             query?: never;
             header?: never;
             path: {
+                /** @description 调试截图文件名（拒绝路径穿越与符号链接） */
                 filename: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 截图原始字节（按真实 magic bytes 以 PNG/JPEG 下发，非 JSON 信封） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "image/png": string;
+                    "image/jpeg": components["schemas"]["DebugScreenshotBody"];
+                    "image/png": components["schemas"]["DebugScreenshotBody"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 文件名非法、超出大小上限、符号链接或不是有效 PNG/JPEG */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Not Found */
+            /** @description 截图不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 文件读取失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_debug_start: {
+    post_api_debug_start: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
+        /** @description Worker 调试启动参数（自由形状对象，至少含 task_id 或 task_config）；缺省的 username/password/isp/auth_url/trigger_url（明文字符串）与 browser_settings 由服务端按活跃方案注入 */
+        requestBody: {
             content: {
                 "application/json": unknown;
             };
         };
         responses: {
-            /** @description OK */
+            /** @description 调试会话已启动（data 为 Worker 会话状态，形状由 Worker debug_start 定义） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_Value"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 请求体不是 JSON 对象 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 已联网且未配置登录网址的预检拦截，或 Worker 忙（其他会话占用） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 其他 Bridge/Worker 内部错误 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Python 环境未就绪、出口网络准备失败或 Worker 不可用（未安装/启动超时/网络出口受限） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    get___api_debug_status: {
+    get_api_debug_status: {
         parameters: {
             query?: never;
             header?: never;
@@ -4300,111 +5548,70 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 会话感知快照（active=false 时不查询 Worker；active=true 时附 Worker 会话详情，查询失败 session 为 null） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_DebugStatusData"];
                 };
             };
         };
     };
-    post___api_debug_step: {
+    post_api_debug_step: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
+        /** @description Worker 调试单步参数（可携带 step 完整配置或 step_index）；null/空体等价空对象，由 Worker 按会话内游标自动执行下一步 */
+        requestBody: {
             content: {
                 "application/json": unknown;
             };
         };
         responses: {
-            /** @description OK */
+            /** @description 单步执行结果（形状由 Worker debug_step 定义） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_Value"];
                 };
             };
-            /** @description Bad Request */
-            400: {
+            /** @description Worker 忙（其他会话占用） */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 其他 Bridge/Worker 内部错误 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Worker 不可用（未安装/启动超时/网络出口受限） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_debug_stop: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get___api_diagnostics_bundle: {
+    post_api_debug_stop: {
         parameters: {
             query?: never;
             header?: never;
@@ -4413,55 +5620,98 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 调试会话已停止（data 为 Worker 确认负载，常为 null） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/zip": string;
+                    "application/json": components["schemas"]["DataEnvelope_Value"];
                 };
             };
-            /** @description Internal Error */
+            /** @description Worker 忙（其他会话占用） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 其他 Bridge/Worker 内部错误 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Worker 不可用（未安装/启动超时/网络出口受限） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_diagnostics_run: {
+    get_api_diagnostics_bundle: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 诊断包 zip 附件（Content-Disposition 指定下载文件名 campus-auth-diagnostics-<时间戳>.zip） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/zip": components["schemas"]["DiagnosticsBundleBody"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 诊断包收集失败（阻塞任务异常或打包错误） */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    post_api_diagnostics_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 诊断报告（单项 fail/warn 以结构化 details 返回，不改变 HTTP 状态码） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_DiagnosticReportData"];
+                };
+            };
+            /** @description 报告序列化失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -4622,6 +5872,35 @@ export interface operations {
             };
         };
     };
+    get___api_events: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 近 N 天事件流（时间升序；缺失文件与损坏行跳过） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description days 参数非法 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     get_api_health: {
         parameters: {
             query?: never;
@@ -4642,45 +5921,43 @@ export interface operations {
             };
         };
     };
-    get___api_history: {
+    get_api_history: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description 返回最近 N 条记录（None 表示不限制） */
+                limit?: number | null;
+                /** @description 页码（从 1 开始），与 page_size 同时存在时启用分页响应格式 */
+                page?: number | null;
+                /** @description 每页条数（默认 50），仅 page 存在时生效 */
+                page_size?: number | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 最近 30 天登录历史（两种形态见 data schema 的 oneOf；分页从最新一页开始） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_HistoryResponseData"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 历史文件读取失败 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    delete___api_history: {
+    delete_api_history: {
         parameters: {
             query?: never;
             header?: never;
@@ -4689,31 +5966,22 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 已清空全部登录历史（不可恢复，data 为 "ok"） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_String"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 历史文件清理失败 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -5006,49 +6274,7 @@ export interface operations {
             };
         };
     };
-    post___api_monitor_start: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get___api_monitor_status: {
+    post_api_monitor_start: {
         parameters: {
             query?: never;
             header?: never;
@@ -5057,162 +6283,141 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 检测已启动 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_String"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 其他引擎内部错误 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_monitor_stop: {
+    get_api_monitor_status: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 全局状态快照（引擎/网络/登录/调度/Worker/环境进度） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_MonitorStatusData"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 快照序列化失败 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_monitor_test: {
+    post_api_monitor_stop: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 检测已停止 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_String"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 其他引擎内部错误 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    "post___api_monitor_test-redirect": {
+    post_api_monitor_test: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 一轮手动网络探测结果（结论 + 置信度 + 分项探测描述） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_TestNetworkResultData"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 探测执行失败（ProbeError / 网络测试超时） */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口，稍后重试） */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_notification_test: {
+    post_api_monitor_test_redirect: {
         parameters: {
             query?: never;
             header?: never;
@@ -5221,133 +6426,58 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": unknown;
+                "application/json": components["schemas"]["RedirectTestRequest"];
             };
         };
         responses: {
-            /** @description OK */
+            /** @description 重定向检测结论（不含最终 URL，防门户临时 token 外泄） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_RedirectTestResultData"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 触发地址过长 / 格式无效 / 非 http(s) / 内嵌用户名或密码 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Not Found */
-            404: {
+            /** @description Worker 忙（调试会话或浏览器任务占用） */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 浏览器返回未知结果或内部错误 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 出口网络准备失败、Python 环境未就绪、Worker 不可用（未安装/启动超时/网络出口受限）或浏览器检测失败 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_ocr_install: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    post___api_ocr_recognize: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: {
-            content: {
-                "application/json": unknown;
-            };
-        };
-        responses: {
-            /** @description OK */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    get___api_ocr_status: {
+    get_api_network_interfaces: {
         parameters: {
             query?: never;
             header?: never;
@@ -5356,82 +6486,210 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 可用于校园网出口的 IPv4 物理网卡清单 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_Vec_NetworkInterfaceData"];
                 };
             };
-            /** @description Bad Request */
-            400: {
+            /** @description 网卡枚举失败或超时 */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_ocr_uninstall: {
+    post_api_notification_test: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: {
+        /** @description 草稿通道配置数组（channels，优先）或已保存通道 id（channel_id）二选一 */
+        requestBody: {
             content: {
-                "application/json": unknown;
+                "application/json": components["schemas"]["NotificationTestBody"];
             };
         };
         responses: {
-            /** @description OK */
+            /** @description 逐通道测试回执（success=false 的通道 error 携带脱敏摘要） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_NotificationTestData"];
                 };
             };
-            /** @description Bad Request */
+            /** @description 请求体不是对象 / 缺少二选一字段 / channels 为空或超过 3 个 / 通道结构非法（如 URL 非 http/https） */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description 有任务正在执行，请稍后再试 */
+            /** @description channel_id 指定的已保存通道不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    post_api_ocr_install: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 安装已在后台启动（失败不抛 HTTP 错误，可通过再次点击重试） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_OcrInstallData"];
+                };
+            };
+        };
+    };
+    post_api_ocr_recognize: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OcrRecognizeBody"];
+            };
+        };
+        responses: {
+            /** @description 识别文本 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_OcrRecognizeData"];
+                };
+            };
+            /** @description OCR 正在卸载、并发识别已达上限或 Worker 忙（调试会话占用） */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 请求体超过 15 MiB（IPC 单行安全上限；axum 请求体上限拒绝，响应为纯文本非统一信封） */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 识别失败（模型加载/图片解码/推理失败或超时，消息透传 Worker） */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Worker 未安装、启动超时或网络出口受限 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_api_ocr_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OCR 依赖安装状态与 environment 目录体积 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_OcrStatusData"];
+                };
+            };
+        };
+    };
+    post_api_ocr_uninstall: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OCR 依赖已卸载 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_String"];
+                };
+            };
+            /** @description 当前平台不支持依赖移除 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 有任务正在执行（定时浏览器任务 / 登录 / 调试在途） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description uv remove 依赖移除失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -7338,7 +8596,7 @@ export interface operations {
             };
         };
     };
-    "get___api_tools_task-recorder_user_js": {
+    get_api_tools_task_recorder_user_js: {
         parameters: {
             query?: never;
             header?: never;
@@ -7347,36 +8605,27 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description Tampermonkey 任务录制用户脚本原文 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/javascript": string;
                 };
             };
-            /** @description Bad Request */
-            400: {
+            /** @description 脚本文件缺失，可能需要重新安装或更新软件 */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_uninstall: {
+    post_api_uninstall: {
         parameters: {
             query?: never;
             header?: never;
@@ -7385,40 +8634,31 @@ export interface operations {
         };
         requestBody?: {
             content: {
-                "application/json": unknown;
+                "application/json": null | components["schemas"]["CleanupRequest"];
             };
         };
         responses: {
-            /** @description OK */
+            /** @description 三步清理结果（关闭自启动 → 用户数据目录 → Playwright 缓存，互不阻断；部分失败仍为 200，见各步 success） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_UninstallCleanupData"];
                 };
             };
-            /** @description Bad Request */
+            /** @description OpenWrt 版不支持本端点 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    get___api_uninstall_detect: {
+    get_api_uninstall_detect: {
         parameters: {
             query?: never;
             header?: never;
@@ -7427,36 +8667,27 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 卸载将清理的全部内容清单（不执行任何删除） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_UninstallDetectData"];
                 };
             };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Internal Error */
+            /** @description 无法确定程序所在目录 */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
     };
-    post___api_uninstall_purge: {
+    post_api_uninstall_purge: {
         parameters: {
             query?: never;
             header?: never;
@@ -7465,35 +8696,35 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": unknown;
+                "application/json": components["schemas"]["PurgeRequest"];
             };
         };
         responses: {
-            /** @description OK */
+            /** @description 卸载助手已启动，本进程即将退出以放行删除 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_PurgeUninstallData"];
                 };
             };
-            /** @description Bad Request */
+            /** @description OpenWrt 版不支持、目录守卫拒绝（源码仓库 / cargo 构建输出）或卸载助手缺失 */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Internal Error */
+            /** @description 卸载助手启动失败（程序文件未被删除，更新入口已恢复） */
             500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

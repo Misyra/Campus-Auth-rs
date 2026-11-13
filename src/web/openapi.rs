@@ -390,6 +390,13 @@ pub mod schemas {
         crate::web::routes::diagnostics::DiagnosticReportData,
         crate::web::routes::diagnostics::DiagnosticCheckData,
         crate::web::routes::diagnostics::DiagnosticsBundleBody,
+        // ---- ws 域（T5-4；/ws/logs 推送信封。WebSocket 升级端点无 #[utoipa::path]
+        //      注解，路径条目维持手写 baseline；本节仅注册推送消息契约。
+        //      log/status 载荷为既有 Serialize 类型的线格式镜像——status 复用
+        //      monitor 域 MonitorStatusData，log 镜像定义在 ws.rs 并有漂移守卫测试；
+        //      Bridge 事件（screenshot/step_progress 等）为动态 JSON，不经信封）----
+        crate::web::ws::WsMessage,
+        crate::web::ws::WsLogEntryData,
     )),
 )]
 pub struct ApiDoc;

@@ -5294,6 +5294,101 @@
      "stopped"
     ],
     "type": "object"
+   },
+   "WsLogEntryData": {
+    "description": "WS 日志推送载荷（[`crate::logging::LogEntry`] 线格式镜像）\n\n`LogEntry` 是 tracing 管线核心类型，未接入 ToSchema 体系；契约快照按批口径\n在消费面（[`WsMessage`]）定义镜像。字段与源类型一一对应，漂移由\n`ws_log_entry_data_mirror_matches_wire_format` 测试钉住。",
+    "properties": {
+     "level": {
+      "description": "日志级别（INFO/WARN/ERROR…）",
+      "type": "string"
+     },
+     "message": {
+      "description": "日志消息",
+      "type": "string"
+     },
+     "seq": {
+      "description": "全局单调递增序号（进程生命周期内唯一，前端列表稳定 key 与实时去重依据）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "source": {
+      "description": "日志来源（归一化后的短模块名：app/auth/task/worker/frontend 等）",
+      "type": "string"
+     },
+     "timestamp": {
+      "description": "ISO8601 时间戳",
+      "type": "string"
+     }
+    },
+    "required": [
+     "seq",
+     "level",
+     "message",
+     "timestamp",
+     "source"
+    ],
+    "type": "object"
+   },
+   "WsMessage": {
+    "description": "WebSocket 消息信封：所有推送消息均包装为 `{ \"type\": \"...\", \"data\": ... }`\n\n注：调试截图 / 步骤进度等 Bridge 事件由 Worker 以原始 JSON 形式经 `ws_tx`\n通道推送，不直接经由此枚举构造（契约上不属于本信封变体，为动态 JSON）。\n\n契约注册（T5-4）：`LogEntry` / `StatusSnapshot` 为既有 Serialize 类型，未接入\nToSchema 体系；契约侧经 `value_type` 指向线格式镜像（[`WsLogEntryData`] 与\nmonitor 域 `MonitorStatusData`），运行时载荷类型不变。",
+    "oneOf": [
+     {
+      "description": "日志条目",
+      "properties": {
+       "data": {
+        "$ref": "#/components/schemas/WsLogEntryData",
+        "description": "日志条目"
+       },
+       "type": {
+        "enum": [
+         "log"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "data",
+       "type"
+      ],
+      "type": "object"
+     },
+     {
+      "description": "状态快照",
+      "properties": {
+       "data": {
+        "$ref": "#/components/schemas/MonitorStatusData",
+        "description": "状态快照"
+       },
+       "type": {
+        "enum": [
+         "status"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "data",
+       "type"
+      ],
+      "type": "object"
+     },
+     {
+      "description": "心跳响应（对客户端 `{\"type\":\"ping\"}` 的回复，无 data 字段）",
+      "properties": {
+       "type": {
+        "enum": [
+         "pong"
+        ],
+        "type": "string"
+       }
+      },
+      "required": [
+       "type"
+      ],
+      "type": "object"
+     }
+    ]
    }
   }
  },
