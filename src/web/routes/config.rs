@@ -103,6 +103,10 @@ pub async fn get_settings(
 /// 扁平 key → global 子结构 / 活跃 Profile 的映射由
 /// [`apply_flat_settings_patch`] 统一实现（与 PUT 共用）
 ///
+/// 过渡期说明：单段更新推荐改用 [`patch_settings_section`]（PATCH /api/config/{section}），
+/// 语义与把该段包成单键全量 PATCH 完全一致；本端点在过渡期原样保留，现有客户端
+/// （引导向导 / 运行模式预设 / 登录渠道绑定切换）不受影响。
+///
 /// 契约注解：请求体为宽松 `Value`（未知键交由 schema 丢弃、历史字段
 /// `carrier_custom` 显式忽略），响应与 GET 同形，均待强类型化批次收敛。
 #[utoipa::path(
@@ -123,6 +127,98 @@ pub async fn patch_settings(
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(patch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await?;
+    reload_and_flat_response(&config).await
+}
+
+/// PATCH /api/config/{section} 的合法段名集合（T5-3）
+///
+/// 即 [`split_patch_keys`] 识别的扁平键全集（["按实际键集"]口径）：
+/// - 全局设置段：browser / monitor / pause / logging / retry / app_settings /
+///   worker / updater / notification（连同后端别名 retry_settings / app，
+///   二者分别映射到 retry_settings / app 段，与全量 PATCH 同口径）；
+/// - 凭证域段（写入活跃 Profile）：network / username / password / auth_url /
+///   trigger_url / isp / active_task / login_channel / active_http_task /
+///   active_script_task；
+/// - active_profile_id（settings 顶层键）。
+///
+/// 历史字段 carrier_custom 不在列：后端已无对应存储，全量 PATCH 亦显式忽略。
+///
+/// dead_code 豁免：本端点暂不挂路由表（openapi 契约测试要求路径先行进入
+/// openapi.json），由集成批统一注册后连同本豁免一并移除。
+#[allow(dead_code)]
+const CONFIG_PATCH_SECTIONS: [&str; 22] = [
+    "browser",
+    "monitor",
+    "pause",
+    "logging",
+    "retry",
+    "app_settings",
+    "retry_settings",
+    "app",
+    "worker",
+    "updater",
+    "notification",
+    "network",
+    "username",
+    "password",
+    "auth_url",
+    "trigger_url",
+    "isp",
+    "active_task",
+    "login_channel",
+    "active_http_task",
+    "active_script_task",
+    "active_profile_id",
+];
+
+/// PATCH /api/config/{section} — 单设置段局部更新（T5-3）
+///
+/// 请求体即该段的局部对象（如 `PATCH /api/config/monitor` 的 body 为 monitor
+/// 段自己的 JSON），实现上把 body 包装成 `{"<section>": body}` 后走
+/// [`apply_flat_settings_patch`] 全链——原子性（拒绝即整体不落盘）、字段校验
+/// 与合并语义全部继承自既有全量 PATCH，本端点不重写任何合并逻辑。
+///
+/// 未知 section 返回 404；响应与全量 PATCH 同形（重载后回读的完整扁平设置
+/// 快照，与 GET /api/config 字节一致），保证客户端可以像全量 PATCH 一样用
+/// 响应整体刷新本地状态。
+///
+/// 契约注解：请求体为宽松 `Value`（形状随段而异，与全量 PATCH 同口径），
+/// 响应同 [`patch_settings`]，均待强类型化批次收敛。
+///
+/// dead_code 豁免：同 [`CONFIG_PATCH_SECTIONS`]——集成批注册路由表后移除。
+#[allow(dead_code)]
+#[utoipa::path(
+    patch,
+    path = "/api/config/{section}",
+    operation_id = "patch_api_config_section",
+    tag = "config",
+    params(
+        ("section" = String, Path, description = "设置段名：全局段 browser/monitor/pause/logging/retry/app_settings/worker/updater/notification（含别名 retry_settings/app）；凭证域段 network/username/password/auth_url/trigger_url/isp/active_task/login_channel/active_http_task/active_script_task；或 active_profile_id"),
+    ),
+    request_body(content = Value, description = "该段的局部对象（凭证域段为标量字段值，如 username 的 body 为字符串；password 三态：null 保留、空串清除、非空字符串加密更新）"),
+    responses(
+        (status = 200, description = "合并保存并重载后回读的扁平设置（与 GET / PATCH /api/config 同形）", body = Value),
+        (status = 400, description = "段名合法但字段类型或取值非法（同全量 PATCH 口径：monitor patch 未知字段、端口越界、悬空 active_profile_id、渠道任务绑定缺失、推送通知校验失败等）", body = ErrorResponse),
+        (status = 404, description = "未知设置段（合法段名见 path 参数说明）", body = ErrorResponse),
+        (status = 500, description = "配置事务提交或重载失败", body = ErrorResponse),
+    )
+)]
+pub async fn patch_settings_section(
+    State(config): State<Arc<dyn ConfigApi>>,
+    State(profiles): State<Arc<dyn ProfileApi>>,
+    State(tasks): State<Arc<dyn TaskApi>>,
+    axum::extract::Path(section): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    if !CONFIG_PATCH_SECTIONS.contains(&section.as_str()) {
+        return Err(ApiError::NotFound(format!(
+            "未知的设置段: {section}（合法段名见 PATCH /api/config 顶层键集合）"
+        )));
+    }
+    // 包装成全量 PATCH 的单键载荷，走同一条 apply 链：原子性 / 校验 / 合并
+    // 语义自动继承（本函数只做段名分发，不做任何字段级处理）
+    let patch = Value::Object([(section, body)].into_iter().collect());
     apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await?;
     reload_and_flat_response(&config).await
 }
@@ -1532,6 +1628,12 @@ mod tests {
         };
         let app = axum::Router::new()
             .route("/api/config", get(get_settings).patch(patch_settings))
+            // section 端点（T5-3）：仅挂测试路由——正式路由表与 openapi 注册由
+            // 集成批统一收，不影响 web::mod 的契约测试
+            .route(
+                "/api/config/{section}",
+                axum::routing::patch(patch_settings_section),
+            )
             .route("/api/config/log-levels", get(get_log_levels))
             .route("/api/config/log-level", axum::routing::put(set_log_level))
             .route("/api/pure-mode", get(get_pure_mode).post(set_pure_mode))
@@ -2302,6 +2404,325 @@ mod tests {
         // 默认值调整后 mock 的初始状态本身就是 true，断言改盯落盘计数即可）
         assert!(g.settings.global.pause.enabled);
         assert_eq!(g.save_calls, 0);
+    }
+
+    // ============ section PATCH 端点（T5-3） ============
+
+    /// 发送一次 section PATCH 并返回（状态码, 响应 JSON）
+    async fn section_patch(app: axum::Router, section: &str, body: &Value) -> (StatusCode, Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/config/{section}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// 逐 section 生效断言：每个合法段的最小合法载荷都必须 200 且精确生效
+    ///（覆盖 CONFIG_PATCH_SECTIONS 全集，含 retry_settings / app 两个后端别名）。
+    /// 每段独立 mock 实例，避免段间状态串扰。
+    #[tokio::test]
+    async fn test_section_patch_applies_every_section() {
+        // (段名, 请求体, 生效位置路径, 期望值)；生效位置相对 settings/profile 的
+        // 序列化 JSON（与属性测试的断言基准同口径）
+        let cases: Vec<(&str, Value, &str, Value, bool)> = vec![
+            // ---- 全局设置段 ----
+            (
+                "browser",
+                json!({"headless": true}),
+                "/global/browser/headless",
+                json!(true),
+                false,
+            ),
+            (
+                "monitor",
+                json!({"check_interval_seconds": 30}),
+                "/global/monitor/check_interval",
+                json!(30),
+                false,
+            ),
+            (
+                "pause",
+                json!({"enabled": false}),
+                "/global/pause/enabled",
+                json!(false),
+                false,
+            ),
+            (
+                "logging",
+                json!({"level": "DEBUG"}),
+                "/global/logging/level",
+                json!("DEBUG"),
+                false,
+            ),
+            (
+                "retry",
+                json!({"max_retries": 5}),
+                "/global/retry_settings/max_retries",
+                json!(5),
+                false,
+            ),
+            (
+                "app_settings",
+                json!({"port": 50799}),
+                "/global/app/port",
+                json!(50799),
+                false,
+            ),
+            // 后端别名：与全量 PATCH 同口径映射到 retry_settings / app
+            (
+                "retry_settings",
+                json!({"max_retries": 3}),
+                "/global/retry_settings/max_retries",
+                json!(3),
+                false,
+            ),
+            (
+                "app",
+                json!({"port": 50798}),
+                "/global/app/port",
+                json!(50798),
+                false,
+            ),
+            (
+                "worker",
+                json!({"keep_alive": false}),
+                "/global/worker/keep_alive",
+                json!(false),
+                false,
+            ),
+            (
+                "updater",
+                json!({"channel": "all", "check_interval_hours": 12}),
+                "/global/updater/channel",
+                json!("all"),
+                false,
+            ),
+            (
+                "notification",
+                json!({"enabled": true}),
+                "/global/notification/enabled",
+                json!(true),
+                false,
+            ),
+            // ---- 凭证域段（写入活跃 Profile） ----
+            (
+                "network",
+                json!({"mode": "direct", "interface_id": "", "proxy_url": "", "dns_servers": []}),
+                "/network/mode",
+                json!("direct"),
+                true,
+            ),
+            (
+                "username",
+                json!("sec-user"),
+                "/username",
+                json!("sec-user"),
+                true,
+            ),
+            (
+                "password",
+                json!("sec-pass"),
+                "/password",
+                json!("ENC:mock:sec-pass"),
+                true,
+            ),
+            (
+                "auth_url",
+                json!("http://auth.example.edu/"),
+                "/auth_url",
+                json!("http://auth.example.edu/"),
+                true,
+            ),
+            (
+                "trigger_url",
+                json!("http://trigger.example.edu/"),
+                "/trigger_url",
+                json!("http://trigger.example.edu/"),
+                true,
+            ),
+            (
+                "isp",
+                json!("sec-isp"),
+                "/isp",
+                json!("sec-isp"),
+                true,
+            ),
+            (
+                "active_task",
+                json!("portal-browser"),
+                "/active_task",
+                json!("portal-browser"),
+                true,
+            ),
+            // 默认渠道即 browser（无绑定要求），单改绑定合法
+            (
+                "login_channel",
+                json!("browser"),
+                "/login_channel",
+                json!("browser"),
+                true,
+            ),
+            (
+                "active_http_task",
+                json!("portal-http"),
+                "/active_http_task",
+                json!("portal-http"),
+                true,
+            ),
+            (
+                "active_script_task",
+                json!("portal-login"),
+                "/active_script_task",
+                json!("portal-login"),
+                true,
+            ),
+            // ---- settings 顶层键 ----
+            (
+                "active_profile_id",
+                json!("default"),
+                "/active_profile_id",
+                json!("default"),
+                false,
+            ),
+        ];
+        assert_eq!(
+            cases.len(),
+            CONFIG_PATCH_SECTIONS.len(),
+            "生效断言必须覆盖 CONFIG_PATCH_SECTIONS 全集"
+        );
+        for (section, body, pointer, expected, is_profile) in cases {
+            let (app, inner) = mock_app();
+            let (status, resp) = section_patch(app, section, &body).await;
+            assert_eq!(status, StatusCode::OK, "section {section} 应保存成功");
+            // 响应与全量 PATCH 同形：扁平快照（含 browser 等顶层键）
+            assert!(
+                resp.get("data").and_then(|d| d.get("browser")).is_some(),
+                "section {section} 响应必须是完整扁平快照: {resp}"
+            );
+            // 落盘状态精确生效
+            let g = inner.lock().unwrap();
+            let state = serde_json::to_value(&g.settings).unwrap();
+            let state = if is_profile {
+                serde_json::to_value(&g.profile).unwrap()
+            } else {
+                state
+            };
+            assert_eq!(
+                state.pointer(pointer).unwrap(),
+                &expected,
+                "section {section} 的 {pointer} 必须精确生效"
+            );
+        }
+    }
+
+    /// 未知 section 404，且不落盘（历史字段 carrier_custom 也不作为段名开放）
+    #[tokio::test]
+    async fn test_section_patch_unknown_section_404() {
+        for section in ["nonexistent", "carrier_custom", "credentials", "global"] {
+            let (app, inner) = mock_app();
+            let (status, resp) = section_patch(app, section, &json!({"x": 1})).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "section {section} 应 404");
+            let msg = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(msg.contains("未知的设置段"), "404 文案应指明未知段: {msg}");
+            let g = inner.lock().unwrap();
+            assert_eq!(g.save_calls, 0, "未知段不得落盘");
+        }
+    }
+
+    /// 原子性继承（P3 口径）：段内非法载荷整体拒绝，两域状态与落盘计数完全不变
+    #[tokio::test]
+    async fn test_section_patch_rejection_is_atomic() {
+        // monitor 未知字段（DTO deny_unknown_fields）与端口越界两类必拒载荷
+        for (section, body) in [
+            ("monitor", json!({"bogus_field": 1})),
+            ("app_settings", json!({"port": 0})),
+        ] {
+            let (app, inner) = mock_app();
+            // 预置哨兵：被拒段之外的可见状态必须原样保持
+            let settings_before = serde_json::to_value(&inner.lock().unwrap().settings).unwrap();
+            let profile_before = serde_json::to_value(&inner.lock().unwrap().profile).unwrap();
+
+            let (status, _) = section_patch(app, section, &body).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "section {section} 非法载荷应 400"
+            );
+            let g = inner.lock().unwrap();
+            assert_eq!(
+                serde_json::to_value(&g.settings).unwrap(),
+                settings_before,
+                "拒绝路径不得改动全局设置（{section}）"
+            );
+            assert_eq!(
+                serde_json::to_value(&g.profile).unwrap(),
+                profile_before,
+                "拒绝路径不得改动活跃 Profile（{section}）"
+            );
+            assert_eq!(g.save_calls, 0, "拒绝路径不得落盘（{section}）");
+        }
+    }
+
+    /// 与全量 PATCH 等价性（抽样）：同载荷走 section 端点与全量端点，两域终态一致。
+    /// mock 全内存且两段无键重叠，逐段独立提交的合并终态与单次全量提交可比。
+    #[tokio::test]
+    async fn test_section_patch_equivalent_to_full_patch() {
+        let monitor = json!({"check_interval_seconds": 45, "ping_targets": ["10.0.0.53:53"]});
+        let updater = json!({"channel": "prerelease", "auto_check_enabled": false});
+
+        // 路径 A：section 端点逐段提交（monitor / updater 各一份实例）
+        let (app_a1, inner_a1) = mock_app();
+        let (s1, _) = section_patch(app_a1, "monitor", &monitor).await;
+        assert_eq!(s1, StatusCode::OK);
+        let (app_a2, inner_a2) = mock_app();
+        let (s2, _) = section_patch(app_a2, "updater", &updater).await;
+        assert_eq!(s2, StatusCode::OK);
+
+        // 路径 B：全量 PATCH 单次提交（同载荷合并）
+        let (app_b, inner_b) = mock_app();
+        let resp = app_b
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"monitor": monitor, "updater": updater}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 终态等价：settings 与 Profile 逐字段一致（经序列化 JSON 比较：
+        // MonitorSettings 等未派生 PartialEq，与属性测试的断言基准同口径）
+        let ga1 = inner_a1.lock().unwrap();
+        let ga2 = inner_a2.lock().unwrap();
+        let gb = inner_b.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(&ga1.settings.global.monitor).unwrap(),
+            serde_json::to_value(&gb.settings.global.monitor).unwrap(),
+            "monitor 段终态必须与全量 PATCH 等价"
+        );
+        assert_eq!(
+            serde_json::to_value(&ga2.settings.global.updater).unwrap(),
+            serde_json::to_value(&gb.settings.global.updater).unwrap(),
+            "updater 段终态必须与全量 PATCH 等价"
+        );
+        assert_eq!(
+            serde_json::to_value(&ga1.profile).unwrap(),
+            serde_json::to_value(&gb.profile).unwrap(),
+            "Profile 不得被全局段改动"
+        );
     }
 
     // ============ 属性测试：PATCH 合并语义（proptest，T4-2b） ============
