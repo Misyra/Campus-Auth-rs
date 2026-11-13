@@ -49,13 +49,14 @@
 - **T2-1/T2-3 一键网络诊断**：`POST /api/diagnostics/run` 五项并发探测（本机网卡/默认网关/DNS/认证门户/近期登录失败归因），15s 总限时收敛返回，结果脱敏（不含凭据/token/带查询串 URL）；runner 位于 `monitor::diagnostics`，探测动作收敛于可注入桩的 ProbeBackend，Web 层按需构造不入容器拓扑。Dashboard 新增网络诊断面板（开始诊断防连点/超时错误态，逐项状态图标 + 耗时 + 摘要 + 细节折叠，总结论按 healthy/degraded/faulty 高亮，样式全 token 驱动）。
 - **T2-2 诊断包导出**：`GET /api/diagnostics/bundle` 白名单式收集 manifest + 深度脱敏配置快照 + 事件流 JSONL（30 天）+ 运行日志（7 天）+ 环境观测文本，总量 20MB 软上限、超限截断并在包内 manifest 注明；敏感字段清单先枚举后实现并逐字段钉测试。诊断面板新增「导出诊断包」与「开始诊断」并排（blob 下载 + 日期命名，防连点，失败就地报错且与诊断错误互不覆盖）。
 
-### 阶段 3：浏览器持久会话配置模式（差 T3-3c 端点，在编）
+### 阶段 3：浏览器持久会话配置模式（全收口）
 
 - **T3-1 持久会话数据面**：方案新增 `persistent_session_enabled` + `recorded_actions` 字段（serde 默认，旧配置零迁移成本）；新增 `browser_profiles/<id>/` 持久目录——utils::paths 常量 + 卸载清单纳入（与用户数据同口径处置），Web 层卸载清单同步透出。
 - **T3-2 Worker 配置会话与交互录制**：新增 `profile_session_start` / `profile_session_stop` 两条 NDJSON 命令——headed 持久上下文打开门户页供用户手动登录（勾选门户记住密码），录制器录下 select change 与按钮/提交类点击，stop 返回 recorded_actions（500ms 防抖、50 上限 + truncated 标记、ts 排序；动作经 expose_binding 跨导航存活，JS 文档内触顶回传 truncated 防漏报）。会话语义：同一时刻仅一个活跃配置会话（重复 start 报错、幽灵会话收尾后放行），与自动化浏览器完全独立（独占 Playwright 连接不共享 context/page）；收尾路径（stop/close 事件/Worker 退出）一律不清理 user_data_dir，profile_session_* 不进强制中断白名单。新增 `config_session.py`（选择器策略优先级单一事实源）与 30 项 stub 级测试，pytest 356→386。
 - **T3-3a Worker 持久自动登录**：新增 `profile_auto_login` 命令——无头复用持久 context 回放 recorded_actions（门户记住密码回填 + 录制动作回放，沉降窗口 best-effort 不作成败判定）；真浏览器端到端 pytest 5/5。
 - **T3-3b 持久登录编排核心**：浏览器渠道接入持久会话自动登录——`BridgeApi::execute_persistent_auto_login` 编排回放，**Worker Success 恒经既有登录后网络验证兜底**（回放完成即返回 Success ≠ 登录成功，成败以网络验证结论为准）；与在途登录互斥；失效短语经 message 链路上报提示重开配置会话；删除方案联动幂等清理持久浏览器目录。login:: 202 / bridge:: 64 / config:: 164 独立复跑绿。
 - **T3-5 持久会话前端**：方案编辑器新增持久会话配置分区（307 行组件 + 366 行测试 12 用例）：开关、会话状态、启动/停止配置会话、录制动作只读回显（truncated 标注）；**PUT 保存剥离 recorded_actions 防旧草稿覆盖**（录制发生在编辑器之外）。vitest 690。
+- **T3-3c 配置会话 Web 端点（补录）**：`POST /api/profiles/{id}/config-session/start` 与 `.../stop` 接入 Worker 配置会话；`ConfigSessionRegistry` 所有权登记阻断跨方案写入（同一时刻仅登记方方案可 stop），stop 支持 `?discard=true` 放弃语义、前端「放弃」路径对齐（ff9ab24）。**Web 返回 Success ≠ 登录成功**同一口径：配置会话只负责录制，登录成败仍由后续登录链网络验证判定。→ 阶段 3 全收口。
 
 ### 阶段 4：质量护栏（全收口）
 
@@ -65,18 +66,26 @@
 - **T4-5 供应链审计**：release 六矩阵构建接入 `cargo-auditable`（共用 step 一处改，二进制内嵌依赖清单）；新增月度 audit.yml（cargo audit 失败即拦 + artifact 上传；npm audit runtime 严格/dev 仅报告分级）；taiki-e install-action SHA-pin 选型书面化。
 - **T4-6/T4-7 护栏测试**：tests/common 新增 `wait_until` 限期轮询异步谓词，bridge_supervisor 全部 10 处固定 sleep 改轮询既有观测面（慢机踩空、快机白等；中止用例单测 11.1s→7.2s）；补 lightweight 与 login-once 启动模式集成测试（真起二进制 + SERIAL 互斥：macOS 轻量自动降级完整模式，login-once 直连渠道经进程内 mock 门户登录成功后 0 自退且不创建 python_worker）。
 
-### 阶段 5：API 契约战役（差批三与 typegen 管线，在编）
+### 阶段 5：API 契约战役（全收口）
 
 - **T5-0 契约生成脚手架**：引入 utoipa + schemars，新增 `src/web/openapi.rs` 生成管线（生成 ⊕ 手写合并——既有 openapi.json 手写条目逐字保留，注解生成的 schema 增量并入）；system 域先行注解贯通作样板，注解规范成文（错误状态按 error.rs From 如实标注、只注解不注册模式留给后续批）。
 - **T5-1a 契约注解批一**：config/profiles/login 三域 22/22 端点注解入库，78 条既有手写路径逐字未动。
 - **T5-1b 契约注解批二**：tasks/http_tasks/scheduler/scripts/repo 五域 25/25 端点注解；95 条路径零漂移、schemas 47→78 纯新增；utoipa 5.5 三坑记录留给批三。
+- **T5-1c 契约注解批三**：monitor/debug/history/uninstall/autostart/ocr/ai/background/tools 九域 39/39 端点注解入库（只注解不注册模式——注册留集成批，避免 openapi.json 生成物与手写 baseline 合并冲突窗口）；单测 1431 绿。
+- **T5-1d 契约集成注册批**：39 处 handler 统一挂载 `src/web/openapi.rs` paths 宏；`components.schemas` 83→146 纯新增，33 处 `#[allow(dead_code)]` 移除与 Serialize 补齐；契约四重断言（生成确定性 / 快照一致 / 路径覆盖路由表 / 样板域来源）4/4 绿。→ T5-1 达成 20/20 域挂载。
+- **T5-1 收口批 notification/diagnostics**：两域端点注解 + 注册入库，手写 baseline 中该两域重复条目按路径去重（无幽灵 500/requestBody 残留）；openapi 路径 98 条、schemas 154。
+- **T5-2 类型生成管线**：`npm run typegen`（openapi-typescript 7.13.0）生成 `frontend/src/api/generated/api.d.ts` 并入库，`typegen:check` 逐字节比对门禁接入 CI 前端 job（后端契约改动忘跑生成即红）；生成/手写类型边界与切换径路成文于 `src/api/generated/README.md`。
+- **T5-3 settings API section 化 PATCH**：新增 `PATCH /api/config/{section}`（22 段白名单，body 为该段局部对象，包装单键后复用既有 `apply_flat_settings_patch` 全链——原子性/校验/合并语义零重写；未知段 404，响应与全量 PATCH 同形）；前端配置保存由全量 PATCH 改 dirty 段增量提交（按段 stringify 快照比对，404 一次性回退全量、非 404 不回退防掩盖出错段）。路由挂载与 openapi 注册收口，同时**修复 management_password 绑定断链**：前端原绑顶层 `config.management_password` 而后端存 `global.app.management_password`（GET 从不下发顶层键）——UI 输入从不落盘；全链迁入 app_settings 段（类型/默认值/表单绑定/读路径），并补读取与保存两条断链回归测试。
+- **T5-4 WS 推送信封契约**：`WsMessage`（tag/content 三变体信封）与日志载荷线格式镜像 `WsLogEntryData` 派生 ToSchema 并注册 components（WebSocket 升级端点本身维持手写 baseline 条目）；补三变异测试——信封线格式钉子、镜像字段集漂移守卫、契约变体覆盖。同批重生成 api.d.ts 并**修复 A59/A64 跨批漂移**（两批改动 openapi.json 后未重跑 typegen，operation id 仍为旧 `___` 形态，生成物落后 2405 行）。
 
-### 阶段 6：平台补全（差 T6-4 ed25519）
+### 阶段 6：平台补全（全收口）
 
 - **T6-1/T6-5/T6-9 平台三补**：`is_own_process` 补 macOS `proc_pidpath` 分支（防重复启动判定此前走不到精确比较）；helper 卸载结果补 macOS osascript 对话框（Windows MessageBox 对应物）；Windows 版本资源补全与应用图标（exe 资源管理器元数据齐备）。
 - **T6-7/T6-6/T6-8 打包与 Docker 批（含真实数据丢失点修复）**：Dockerfile 基础镜像统一 digest pin、删除 rust-builder 阶段 python_worker 缓存毒化拷贝（.venv 快照随构建缓存漂移）、容器降权为 campus(1000) 运行（entrypoint 以 root 修正存量卷属主后 `setpriv` 降权 exec——主进程/Worker/Chromium 实际均非 root，降权工具为基础镜像 Essential 包零额外安装）；**`HOME=/data/home` 指向数据卷——加密密钥 `~/.campus_network_auth` 随 /data 持久化，修复旧版 root 运行时密钥存于容器临时层、重建容器即失、已加密方案密码全部失效的真实数据丢失点**（升级迁移步骤见 docker/README.md）。build.ps1 适配 macOS/Linux 打包；e2e-login-chain 扩展到 macOS runner；ci 校验 Dockerfile Rust 工具链与 rust-toolchain.toml 一致（防两处版本漂移）。
 - **T6-2 非 Windows 版本 marker**：手动「选择安装包」的版本闸门此前在非 Windows 平台恒 `VersionUnrecognized` 拒绝（Mach-O/ELF 无 VERSIONINFO）——发布包组装产物新增 `campus-auth.version` marker（与 exe 同目录、单行纯 semver，release.yml/build.ps1 组装时写入；严格 parse 零新依赖；缺失/损坏仍 fail-closed 拒绝不降级），三写入点 + 11 形态单测，updater:: 64 绿；marker 格式为 T6-4 签名清单预留扩展路径。
 - **T6-3 macOS launchd 自启动**：macOS 自启动接入 launchd（LaunchAgent plist 写入/移除/状态查询，收敛进独立 `platform_macos.rs` 模块）；真机探测先行、真机 launchctl 往返测试，1378 全绿。
+- **T6-4 发布清单 ed25519 签名与版本单调**：新增 `src/updater/signature.rs`——对清单文档剥离 `signature` 字段后的**规范化 JSON**（对象键递归字典序、无空白）签名/校验，镜像重排键序或改空白不影响验证；`resources/manifest-pubkey` 公钥经 build.rs 按 `CAMPUS_MANIFEST_SIGNING=1` 注入（构建期校验 44 字符 base64），嵌钥构建对清单严格 **fail-closed**（signature 缺失/畸形/失败一律 `ManifestSignatureInvalid`），未嵌钥构建与历史未签名清单兼容；release.yml 增加签名步骤（同一 Secret 判定「公钥嵌入 + 清单签名」同源同批），助手新增 `--gen-signing-key` / `--sign-manifest` / `--verify-manifest` 三 CLI（与客户端共用规范化实现）。版本单调闸门 `ensure_manifest_not_rollback` 按通道隔离记录 `highest_seen_version`，防签名清单降级重放；检查失败保留单调记忆。**部署待办：GitHub Secret `MANIFEST_SIGNING_KEY` 需配置私钥（值见战役汇报），缺失时 release 走未签名兼容路径。**
+- **T6-4b 签名 fail-closed 语义补齐**：复核发现 T6-4 注释声称的两点未落地——合成清单在嵌钥构建未被拒、签名校验失败仍回退合成。修复：GitHub Release 路径嵌钥构建下 latest.json 资产**缺失报新错误 `SignedManifestMissing`、下载/解析/签名失败原样上抛（篡改信号）、已签名清单缺平台包交候选回退**，一律不回退逐资产合成（纯 TLS 信任与签名信任锚不可共存）；未嵌钥构建回退语义不变；AGENTS.md Updater 节按实现改写并写明签名启用升级窗口。
 
 ### 阶段 7：后端结构（全收口）
 
@@ -89,7 +98,7 @@
 - **T7-2 http_login 双路径脱糖收敛（两步）**：先提取共享尝试上下文（新旧管线共用的出口准备/凭据解析收敛一处）；再将旧六步管线脱糖为「prepare → 前置 logout 钩子 → run_flow_once」单路径——旧任务固定字段（加密脚本/前置请求/单请求本体）在编排入口脱糖为等价有序步骤，logout 闸口随单路径自然生效零代码解决。行为统一以逐条对照测试钉住，行为变化见文末「行为变化要点」；`docs/guides/custom-script-guide.md` 与 http-login-guide 同步新口径。
 - **T7-10+T4-8 Worker P2 批**：evaluate/eval/custom_js 步骤超时由 UNKNOWN_ERROR（终态不重试）改为 ASSERTION_FAILED（Rust classify 可重试、不回收 Worker）；WorkerCore 浏览器生命周期加 asyncio.Lock 串行化消除空闲回收竞态（回收协程持引用可取消、拿锁后复查状态不误关重建后的新实例）；test_redirect 首导航 goto 移入独立任务轮询取消（挂死导航可即时打断，不再被动等满上限）；OCR 缓存键规范化 + 4 实例 LRU 上限（非法取值归一默认档，不再每种非法值各加载一份模型）；系统保留变量值跳过链式再展开（凭据含字面 `{{X}}` 不被二次替换）与 serde null 不注入（`str(None)` 不再当凭据注入模板）；CancelRegistry pending 触顶改逐项淘汰最旧（新近取消不被连坐清空）；文档口径修正（导入注释不再宣称「延后加载防崩溃」、health_check 不可达分支改浏览器二进制缺失口径）与幽灵会话/取消收敛/cookie 清理矩阵 pytest 缺口收口。拆 hunk 提交时 playwright_worker.py 一度写成破损中间态（语法错误），以验证过的完整实现一次性修正收口。
 
-### 阶段 8：前端结构（差 T8-6a 图表，待事件 API）
+### 阶段 8：前端结构（全收口）
 
 - **T8-3a UI 修复批（非设置域）**：HttpTestResult 深色 chip 对比度修复（引用未定义的 `--surface-subtle` 恒落浅色兜底、深色主题 1.13:1，改 rgba slate + 显式文字色）并新增全仓 CSS 变量守卫测试（全部 var(--x) 引用必须可解析）；`--warning-text` 浅色加深达 AA 正文线（4.47:1→约 5.3:1，色相不变仅压暗）并补全 `--warning-border`；日志级别色收敛 `--log-*` 语义 token（映射单一出处，改级别配色不再记两处）；`tsk-crumb-back` 的 transition:all 改显式属性列表；触及文件 stylelint 升序特异度告警顺手清零；14 处 icon-only 按钮补齐 aria-label（设置域全量扫描 0 遗漏）；任务面板名称列宽迁 `--tsk-col-name-w` 变量口（遵守样式归属判据）；任务四面板与方案页补首拉加载态（「首拉在途且列表为空」显示 spinner，消除首屏白屏闪现「暂无…」）；SetupWizard 迁 Reka Dialog（原手写 overlay 无焦点陷阱/初始焦点，键盘可真实走出全屏遮罩；Esc/遮罩 dismiss 一律否决，滚动锁/焦点归还交库承担，手写 lockBodyScroll 退役）并补焦点陷阱测试；Toast live region 常驻（aria-live 节点必须先于内容变化存在才有播报保证，原 role=alert 挂在每条消息新建节点上会被当节点增删漏播；容器常驻、消息体容器内进出）；UpdateDialog 样式上提共享层并收敛 15 处字面字号为 token（scoped 221 行超 200 行判据，原 15px token 外真逃逸按 16px 收编）。
 - **T8-3b 设置域 UI 子批**：清理设置域死规则群（含「从不命中」更强结论）；badge--mono 迁移 components/badge.css；设置域 stylelint 基线收敛。T8-3 全收口。
@@ -97,13 +106,19 @@
 - **T8-5 依赖升级四线**：stylelint 18、vitest 5、eslint-plugin-vue 10（启用 strongly-recommended）、vite 7/plugin-vue 6/TS 5.9；package.json 补 engines 字段（node 版本口径成文）。
 - **T8-6b Ctrl+K 命令面板**：新增命令面板（commandRegistry 22 命令懒加载注册、Ctrl+K 唤起、键盘导航），首屏 gzip +0.42KB；样式落 command-palette.css。
 - **T8-6c 主题跟随核实**：外观持久化往返与强调色对比度红线用例——核实主题跟随与强调色为既有实现已生效，仅补回归红线测试（图表随事件 API 另批）。
+- **T8-6a 事件流查询与 Dashboard 图表**：新增 `GET /api/events`（近 N 天 JSONL 事件流，days 钳制 1..=30、损坏行跳过、单文件行数上限兜底响应体积，417 行含测试）；Dashboard 新增活动概览（登录/网络/任务事件按日聚合）。图表库选型以实测决策：echarts 懒加载 chunk gzip 182KB 超门禁 3.6 倍，按预案回落**自绘 SVG/CSS 零依赖**实现，配色全 CSS token 驱动免主题重绘，首屏仅 +4.5KB gzip。
 - **小项池清理批**：清理 responsive 与设置列表死规则并修正断点注释；修正 useUpdateDialog 测试 mock 键名（诚实纠正主代理笔误）。后续小项池清空。
 
-### 阶段 9：收尾（进行中）
+### 阶段 9：收尾（全收口）
 
 - **T9-1 错误文案人话化（后半四域）**：config 域 IO 与密钥错误按 `io_error_at`「动作（路径）：类别（原文）」范式人话化（ErrorKind 原样保留供程序化分支、原始文本保留末尾供日志比对）；登录 Worker 忙提示去除错误原文重复拼接；bridge 域自有错误 8 点（**Worker 信封 message 一字未动**——IPC 契约红线）；web 层 error.rs 集中化（裸 `?` 传播的 IO/JSON 错误统一人话化 + zip 写入标签）。四域 701 项测试全绿**零断言更新**。遗留：五路由 JSON 标签归 A54、mod.rs:942 语义错位受枚举冻结红线未动记 known-issues；前半六域（monitor/engine/updater/environment/scheduler/network）在编。
 - **T9-2 known-issues 对质刷新**：known-issues 全面对质——#5「暂停期自动切换检测被门控」给出维持现状结论（与 F4 暂停语义一致、手动切换入口不受限）；持久会话 Worker Success ≠ 登录成功成文为排障入口；#22 十九条逐条复核（BRG-5/ENV-8 已解决就地标注，其余维持理由逐条成文）。
-- **T9-4 架构图与模块地图**：新增 `docs/guides/architecture.md`（434 行 8 节）：服务拓扑 mermaid 图（container 16 字段核实）、46 条依赖边 grep 佐证、测试地图九类验证面；5 个 mermaid 块过解析器校验。
+- **T9-4 架构图与模块地图**：新增 `docs/guides/architecture.md`（434 行 8 节）：服务拓扑 mermaid 图（container 16 字段核实）、46 条依赖边 grep 佐证、测试地图九类验证面；5 个 mermaid 块过解析器校验。**复核批（5e31f5a）**：74 条既有依赖边零消失 + 17 条新实边补齐、2.4 配置会话链小节。
+- **T9-1 收口（六域人话化 + 五路由标签 + io_human 下沉）**：monitor/scheduler/environment/updater/network 五域错误文案按人话化范式收口，五路由请求体 JSON 解析错误标签统一（19d7a88），`io_error_at` 助手下沉 `utils::io_human` 供全域复用（a3c6372）；T9-1 全部域收口。
+- **T9-3 文档主体刷新（三笔）**：AGENTS.md 全量对照实现改写（95bb266：版本 5.2.0-beta.1、16 字段拓扑、模块树、bootstrap 握手安全、持久会话语义、测试规范全家族、契约管线、ed25519）；复核微调（2c18adf：「注解 ≠ 挂载」持久表述）；ed25519 节收尾（c40c7bd，并挖出两处签名语义缺口交 T6-4b 修复）。
+- **大关闸统一门禁（结役批）**：补齐 rustdoc 门禁欠账——18 文件私有 intra-doc 链接去链接化 + 4 个常量补文档（5950cf4，`cargo rustdoc --lib -- -D warnings -D missing_docs` 转绿）；A61/A62 遗留格式由 cargo fmt 补齐（fd72a3c）。全量门禁：clippy `-D warnings` / rustdoc / cargo test 默认与 no-embed 双 feature / 域覆盖率（config 91.63 / login 90.35 / engine 87.09 / updater 77.59，四域阈值全过）/ pytest 428 / vitest 711（66 files）/ eslint 0 error / stylelint 0 error / typecheck / build / typegen:check / **e2e-login-chain 5/5**（真二进制 + Worker Playwright + OCR 全链路）全绿。
+- **e2e 夹具跨平台修复（门禁挖出）**：两个 mock 门户的验证码字体候选此前只有 Windows 路径（portal-v2 另有 Linux），macOS 上全部落空后退回 Pillow 极小位图字体，34pt 字号形同虚设——ddddocr 对叠加干扰线/弧线的验证码识别为空，e2e 5 用例全挂「OCR 未识别出有效文本（验证码为空）」。补齐 macOS/Linux 字体候选并支持 `ImageFont.load_default(size)` 按字号兜底（fc6fdfd/f987b12，仅测试夹具，不影响产品代码）；修复后单测直验 OCR 命中率满档、e2e 5/5 通过。另记：本机 HTTP 代理会劫持回环请求（更新检查 502），本地 mock 回环服务需 `NO_PROXY=127.0.0.1,localhost`——环境事实，非代码缺陷。
+- **总视觉检查（深浅两主题，独立实例实测）**：SetupWizard 环境步骤 `wizard-note--warn` 琥珀警示框（浅色）、Dashboard 活动概览三图（登录成败堆叠柱状/网络状态时间线/事件类型分布，自绘 SVG 随单色主题黑↔白翻转）、UpdateDialog（本地 mock 发布源 v9.9.9 触发；模态/按钮/changelog 区排版一致）深浅两主题均渲染正确；同批真机验证 `PATCH /api/config/{section}` 落盘生效与管理密码随 app_settings 段往返。
 
 **行为变化要点（用户可感知）**
 
@@ -113,8 +128,10 @@
 - **Engine/Updater 墙钟化**：合盖睡眠唤醒后到期的冷却/探测/检查周期不再推迟一个周期，「唤醒即重认证」恢复
 - **Worker evaluate 类步骤超时可重试**：不再终态失败直接计入失败预算
 - **settings PATCH 清空修复**：清空 URL 检测列表不再残留旧期望响应映射
+- **管理密码保存修复**：设置页「管理凭据」输入此前绑定顶层字段而后端存 `global.app.management_password`，**UI 输入从不落盘**（改了密码实际不生效）——现随 app_settings 段读写，保存即生效；已依赖该输入的远程部署请核对设置页当前值
+- **更新清单签名 fail-closed（新签名构建）**：启用签名后的发布对 GitHub Release 路径要求 `latest.json` 签名资产同批存在——自建镜像/换源需同步该资产，签名启用前的旧发布仅在通道候选回退窗口内可能被拒（下个正常发布即恢复）
 
-战役进行中，后续批次持续追加（A45 错误人话化六域 / A52 持久会话端点 / A53 契约注解批三 / A54 五路由 JSON 标签与 typegen 管线在编）。
+战役结役（2026-11-13）：阶段 0-9 十阶段全部收口，大关闸全量门禁通过，交付口径见 `docs/plan-next.md` 与 `docs/reports/` 战役报告（本地）。
 
 ## 开发中（2026-11-12 全面审查修复战役）
 
