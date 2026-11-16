@@ -61,6 +61,21 @@ pub const INSTANCE_INFO_FILE: &str = ".instance";
 
 // ---- 派生路径 ----
 
+/// 解析运行时 base 目录：`CAMPUS_AUTH_BASE_DIR` 环境变量覆盖优先（最高优先级），
+/// 未设置/空串时回退调用方给定的默认解析值
+///
+/// 用途：安卓端由 JNI 启动层把应用私有目录（`Context.getFilesDir()`）写入
+/// `CAMPUS_AUTH_BASE_DIR`，主程序无需感知 APK 安装布局即可把 `config/` `logs/`
+/// 等运行时目录整体落到应用私有存储；桌面/路由器构建不设置该变量，行为与
+/// 既有解析完全一致。与 [`worker_project_dir`] 的 `CAMPUS_AUTH_WORKER_DIR`
+/// 同模式：环境变量是启动层注入的单一事实源。
+pub fn resolve_base_dir(default: PathBuf) -> PathBuf {
+    match std::env::var("CAMPUS_AUTH_BASE_DIR") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+        _ => default,
+    }
+}
+
 /// 配置根目录 `<base>/config`
 pub fn config_dir(base: &Path) -> PathBuf {
     base.join(CONFIG_DIR)
@@ -291,6 +306,28 @@ pub fn check_dir_writable(path: &Path, name: &str, required: bool) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// base 目录环境变量覆盖：设置后最高优先、空串视同未设置、未设置回退默认
+    #[test]
+    fn test_resolve_base_dir_env_override() {
+        // 进程级环境状态，测试内自行清理（仓库内无其他用例读取该变量）
+        let key = "CAMPUS_AUTH_BASE_DIR";
+        unsafe { std::env::set_var(key, "/data/data/app/files") };
+        assert_eq!(
+            resolve_base_dir(PathBuf::from("/opt/campus")),
+            PathBuf::from("/data/data/app/files")
+        );
+        unsafe { std::env::set_var(key, "   ") };
+        assert_eq!(
+            resolve_base_dir(PathBuf::from("/opt/campus")),
+            PathBuf::from("/opt/campus")
+        );
+        unsafe { std::env::remove_var(key) };
+        assert_eq!(
+            resolve_base_dir(PathBuf::from("/opt/campus")),
+            PathBuf::from("/opt/campus")
+        );
+    }
 
     #[test]
     fn test_read_runtime_port_roundtrip_and_fallbacks() {

@@ -91,13 +91,14 @@ pub(super) async fn ensure_worker(
     this: &Arc<BridgeSupervisor>,
     worker_only_health_check: bool,
 ) -> Result<(), BridgeError> {
-    // 快速路径：已就绪
-    if cfg!(feature = "openwrt") {
+    // OpenWrt / 安卓构建不含 Python Worker 形态（无浏览器自动化与 OCR），恒报错而非懒加载
+    if cfg!(any(feature = "openwrt", feature = "android")) {
         return Err(BridgeError::ExecutionError {
-            message: "OpenWrt 版不提供浏览器自动化和 OCR Worker".into(),
+            message: "OpenWrt/安卓版不提供浏览器自动化和 OCR Worker".into(),
             data: None,
         });
     }
+    // 快速路径：已就绪
     if is_worker_ready(this) {
         return Ok(());
     }

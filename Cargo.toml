@@ -16,11 +16,17 @@ path = "src/main.rs"
 name = "campus-auth-helper"
 path = "src/helper_main.rs"
 
+[lib]
+# lib 保留供桌面单测与集成测试；cdylib 供安卓侧经 JNI 加载（cargo-ndk 产物）
+crate-type = ["lib", "cdylib"]
+
 [features]
 default = ["desktop"]
 # OpenWrt 使用 --no-default-features --features openwrt，避免链接 GTK 等桌面库。
+# 安卓使用 --no-default-features --features android，同样免桌面依赖（托盘/通知降级见各 cfg 门）。
 desktop = ["dep:tray-icon", "dep:image", "dep:gtk"]
 openwrt = []
+android = []
 no-embed = []
 
 [dependencies]
@@ -91,11 +97,6 @@ uuid = { version = "1", features = ["v4"] }
 # zip 仅用于读取发布包（deflate/stored）；默认 features 会拉入 lzma/bzip2/zstd
 # 三个 C 依赖，_unix 交叉编译与构建速度都受累
 zip = { version = "2", default-features = false, features = ["deflate"] }
-
-# 系统通知（os 通道）：Windows toast / macOS 通知中心 / Linux freedesktop 由它统一实现
-# 默认特性仅 "z"——Linux 走纯 Rust zbus 客户端（无需 libdbus C 库）；显式关掉
-# default 并点名 "z"，防未来默认特性膨胀（如 images 会拉 rayon 与全套图像解码）
-notify-rust = { version = "4.19", default-features = false, features = ["z"] }
 
 # 网络 & 硬件
 # （网卡检测自研实现，无 mac_address 依赖）
@@ -172,6 +173,17 @@ windows-sys = { version = "0.61", features = [
 # tray-icon Linux 后端要求 gtk::init 与 gtk 主循环运行在同一线程，
 # 托盘/菜单事件经 glib 主循环分发（与 tray-icon 内部依赖同版本，共享 gtk 状态）
 gtk = { version = "0.18", optional = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# 系统通知（os 通道）：Windows toast / macOS 通知中心 / Linux freedesktop 由它统一实现
+# 安卓端无桌面通知基础设施，不参与构建（os 通道发送恒失败静默，见 notification/sender.rs）
+# 默认特性仅 "z"——Linux 走纯 Rust zbus 客户端（无需 libdbus C 库）；显式关掉
+# default 并点名 "z"，防未来默认特性膨胀（如 images 会拉 rayon 与全套图像解码）
+notify-rust = { version = "4.19", default-features = false, features = ["z"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# 安卓端 JNI 绑定（P0 编译门）：启动层经 JNI 注入应用私有目录等环境信息
+jni = "0.21"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

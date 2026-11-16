@@ -285,7 +285,8 @@ impl ServiceContainer {
         environment: &Arc<EnvironmentManager>,
         shutdown_token: &CancellationToken,
     ) {
-        if cfg!(feature = "openwrt") {
+        // OpenWrt / 安卓构建不引导 uv/Python 环境，后台探测无从谈起
+        if cfg!(any(feature = "openwrt", feature = "android")) {
             return;
         }
         let env_bg = environment.clone();

@@ -144,6 +144,13 @@ pub async fn get_autostart(
         }
         .into();
     }
+    // 安卓端：系统自启由 APK 内 BootReceiver 声明（编译期固定），端内无注册机制
+    // 可查询/改动，enabled 仅回显配置缓存位；enable/disable 路径在
+    // register_self_start 显式拒绝
+    if cfg!(feature = "android") {
+        status["method"] = "APK BootReceiver".into();
+        status["source"] = "apk".into();
+    }
     Ok(data(status))
 }
 
@@ -295,6 +302,13 @@ fn mutation_result(
 ///
 /// 显式用户操作触发；Windows/macOS 将当前数据目录一同登记并回读系统状态。
 async fn register_self_start(enabled: bool, _base: std::path::PathBuf) -> Result<(), ApiError> {
+    // 安卓端自启由 APK 内 BootReceiver 声明（编译期固定），端内无注册机制可改——
+    // 显式 400 比走平台 fallback 的笼统报错更明确
+    if cfg!(feature = "android") {
+        return Err(ApiError::BadRequest(
+            "安卓端系统自启由 APK 内 BootReceiver 管理，无需在应用内设置".into(),
+        ));
+    }
     let join = tokio::task::spawn_blocking(move || {
         #[cfg(any(windows, target_os = "macos"))]
         {

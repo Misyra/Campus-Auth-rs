@@ -19,7 +19,12 @@ pub(super) fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result
     // macOS：托盘已禁用（用户决策，W6——tray-icon 要求主线程 NSApplication
     // 事件循环，主线程运行 tokio runtime 无法满足）；轻量模式在 mac 上会既无
     // 托盘也无 Web 入口，统一降级为完整模式保证可用
-    #[cfg(any(target_os = "macos", not(feature = "desktop"), feature = "openwrt"))]
+    #[cfg(any(
+        target_os = "macos",
+        not(feature = "desktop"),
+        feature = "openwrt",
+        feature = "android"
+    ))]
     let runtime_mode = match runtime_mode {
         RuntimeMode::Lightweight => {
             tracing::warn!("当前构建不支持托盘，轻量模式降级为完整模式");
@@ -31,8 +36,9 @@ pub(super) fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result
     #[cfg(feature = "desktop")]
     let no_tray = cli.no_tray || !startup.show_tray;
     // CLI --no-browser 与 settings.json 的 auto_start_browser 任一关闭即不打开
-    let auto_open_browser =
-        !cfg!(feature = "openwrt") && !cli.no_browser && startup.auto_open_browser;
+    let auto_open_browser = !cfg!(any(feature = "openwrt", feature = "android"))
+        && !cli.no_browser
+        && startup.auto_open_browser;
     // 绑定地址：CLI --host 显式指定时优先生效；否则 Docker 环境默认 0.0.0.0
     let host = cli.host.clone().or_else(|| {
         if crate::app::is_docker_env() {

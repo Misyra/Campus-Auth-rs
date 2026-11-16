@@ -975,9 +975,9 @@ pub enum LoginChannel {
 }
 
 impl LoginChannel {
-    /// 当前构建是否允许使用该渠道；路由器版不提供浏览器自动化。
+    /// 当前构建是否允许使用该渠道；路由器版/安卓版不提供浏览器自动化。
     pub fn is_supported(self) -> bool {
-        !cfg!(feature = "openwrt") || self.is_in_process()
+        !cfg!(any(feature = "openwrt", feature = "android")) || self.is_in_process()
     }
 
     /// 是否由 Rust 控制登录且不需要 Python 环境、浏览器与 Worker。
@@ -1275,7 +1275,7 @@ mod tests {
         assert!(LoginChannel::Script.is_supported());
         assert_eq!(
             LoginChannel::Browser.is_supported(),
-            !cfg!(feature = "openwrt")
+            !cfg!(any(feature = "openwrt", feature = "android"))
         );
     }
 

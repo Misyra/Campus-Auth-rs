@@ -16,6 +16,8 @@
 //! 里执行，外层再套共字段 `timeout_seconds` 超时——超时即放弃该次通知。
 //! 失败**静默且不重试**：无桌面会话 / 权限拒绝 / SSH 环境下重发同样失败，
 //! 系统通知重试无意义，与 webhook 等远端通道的瞬时网络错误语义不同。
+//! 安卓构建不编译 `notify-rust`（无桌面通知基础设施，依赖门为
+//! `cfg(not(target_os = "android"))`），os 通道发送恒失败静默。
 //!
 //! # 错误脱敏红线
 //!
@@ -39,8 +41,9 @@ const SERVERCHAN_BASE: &str = "https://sctapi.ftqq.com";
 const USER_AGENT: &str = concat!("Campus-Auth/", env!("CARGO_PKG_VERSION"));
 /// 系统通知应用名（Windows toast / macOS 通知中心 / Linux freedesktop 展示用）
 ///
-/// 仅生产构建存在（测试构建走 `os_stub` 桩，不触达 `notify-rust`）
-#[cfg(not(test))]
+/// 仅非安卓的生产构建存在（测试构建走 `os_stub` 桩、安卓构建无 `notify-rust`，
+/// 均不触达）
+#[cfg(all(not(test), not(target_os = "android")))]
 const OS_NOTIFICATION_APP_NAME: &str = "认证喵";
 
 /// 测试桩：隔离 `notify-rust` 真发调用点（本机/CI 弹真通知会打扰用户）
@@ -95,7 +98,7 @@ fn show_os_notification_blocking(title: &str, body: &str) -> Result<(), String> 
             .clone()
             .map_or(Ok(()), Err);
     }
-    #[cfg(not(test))]
+    #[cfg(all(not(test), not(target_os = "android")))]
     {
         notify_rust::Notification::new()
             .summary(title)
@@ -104,6 +107,12 @@ fn show_os_notification_blocking(title: &str, body: &str) -> Result<(), String> 
             .show()
             .map(|_handle| ())
             .map_err(|e| format!("系统通知发送失败: {e}"))
+    }
+    // 安卓构建无 notify-rust（依赖门一致）：发送恒失败静默，与无桌面会话同口径
+    #[cfg(all(not(test), target_os = "android"))]
+    {
+        let _ = (title, body);
+        Err("当前平台不支持系统通知".to_string())
     }
 }
 
