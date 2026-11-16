@@ -143,3 +143,13 @@ python_worker/captures/
 
 # AI 工具会话记录（如 WorkBuddy/Codex），非项目代码，不入仓
 .workbuddy-ai/
+
+# Android 壳工程（gradle 构建产物 / 本地配置不入仓；wrapper jar 不提交，见 android/README.md）
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+# cargo-ndk 产出的 .so 属构建产物（cargo ndk -o 直接落在 jniLibs，见 android/README.md）
+android/app/src/main/jniLibs/
+

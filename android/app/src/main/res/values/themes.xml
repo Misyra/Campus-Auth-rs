@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 极简主题：直接继承系统 Material Light 无 ActionBar，不引入 appcompat / material -->
+    <style name="Theme.CampusAuth" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>
