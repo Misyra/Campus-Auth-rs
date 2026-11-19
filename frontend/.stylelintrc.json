@@ -12,7 +12,15 @@
     "property-no-deprecated": [true, { "severity": "warning" }]
   },
   "overrides": [
-    { "files": ["src/styles/base.css"], "rules": { "color-no-hex": null, "color-named": null } }
+    { "files": ["src/styles/base.css"], "rules": { "color-no-hex": null, "color-named": null } },
+    {
+      "files": ["src/**/*.vue"],
+      "customSyntax": "postcss-html",
+      "rules": {
+        "selector-pseudo-class-no-unknown": [true, { "ignorePseudoClasses": ["deep", "global", "slotted"] }],
+        "selector-pseudo-element-no-unknown": [true, { "ignorePseudoElements": ["v-deep", "v-global", "v-slotted"] }]
+      }
+    }
   ]
 }
 

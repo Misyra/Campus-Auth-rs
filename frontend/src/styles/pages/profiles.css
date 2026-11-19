@@ -512,12 +512,13 @@
   }
 }
 
-/* 区域标题：左侧 accent 竖线 + 加粗文字 */
+/* 区域标题：左侧 accent 竖线 + 加粗文字。
+   分叉通道：标题嵌入无下文距的 head 行时，组件在 scoped 声明 --editor-section-label-mb */
 .editor-section-label {
   font-size: var(--text-md);
   font-weight: 700;
   color: var(--text-primary);
-  margin-bottom: 12px;
+  margin-bottom: var(--editor-section-label-mb, 12px);
   padding-left: 12px;
   border-right: 0;
   border-top: 0;

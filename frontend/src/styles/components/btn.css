@@ -17,7 +17,8 @@
   cursor: pointer;
   transition: background-color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out), transform var(--dur-fast) var(--ease-out);
   min-height: 40px;
-  white-space: nowrap;
+  /* 分叉通道：单组件需要别的换行策略时只在 scoped 声明 --btn-white-space（默认保持 nowrap） */
+  white-space: var(--btn-white-space, nowrap);
   text-decoration: none;
 }
 

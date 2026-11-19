@@ -94,7 +94,8 @@ summary:focus-visible, .response-remove:focus-visible { outline: 2px solid var(-
 code { color: var(--text-primary); font-family: var(--font-mono); overflow-wrap: anywhere; }
 .response-rule { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
 .response-rule-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr) 28px; align-items: end; gap: 10px; }
-.response-rule-fields .form-group { margin: 0; min-width: 0; }
+/* 网格行内不需要 form-group 的下边距，走分叉变量；min-width: 0 共享层已声明不再复述 */
+.response-rule-fields .form-group { --form-group-margin: 0; }
 .response-rule-fields input, .response-rule-fields select { width: 100%; }
 .response-remove { width: 28px; height: 42px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; }
 .response-remove:hover { color: var(--danger); background: var(--danger-bg); }

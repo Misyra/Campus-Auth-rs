@@ -388,8 +388,10 @@ async function runTest(): Promise<void> {
   margin-bottom: 12px;
 }
 
+/* head 行自带 12px 下边距，标题自身间距归零——经 profiles.css 的分叉变量声明，
+   不在 scoped 改写页面层声明值 */
 .channel-section-head .editor-section-label {
-  margin-bottom: 0;
+  --editor-section-label-mb: 0;
 }
 
 .channel-guide-link {
