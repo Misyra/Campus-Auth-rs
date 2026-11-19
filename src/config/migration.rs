@@ -131,7 +131,10 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             // 写入独立文件
             let path = profiles_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(profile)?;
-            std::fs::write(&path, json).map_err(|e| io_error_at("写入迁移方案文件", &path, e))?;
+            // 原子写回：与 v8→v9 / v9→v10 同口径——迁移中途崩溃不得留下截断文件
+            // （截断的 profile 会被 load_all_profiles 永久跳过，凭据再也找不回来）
+            atomic_write_bytes(&path, json.as_bytes())
+                .map_err(|e| io_error_at("写入迁移方案文件", &path, e))?;
         }
         // 被跳过的 id 若是活跃 Profile：回退 default，防止活跃指向悬空文件
         let active = value

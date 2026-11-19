@@ -41,7 +41,7 @@ impl OperationRegistry {
     }
 
     /// 创建指定并发上限的登记器（WE2-6：OCR 等每请求派生子进程的重资源
-    /// 操作必须限并发；`concurrent()` 保留给确需并发的轻量操作）
+    /// 操作必须限并发；确需并发的轻量操作以此显式给上限，不设无上限通道）
     pub(crate) fn with_capacity(capacity: Option<usize>) -> Self {
         Self {
             capacity,
@@ -194,7 +194,7 @@ impl WebOperations {
         &self.ai_generation
     }
 
-    /// OCR 识别登记器（允许并发，卸载时统一暂停与排空）
+    /// OCR 识别登记器（WE2-6 单飞，内存钳制理由见构造处；卸载时统一暂停与排空）
     pub(crate) fn ocr(&self) -> &OperationRegistry {
         &self.ocr
     }

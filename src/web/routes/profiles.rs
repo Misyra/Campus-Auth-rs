@@ -225,31 +225,15 @@ pub(crate) fn validate_profile_network(profile: &ProfileData) -> Result<(), Stri
 }
 
 /// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
+///
+/// scheme + 主机名两级判定已上提至 `crate::web::validate`（与 config 域同一
+/// 实现），本包装只保留 profiles 域特有的 trim 与空串直通语义。
 fn validate_http_url(label: &str, raw: &str) -> Result<String, ApiError> {
     let trimmed = raw.trim().to_string();
     if trimmed.is_empty() {
         return Ok(trimmed);
     }
-    let parsed = trimmed
-        .parse::<url::Url>()
-        .map_err(|_| ApiError::BadRequest(format!("{label}格式非法: {trimmed}")))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        _ => {
-            return Err(ApiError::BadRequest(format!(
-                "{label}仅支持 http/https，当前为: {}",
-                parsed.scheme()
-            )));
-        }
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ApiError::BadRequest(format!("{label}缺少主机名: {trimmed}")))?;
-    if host.is_empty() {
-        return Err(ApiError::BadRequest(format!(
-            "{label}缺少主机名: {trimmed}"
-        )));
-    }
+    crate::web::validate::validate_http_url(label, &trimmed)?;
     Ok(trimmed)
 }
 
@@ -1060,6 +1044,11 @@ pub async fn auto_switch(
 /// 归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属
 /// 注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的
 /// 录制写进 B 方案」。
+///
+/// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）
+/// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
+/// 见该常量处说明）——超时判定成立且槽位由本请求持有时，Bridge 先等 Worker
+/// 自愈释放槽位再返回超时。
 #[utoipa::path(
     post,
     path = "/api/profiles/{id}/config-session/start",
@@ -1154,6 +1143,10 @@ pub struct ConfigSessionStopQuery {
 /// 并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。
 ///
 /// discard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。
+///
+/// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
+/// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
+/// 见该常量处说明）。
 #[utoipa::path(
     post,
     path = "/api/profiles/{id}/config-session/stop",

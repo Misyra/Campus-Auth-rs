@@ -77,6 +77,11 @@ const OCR_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// - success=true：提取 `result.data`（形如 `{"text": "..."}`）作为业务负载返回；
 /// - success=false：把 worker 的 error 消息转为 HTTP 错误（否则错误被埋在 200
 ///   响应体里，前端既不显示识别结果也不提示失败）。
+///
+/// 超时回执时延注记（不适用）：OCR 是轻量旁路命令，从不占会话槽位——
+/// 命令预算（[`OCR_REQUEST_TIMEOUT`]）耗尽后直接返回超时，不附加
+/// `GRACE_WAIT_DURATION` 槽位宽限等待（见 `crate::bridge::GRACE_WAIT_DURATION`
+/// 常量处说明的归属校验条件）。
 #[utoipa::path(
     post,
     path = "/api/ocr/recognize",

@@ -1016,35 +1016,17 @@ fn monitor_frontend_to_backend(value: &Value) -> Result<Value, ApiError> {
 
 /// 校验认证地址：仅 http/https，已通过 DNS 钉扎防护的内网/保留地址需前置拒收
 fn validate_auth_url(url: &str) -> Result<(), ApiError> {
-    validate_http_url(url, "认证地址")
+    validate_http_url("认证地址", url)
 }
 
 /// 校验重定向触发地址：与认证地址同口径（仅 http/https + 主机名），标签区分报错文案
 fn validate_trigger_url(url: &str) -> Result<(), ApiError> {
-    validate_http_url(url, "重定向触发地址")
+    validate_http_url("重定向触发地址", url)
 }
 
-/// http/https URL 通用校验（认证地址与触发地址共用，G2 单点语义）
-fn validate_http_url(url: &str, label: &str) -> Result<(), ApiError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|_| ApiError::BadRequest(format!("{label}格式非法: {url}")))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        _ => {
-            return Err(ApiError::BadRequest(format!(
-                "{label}仅支持 http/https，当前为: {}",
-                parsed.scheme()
-            )));
-        }
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ApiError::BadRequest(format!("{label}缺少主机名: {url}")))?;
-    if host.is_empty() {
-        return Err(ApiError::BadRequest(format!("{label}缺少主机名: {url}")));
-    }
-    Ok(())
-}
+// http/https URL 通用校验（scheme + 主机名两级判定）已上提至
+// `crate::web::validate`，与 profiles 域共用同一实现（G2 单点语义）
+use crate::web::validate::validate_http_url;
 
 /// 浅合并：将 patch 中的所有 key 递归覆盖到 target
 fn json_merge(target: &mut Value, patch: &Value) {

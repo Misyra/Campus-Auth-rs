@@ -11,7 +11,6 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
@@ -46,18 +45,6 @@ pub struct RepoImageBody(Vec<u8>);
 /// 可能返回超大响应，无上限读取会将其整体读入内存，故统一截断。
 const MAX_REPO_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-/// 将一个 chunk 追加到缓冲区，超过上限返回 None（不追加任何字节）
-///
-/// 独立成纯函数以便单测覆盖边界判定逻辑
-fn append_within_limit(buf: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Option<()> {
-    // 先判后拼：超限 chunk 一个字节都不落入缓冲，避免无谓的内存增长
-    if buf.len().checked_add(chunk.len()).is_none_or(|n| n > limit) {
-        return None;
-    }
-    buf.extend_from_slice(chunk);
-    Some(())
-}
-
 /// 截图代理允许的目标 host（任务站 raw 域）
 ///
 /// 仓库索引的 `screenshot` 字段指向 GitHub/Gitee raw 图片。截图经 `<img>`
@@ -70,27 +57,9 @@ fn is_allowed_screenshot_host(host: &str) -> bool {
     )
 }
 
-/// 由 magic bytes 识别图片格式，返回待下发的 MIME
-///
-/// SVG 可内嵌脚本（`<img>` 上下文虽不执行，仍统一拒绝可执行格式），
-/// 文本/未知字节返回 None 由调用方拒绝。
-fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if bytes.starts_with(b"BM") {
-        Some("image/bmp")
-    } else if bytes.starts_with(b"\x00\x00\x01\x00") {
-        Some("image/x-icon")
-    } else {
-        None
-    }
-}
+// 图片 magic 识别与「流式读 + 字节上限」已上提至 `crate::web::validate`
+// （与 background 域共用同一实现），本域经导入取用
+use crate::web::validate::{detect_image_mime, read_stream_capped};
 
 /// 归一化仓库 URL：将 GitHub/Gitee blob 页面链接转换为 raw 链接
 fn normalize_repo_url(raw: &str) -> String {
@@ -172,21 +141,22 @@ async fn repo_fetch_json(
     }
     // 流式累积读取响应体，超过上限立即中止；
     // bytes_stream 已由 secure_get 内部的 reqwest 客户端完成 gzip 解码
-    let mut body: Vec<u8> = Vec::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            tracing::debug!(host = %host, "仓库响应读取失败: {e}");
-            ApiError::Internal(format!("{label}响应读取失败: {e}"))
-        })?;
-        append_within_limit(&mut body, &chunk, MAX_REPO_BODY_BYTES).ok_or_else(|| {
+    let body = read_stream_capped(
+        resp,
+        MAX_REPO_BODY_BYTES,
+        || {
             tracing::debug!(host = %host, "仓库响应体超过大小上限，已中止下载");
             ApiError::BadRequest(format!(
                 "{label}响应体超过 {} MiB 上限，已中止下载",
                 MAX_REPO_BODY_BYTES / (1024 * 1024)
             ))
-        })?;
-    }
+        },
+        |e| {
+            tracing::debug!(host = %host, "仓库响应读取失败: {e}");
+            ApiError::Internal(format!("{label}响应读取失败: {e}"))
+        },
+    )
+    .await?;
     let json: Value = serde_json::from_slice(&body).map_err(|e| {
         tracing::debug!(host = %host, "仓库响应 JSON 解析失败: {e}");
         ApiError::Internal(format!("{label} JSON 解析失败: {e}"))
@@ -340,21 +310,22 @@ pub async fn repo_image(
         )));
     }
     // 流式累积读取响应体，超过上限立即中止（与 JSON 代理同口径）
-    let mut body: Vec<u8> = Vec::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            tracing::debug!(host = %host, "仓库截图读取失败: {e}");
-            ApiError::Internal(format!("截图响应读取失败: {e}"))
-        })?;
-        append_within_limit(&mut body, &chunk, MAX_REPO_BODY_BYTES).ok_or_else(|| {
+    let body = read_stream_capped(
+        resp,
+        MAX_REPO_BODY_BYTES,
+        || {
             tracing::debug!(host = %host, "仓库截图超过大小上限，已中止下载");
             ApiError::BadRequest(format!(
                 "截图响应体超过 {} MiB 上限，已中止下载",
                 MAX_REPO_BODY_BYTES / (1024 * 1024)
             ))
-        })?;
-    }
+        },
+        |e| {
+            tracing::debug!(host = %host, "仓库截图读取失败: {e}");
+            ApiError::Internal(format!("截图响应读取失败: {e}"))
+        },
+    )
+    .await?;
     let mime = detect_image_mime(&body).ok_or_else(|| {
         tracing::debug!(host = %host, "仓库截图不是有效的位图");
         ApiError::BadRequest("截图不是有效的 PNG/JPEG/GIF/WebP/BMP/ICO 图片".into())
@@ -375,32 +346,8 @@ pub struct RepoUrlQuery {
 mod tests {
     use super::*;
 
-    // SSRF 私网判定测试已随 is_restricted 移至 crate::web::ssrf
-
-    // ============ 响应体上限判定 ============
-
-    /// 追加不超过上限时成功，恰好达到上限仍允许（边界为“不超过”）
-    #[test]
-    fn test_append_within_limit_accepts_up_to_boundary() {
-        let mut buf = Vec::new();
-        assert!(append_within_limit(&mut buf, b"abc", 8).is_some());
-        assert_eq!(buf, b"abc");
-        // 恰好填满到上限：允许
-        assert!(append_within_limit(&mut buf, b"defgh", 8).is_some());
-        assert_eq!(buf.len(), 8);
-    }
-
-    /// 超过上限返回 None 且不追加任何字节（缓冲长度保持不变）
-    #[test]
-    fn test_append_within_limit_rejects_overflow_without_append() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"0123456789"); // 已有 10 字节
-        assert!(append_within_limit(&mut buf, b"abc", 12).is_none());
-        assert_eq!(buf.len(), 10, "超限 chunk 不应部分或全部落入缓冲");
-        // 恰好等于上限（10 + 2 = 12）仍允许
-        assert!(append_within_limit(&mut buf, b"ab", 12).is_some());
-        assert_eq!(buf.len(), 12);
-    }
+    // SSRF 私网判定测试已随 is_restricted 移至 crate::web::ssrf；
+    // append_within_limit 边界测试已随函数上提至 crate::web::validate
 
     /// 常量与换算：上限为 8 MiB
     #[test]

@@ -109,6 +109,12 @@ pub const CONFIG_SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// 仍未释放会话槽位则判定卡死并强杀回收。该值与 `login::PREEMPT_WAIT_BUDGET`
 /// 的推导直接相关（后者须覆盖 close_browser 超时 + 本宽限期），改动时须同步。
+///
+/// 时延语义（2026-11-19 成文）：命令超时的**对外回执**可能被本宽限拖后——
+/// 超时判定成立且会话槽位由本请求持有时，回执在宽限等待结束后才返回，
+/// 即「命令预算耗尽后可能附加至多 ~10s 槽位宽限等待」。routes 层各带命令
+/// 级预算的 handler（配置会话 start/stop、OCR 识别等）的响应时延口径为
+/// 「命令预算 + 至多本宽限」。
 pub const GRACE_WAIT_DURATION: Duration = Duration::from_secs(10);
 /// NDJSON 行分隔符
 pub const IPC_DELIMITER: u8 = b'\n';
