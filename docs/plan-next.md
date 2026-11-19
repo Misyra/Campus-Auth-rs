@@ -43,6 +43,8 @@
   - ③ **设置页 tab 化 8 区**：左侧栏「设置」子项收走变单入口，sticky 顶部 tab 条（图标+文字、active 走 accent-soft 浅蓝底、scrollspy 高亮、平滑滚动锚点）；分区拆为 网络检测 / 登录与时段 / 浏览器 / 任务与环境 / 系统 / 更新与日志 / 推送通知 / 外观（以现有面板为拆分单位）；窄屏 tab 横向滚动替代 `settings-mobile-jump` select；`settingsSearch.ts` 的行级类名表（`ROW_UNIT_SELECTOR` 12 项）与 settingsA11y / settingsForm / settingsSearch 三组测试同步适配；**同批引入 schema 驱动混合架构**（T8-1 转正）：标准设置行走 schema 模型 + 渲染器（行定义 / 校验 / 持久化单一出处），appearance / 通知通道卡等异型面板留槽位；settingsSearch 从 DOM textContent 抓取改为 schema 数据驱动，`ROW_UNIT_SELECTOR` 类名表退役
   - ④ **Catmail 设计语言映射**（结构模式移植，**不引 Tailwind / 组件库**）：新增 `--panel-elevation`（1px 贴地 + 大 blur 漫射双层阴影）/ `--ease-out-soft`（cubic-bezier(0.32,0.72,0,1)）/ accent-soft 派生 token（由 `--accent-rgb` color-mix 派生，兼容运行时注入）；card 质感统一（subtle 边 + 12px 圆角 + 双层阴影）、badge/banner 收敛为「淡底+浅边+深字」变量类、动效（页面入场 0.18s + 卡片级联 stagger 40ms + reduced-motion 全关）、hover-reveal 滚动条（F6 supports 护栏体系内）。**色彩体系不动**：不迁 OKLCH、不改 useAppearance 运行时注入 token 名；字号恒走 `--text-*`（font_scale 覆盖红线）。参考调研：Catmail（React19+Tailwind v4，`/Users/misyra/Dev/Catmail/frontend/src/index.css` token 全集）
 
+- [ ] **阶段 5 全站视觉巡检与打磨（2026-11-20 追加，最终批次）**：全部阶段完成后，子代理对全部页面（仪表盘 / 方案 / 任务四面板 / 设置八分区 / 关于 / 向导 / 各弹窗 / AI 任务页）逐页视觉检查——深浅两主题 + 桌面/窄屏双档——重点抓「布局太乱太杂、说明文案冗余、设置项过散、相似项未归并」并就地优化（文案精简 / 相似项归并 / 布局整理）；产出逐页问题与处置清单，**最后由用户验收**
+
 **验收**：每阶段 `npm run lint:css` + `vitest`（覆盖率阈值不降）+ `typecheck` + `build`；视觉批次深浅两主题 + 窄屏目检（`docs/reports/ui-audit/visual-check.py` 可复跑则用）；changelog / plan-next 由主代理集中维护，子代理并发上限 5。
 
 ## 安卓端开发（2026-11-17 立项）
