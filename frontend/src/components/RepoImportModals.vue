@@ -84,6 +84,10 @@ const detailRef = ref<HTMLElement | null>(null);
 /** 手机端列表在详情上方，点选后将详情带入可视区 */
 async function selectTask(task: RepoTask): Promise<void> {
   repo.selectRepoTask(task);
+  // 768 与本组件底部 @media(max-width: 768px)「列表封顶 40vh」块同档（全局
+  // --bp-md，见 index.css 断点约定清单；双栏变纵排本身在 responsive.css 的 640 档）。
+  // 媒体查询条件不能用 var()，matchMedia 字符串同理，故写字面值，一致性由
+  // breakpoints.test.ts 钉住
   if (!window.matchMedia("(max-width: 768px)").matches) return;
   await nextTick();
   detailRef.value?.scrollIntoView({

@@ -463,7 +463,10 @@ function setResultStep(event: Event): void {
   .flow-workspace > .flow-result { position: sticky; top: 104px; }
   .flow-workspace > .flow-result .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }
-@media (max-width: 700px) {
+/* 700 并入全局 768 档（index.css 断点约定清单）：步骤头紧凑化与其他表单块的
+   窄屏降级同档触发，768–701 区间提前进入紧凑态，避免两档之间夹 22px 的
+   「半窄带」；降级只早不晚 */
+@media (max-width: 768px) {
   .flow-step-head { align-items: stretch; flex-wrap: wrap; }
   .flow-step-toggle { min-height: 72px; }
   .flow-step-titleline { flex-wrap: wrap; row-gap: 4px; }

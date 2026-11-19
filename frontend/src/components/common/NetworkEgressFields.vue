@@ -87,7 +87,9 @@ watch(mode, next => { if (next === "interface") void refreshAdapters(); }, { imm
 .network-adapter-control { display: flex; align-items: center; gap: var(--space-sm); }
 .network-adapter-control > .custom-select { flex: 1; min-width: 0; }
 .network-adapter-control > button { flex-shrink: 0; white-space: nowrap; }
-@media (max-width: 600px) {
+/* 600 并入全局 640 档（index.css 断点约定清单）：距 640 最近（40px），
+   适配控件竖排从 ≤640 就开始，降级只早不晚 */
+@media (max-width: 640px) {
   .network-adapter-control { flex-direction: column; align-items: stretch; }
   .network-adapter-control > button { align-self: flex-start; }
 }

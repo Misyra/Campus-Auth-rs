@@ -100,7 +100,9 @@ code { color: var(--text-primary); font-family: var(--font-mono); overflow-wrap:
 .response-remove { width: 28px; height: 42px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; }
 .response-remove:hover { color: var(--danger); background: var(--danger-bg); }
 .response-add, .response-redirect { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); }
-@media (max-width: 850px) {
+/* 850 并入全局 900 档（index.css 断点约定清单）：850 距 900 更近，且按「降级
+   只早不晚」原则，网格塌单列从 ≤900 就开始，768–850 区间不再挤四列 */
+@media (max-width: 900px) {
   .response-rule-fields { grid-template-columns: minmax(0, 1fr) 28px; }
   .response-rule-fields .form-group { grid-column: 1; }
   .response-remove { grid-column: 2; grid-row: 1; }

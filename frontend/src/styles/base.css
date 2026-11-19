@@ -112,6 +112,17 @@
   --space-xl: 32px;
   --space-2xl: 40px;
 
+  /* 语义断点四档：数值与语义的权威出处是 index.css 文件头的「断点约定清单」，
+     两处必须同值同语义（breakpoints.test.ts 钉住）。
+     注意：@media 条件**不能**引用自定义属性（CSS 规范层面 var() 在媒体查询
+     预处理阶段不可用，写了整条查询不生效），媒体查询里一律写字面值并保持与
+     这四个 token 对齐；本组 token 供 JS（matchMedia / 视口判断）与未来的
+     容器查询等「能用 var() 的场合」消费，避免 JS 里再散落一份像素值。 */
+  --bp-sm: 640px;
+  --bp-md: 768px;
+  --bp-lg: 900px;
+  --bp-xl: 1100px;
+
   /* 毛玻璃效果 */
   --blur-sm: blur(4px);
   --blur-md: blur(8px);
