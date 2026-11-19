@@ -2,6 +2,78 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.1”。
 
+## 开发中（2026-11-19 第二轮交叉复核：android/ 壳 + 修复批次对质 + 未审区）
+
+> 承接同日全面审查与修复：5 路子代理补审此前未覆盖区（android/ 壳工程 15 文件、http_login boa 沙箱边界、release.yml 全文、mirrors 模块细审、frontend/preview）并对当日 8 个修复批次做第二双眼睛交叉复核。复核结论：当日修复批次无假绿（AiStreamEvent 九变体与后端 StreamEvent 逐字段零漂移、wheel 经 `uv build --wheel` 实测恰 21 模块、样式变量分叉默认值链渲染不变、pin 闸门通道口径成立、engine P1 挂起测试无 vacuous pass）；android 壳骨架质量高（JNI 四方一致 / FGS 合规面完整 / manifest 加固到位）。本轮只读审查 + 当日引入问题的即时回修，其余发现落档 plan-next。
+
+- **回修一（当日引入的发布链回归）**：openwrt.yml `upload-release` 合并下载撞名——`package_ipk.py` 对三个 target **无条件**产出同名 `luci-app-campus-auth_<ver>_all.ipk`（arch 恒 all），上批拆分时「LuCI 仅随 x86_64 产物存在」的前提不成立；`gh run download` 非 isolate 模式解压 O_EXCL，第二个产物撞名即断发布。改分目录下载（`openwrt/dist-<target>`）+ 主包按 arch 命名直接合并 + LuCI `cp -n` 去重。
+- **回修二**：api/index.ts bootstrap 响应删除幻影字段 `message?: string`——后端 `bootstrap_environment` 实际只回 EnvironmentStatus 12 字段（上批修复沿用了审查报告的粗粒度形状），optional 字段不炸运行时但类型契约与 wire 不符。
+- **android/ 两个 P1 前置项挂账 plan-next 安卓节**（真机冒烟前必须修）：① 加密密钥路径在 Android 不可解析——`dirs::home_dir()` 在 android target 只读 HOME 环境变量（无 getpwuid 回退），应用进程无 HOME → 回退 CWD `/` → `/.campus_network_auth` 创建 EACCES → `ServiceContainer::new` 失败 → nativeInit 恒返 0（真机首启即败），修法为 android 下密钥路径挂 `CAMPUS_AUTH_BASE_DIR`；② MainActivity 主线程同步调 nativeInit——Rust 契约明示「数秒量级应放后台线程」，现阻塞主线程数秒 → ANR 且把 startForeground 推迟出系统窗口（ForegroundServiceDidNotStartInTime）。
+- **其余发现落档 plan-next**：P2×4（FGS onDestroy nativeStop 后单程生命周期重开即永久失败、release.yml 嵌钥上传与签名清单非原子、uv 探测 JoinError 哨兵 usize::MAX 索引 panic、Python 镜像阶梯 Auto 直连殿后与文档口径分叉）与 P3 若干（bootreceiver 双状态源、jniLibs 仅 arm64、WebView 停留判定、login/mod.rs 渠道文案、release.yml packages:write 下沉、公钥轮换流程成文、boa loop limit 接力边界、audit.yml uvx 双步、known-issues #29/#22④ 描述过期、文档缺 android 行等）。
+- 验证：openwrt.yml YAML 解析通过；前端 typecheck 0 错（幻影字段删除后无消费方受影响）+ 相关 vitest 通过；复核路实测 `cargo test --lib` 1473 / clippy 全量零警告、`uv build --wheel` 21 模块、stylelint Vue 伪类放行清单无漏项（全仓仅 2 处 `:deep`）。
+
+## 开发中（2026-11-19 代码审查收尾：文档统一 + 契约补注 + Web/前端/Python 修复）
+
+> 2026-11-19 全面审查（报告 `docs/reports/code-review-2026-11-19.md`，本地不提交）的收尾批次，与同日 Engine P1 / 六项小修 / 性能三节并行落地。安全项按用户重申的纯本地应用信任模型处理——入站类（background 三件套、pin 闸门）以「口径一致 + 健壮性」驱动而非攻击者模型。
+
+- **文档统一（AGENTS.md ×6）**：①「host 校验挂载于鉴权层之前」措辞与实际执行顺序矛盾（axum 后挂为外层，请求先过 auth 再到 host、host 为内层包裹全部路由含豁免路径）——改为「axum 内层、auth 豁免路径亦被其包裹」；② Updater 节补「固定版本快照（pin）」成文取舍：不走清单、信任口径与手动上传包同级，任一校验不过回退服务端重查；③ 契约节 18/20 域口径刷新为 routes/ 20 域全部注解挂载（notification/diagnostics 已随 T5-1 收口）；④ 项目结构树补 `src/ffi_android.rs` 与 `android/`；⑤ 概述补安卓端一段。
+- **openapi 契约三端补注**：`GET /api/update-state`、`POST /api/environment/mirror-probe`、`PUT /api/environment/mirror-preference` 从手写 baseline 占位（响应 schema 为空对象）切到 `#[utoipa::path]` 生成源——新增 `UpdateStateData` / `MirrorProbeData` / `MirrorPreferenceData` 等线格式镜像 DTO（`MirrorSelectionData` 三变体口径对齐 tag+content serde 形态），`UPDATE_OPENAPI=1` 重生成 openapi.json（30 行占位删除 / 322 行真实 schema 落盘）+ `npm run typegen` 同步 api.d.ts；新增 `contract_mirror_dtos_match_source_wire_shapes` 漂移守卫（与 `updater::LastCheckState` / `environment::MirrorProbeEntry` / `MirrorChoice` 逐键一致，口径同 ws.rs 守卫）。
+- **rebinding 组合探针测试（`web/mod.rs` tests）**：auth（外层）× host（内层）组合行为锁定——rebinding 请求打 `GET /api/auth/local-token`（auth 豁免）必被 host 层拦成 403 而非 401/200，回环 Host 对照放行；此前 auth / host 各自单测互不感知挂载顺序。
+- **migration v5→v6 原子写（`config/migration.rs`）**：裸 `std::fs::write` 改 `atomic_write_bytes`，与模块头声明及 v8→v9 / v9→v10 口径对齐——迁移中途崩溃不再可能留截断 profile 文件（截断会被 `load_all_profiles` 永久跳过）。
+- **Web 层修复（`routes/` + 新建 `src/web/validate.rs` + `updater/mod.rs`）**：① 免鉴权 `GET /api/background/{filename}` 补 debug_screenshot 同款三件套（symlink_metadata 拒符号链接 + 8MiB 上限 + magic 校验；>8MiB 旧背景图 GET 将 400，属口径内行为变化）+ 符号链接拒绝回归测试；② `validate_http_url` / 图片 magic 识别 / 流式读+字节上限三组跨文件重复上提 `validate.rs`（multipart 找字段一组涉上传路径暂不动，挂 plan-next）；③ pin 单调闸门：`UpdaterApi::pinned_version_allowed` 复用 `ensure_manifest_not_rollback`，pinned version 落「>当前且<同通道已见最高」区间即拒并回退服务端重查（web+updater 双侧测试）；④ bridge `GRACE_WAIT_DURATION` 与 config-session 超时 handler doc 注明「预算耗尽后可能附加至多 ~10s 槽位宽限等待」；⑤ operations.rs OCR 登记器两处注释口径修正（实际 exclusive 单飞，旧注引用不存在的 `concurrent()`）。
+- **前端类型与代码**：① `api/index.ts` bootstrap 内联复刻的 EnvironmentStatus 12 字段改引 types.ts 定义，删 `useEnvironment.ts` / `fetchStatus` 两处失效双重断言；② AI 流事件判别联合 `AiStreamEvent` 九变体入 types.ts，AiTaskView 8 处 `as` 断言消除；③ CommunityTasksEntry localStorage 读包 try/catch（对齐写侧）+ `@/` 别名；④ `dragIndex` 三面板逐字复制收进 `useDragSort.indexOf`；⑤ HttpTasksPanel scoped 改写 `.card-body` 声明值转 `--card-body-pt` 变量通道；⑥ 面板计数注释失真修正（tsk-* 消费方实为四个列表面板；tasks.css「五个面板」经核实指侧栏分组入口、无误）。
+- **前端样式纪律**：三处 scoped 违规转 `--xxx` 变量通道（`.btn` / `.form-group` / `.editor-section-label`——LoginChannelField 为组件反向覆盖页面层，已在 pages/profiles.css 侧开变量）；base.css / toggle.css deprecated `clip` → `clip-path: inset(50%)`（utility.test.ts 守卫同步）；**stylelint 门禁扩到 .vue**：新增 dev 依赖 postcss-html + `.stylelintrc.json` overrides（customSyntax + `:deep` / `:global` / `:slotted` 等 Vue SFC 伪类放行）+ lint:css 脚本加 `"src/**/*.vue"`——scoped 样式首次进门禁（实测 7 文件约 20 条 no-descending-specificity warning、0 error，与既有 22 条基线同 severity 暂不清零）。
+- **Python 打包与 CI**：① wheel include 修正——实测发现 `packages = ["."]` 在 hatchling 语义中整体压掉 include（旧 include 7 文件为死配置，实际打进全部跟踪文件含 tests/ 与 uv.lock），改删 packages + `include = ["/*.py"]` 根锚定，wheel 恰为 21 个模块；新增 `test_wheel_packaging.py` 静态钉住（无 packages/only-include 覆盖项、模式根锚定、门面 import 闭包全覆盖、顶层模块全量覆盖）；② audit.yml 新增 pip-audit job（`uv export --no-dev --frozen` + uvx pip-audit，漏洞即拦，补齐 PyPI 供应链盲区）；③ openwrt.yml Release 上传拆独立 `upload-release` job（build 回落 contents: read，顺带消除矩阵并发上传覆盖风险）；④ capture_commands 空闲回收两处口径注释互引钉住（终态等价，差异仅是否创建空跑计时任务）；⑤ debug_commands 多会话死代码注释升级为防御纵深说明。
+- **Python 测试替身收敛（第一步）**：新建 `tests/fakes.py`（FakePage / FakeDialog / FakeContext / FakeBrowser / FakeResult / FakeLocator 六共享替身，docstring 记录来源三文件与差异）；`test_worker_robustness.py` 作为模板迁入（断言语义零改动），其余两文件待迁移清单在 docstring。
+- 验证：`cargo fmt --check` / `cargo clippy --all-targets --features no-embed -- -D warnings` 零警告；`cargo test --lib` **1473 项全过**（较 2026-11-17 基线 1454 净增 19）；前端 typegen:check / typecheck / eslint / stylelint（0 error）/ vitest **717 项全过**；`uv run pytest -k "not browser"` **387 项全绿**；openapi.json 与 api.d.ts 经快照测试 + typegen:check 双重钉住。
+
+## 开发中（2026-11-19 性能审查：async 路径阻塞点收敛）
+
+> 2026-11-19 审查性能项最小侵入落地：登录 async 链路上的同步探测 / 读盘 / 清理逐项移出 tokio worker，函数签名与同步调用方（Web 路由等）保持不动。
+
+- **浏览器探测 async 化（`src/browser.rs` / `src/login/mod.rs`）**：新增 `is_channel_available_async` / `first_available_channel_async` 变体（`Arc<dyn EnvironmentApi>` 移入 `spawn_blocking`，Linux `which` 子进程与托管引擎缓存扫描不再阻塞 worker；同步版保留给 Web 路由 / 环境引导），登录侧 60s TTL 缓存方法 `channel_available_cached` / `first_available_channel_cached` 与失败提示 `no_browser_hint` 改 async 走该变体。
+- **1c 终验改走缓存（`src/login/mod.rs`）**：浏览器可用性终验从直查 `browser::is_channel_available` 改为 1b 同款缓存方法——引导新装 Chromium 由缓存键内 `playwright_ready` / `system_browser_ready` 就绪标志自然失效（引导收尾 `refresh_browser_and_capability_status` 重算标志即键变必新探），无需另设失效入口。
+- **Profile 读盘 async 化（`src/config/service.rs` / `src/login/mod.rs`）**：按 `load_settings_async` 同模式新增 `load_profile_async` / `runtime_config_for_profile_async`（`self_weak` 升级 + `spawn_blocking` 包同步实现）；登录提交段两调用点（持久会话规格读取、指定 Profile 运行时构建）改走异步变体。
+- **每日 housekeeping 阻塞体外包（`src/container.rs`）**：`.trash` 清理、过期日志清理、事件流清理的目录扫描+删除体逐项包 `spawn_blocking`（闭包拿 `base_path` 克隆），不再在 async tick 内阻塞 worker；`launcher/restart.rs` 60s 定时 `load_settings()` 保持同步现状，注释钉住 mtime 缓存下的取舍（常态仅一次 stat）。
+- 验证：`cargo check --lib` 干净；`cargo test --lib -- login:: config:: container` 370 项 + `browser:: launcher` 8 项全过；`cargo clippy --lib` 零警告（工作区其他代理未提交改动同期在场，其断点与本轮无关）。
+
+## 开发中（2026-11-19 代码审查六项小修：tar 复核 / 临时后缀 / 密钥告警 / 签名清零 / 公钥构建期解析 / SSRF IPv6）
+
+> 六项独立小修全部来自 2026-11-19 代码审查，每项最小安全版落地；未触碰 openapi / engine / web routes / login（其他并行会话在改）。
+
+- **tar 解压实际写出量复核（`src/utils/io.rs`）**：`extract_tar_gz` 的 Regular/GNUSparse 分支此前只按 header 声明值限额后裸 `io::copy`——tar crate 的 pax 扩展记录（typeflag 'x'）`size` 可覆盖 header 声明（读取按 pax 值限长），小声明值过检而实际写出超限的恶意包可写穿磁盘。照抄同文件 zip 分支口径：`take(MAX+1)` 限读 + 复核 `io::copy` 返回值，超限删半成品文件返回错误；`total_bytes` 累计改按实际写出量。回归测试 `test_extract_tar_gz_rejects_actual_size_exceeding_declared` 手工构造 pax size 覆盖样本（tar::Builder 不产该形态），断言按实际写出量拒绝且清理半成品（GNU sparse 不可达该缺口——tar crate `Header::size()` 对 sparse 已返回展开后 real_size）。
+- **原子写临时后缀按目标派生（`src/utils/io.rs` / `src/config/mod.rs`）**：`atomic_write_bytes` 临时后缀由恒 `.json` 改为跟随目标扩展名（无扩展名用 `.tmp`）——`.instance` / `.plist` / `campus-auth.version` 等非 JSON 目标不再落 `.json` 中间产物。核对全仓调用方：崩溃残留清理一律按 `.tmp_` 前缀判定（`sweep_tmp_residue`），无人依赖后缀；JSON 目标后缀不变、`scan_json_bucket` 点开头跳过口径不受影响。
+- **密钥路径 CWD 回退显式告警（`src/config/crypto.rs`）**：`default_key_path` 的 `home_dir` 缺失回退分支加 `tracing::warn!`——不同工作目录启动会各生成各的钥、ENC: 密文互解失败，静默回退会让排查只看到解密失败而看不到根因。
+- **签名私钥种子栈上清零（`src/updater/signature.rs` / `Cargo.toml`）**：`decode_signing_key` 拷入 `[u8;32]` 的 seed 在 `SigningKey::from_bytes` 后留在栈上未清零（from_bytes 内部按值拷贝构造密钥，栈副本此后无用），补 `seed.zeroize()`（与 `generate_signing_keypair` 同口径）。Cargo 给 `ed25519-dalek` 显式声明 `zeroize` feature——查 2.2.0 源码确认它是默认特性（`SigningKey` 的 `ZeroizeOnDrop` 私钥 drop 清零依赖它），显式声明防上游未来收缩默认特性集时该保证静默漂移。
+- **嵌入公钥构建期完整解析（`build.rs` / `src/updater/signature.rs` / `Cargo.toml`）**：此前构建期只验「44 字符 base64」形态，合法 base64 但非法曲线点的公钥会在运行期解析失败而 fail-open 降级为不校验签名。`ed25519-dalek` + `base64` 入 `[build-dependencies]`，`embed_manifest_pubkey` 注入前做 `VerifyingKey::from_bytes` 完整解析、失败即构建报错（fail-closed）；运行期 `embedded_verifying_key` 注释更新为「构建期已保证不可达，防御性保留」。`CAMPUS_MANIFEST_SIGNING=1` 构建验证通过（仓内公钥为合法曲线点）。
+- **SSRF IPv6 字面量可解析（`src/web/ssrf.rs`）**：`resolve_public` 字面量分支先剥一层方括号再 `parse::<IpAddr>()`——`host_str()` 对 IPv6 带方括号、解析不认，此前一律落「DNS 解析失败」被拒；剥括号后非法输入仍走域名解析，fail-closed 不变。新增 `test_ipv6_literal_resolves_as_address_not_dns`（公网 IPv6 直连可解析 / 受限 `[::1]` 仍拒 / 畸形带括号输入仍走 DNS 失败路径）。附带核实并在 `pinned_client` 注释固化：hyper-util 查 DNS 覆盖表前剥方括号，带括号钉扎键不命中 IPv6 字面量——但字面量经 getaddrinfo 恒解析回同一地址（无 DNS 查询、无 TOCTOU），钉扎失效不产生缺口。
+- 验证：`cargo test --lib -- utils::io config::crypto updater::signature web::ssrf` 51 项全绿（含两条新回归）；`cargo clippy --lib` 零警告（工作区并行会话的 validate.rs / run_loop.rs 瞬时破坏已由对方修复，与本轮无关）。
+
+## 开发中（2026-11-19 Engine P1：Profile 切换检测探测段后台化）
+
+> F5 架构决策补全：`run_loop.rs` 文件头声明「网络探测不在主循环内联 await、命令保持即时响应」，网络探测已按此移入后台任务，但低频 Profile 切换检测 `check_profile_switch` 仍内联 await `default_gateways` / `current_ssid`（各为子进程探测、各 10s 超时，见 `network::detect::SUBPROCESS_TIMEOUT_SECS`）——auto_switch 开启且探测子进程挂起时 Stop/Pause/Shutdown 命令最长阻塞 ~20s。
+
+- **探测段后台化（`src/engine/run_loop.rs`）**：`check_profile_switch` 改为只做「在途检查 + spawn」——后台任务克隆 `network_detect` Arc 与回传 sender（不持有 `EngineInner` 借用），执行网关/SSID 探测后经新增 `ProfileProbeMessage` mpsc channel（容量 8）回传 `(gateways, ssid)`；主循环 `select!` 新增对应分支，匹配与切换（`handle_apply_profile`）留在主循环执行，保持与命令处理的串行顺序语义。
+- **防重入与 panic 安全（与网络探测同构）**：新增 `profile_probe_in_flight` 在途标记（到期触发在途时直接忽略，切换检测低频无排队语义）；`ProfileProbeReturnGuard` Drop 守卫照 `ProbeReturnGuard` 模式在任务 panic / abort 时补发失败消息复位标记，防 auto_switch 静默失效。
+- **迟到结果门控**：`handle_profile_probe_message` 收到结果时重查监测开启 / 未暂停 / auto_switch 开启（口径同 `handle_probe_message` 登录决策三重门），探测在途期间用户已停止的自动行为不被反向驱动；匹配读取回传时刻的 Profile 列表，无旧配置决策问题，故不比对配置版本。
+- **时间戳语义**：`last_profile_check` 在「发起探测」时刷新（原实现为内联探测完成后刷新），切换检测节奏以发起时刻锚定、探测耗时不再推迟下一轮到期点；在途期间重复到期由在途标记忽略。
+- **测试**：新增三条——`test_profile_switch_hanging_probe_keeps_commands_responsive`（`HangingGatewayDetect` 的 `default_gateways` 永不返回，断言探测确已挂起时 Stop 仍在 1.5s 虚拟预算内即时处理，内联实现回归下该探测永不完成、必超时）、`test_profile_probe_return_guard_sends_on_panic`（守卫 panic 补发）、`test_profile_probe_message_matching_and_gates`（匹配切换 + 幂等 + 停止/开关关闭门控 + 失败回传复位标记）。测试装配拆出 `make_engine_with_detector`（可注入检测器并交出 `ConfigService` 供用例后置设置），原 `make_engine_with_hanging_probe` 保持签名委派。
+- 验证：`cargo test --lib engine::` 54 项全绿（含既有 F4/F5/F1 用例无回归）；`cargo clippy --all-targets -- -D warnings` 零警告。文件头 F5 决策注释同步补注 Profile 切换探测同构后台化。
+
+## 开发中（2026-11-17 安卓端 P0：Rust 核心交叉编译打通 + Gradle 壳工程骨架）
+
+> 用户拍板（承接同日前端框架/手机端选型调研）：先做安卓端、只保留 HTTP 认证渠道、加后台运行；UI 用系统 WebView 加载本机 axum 复用现有前端；分发与更新走 GitHub Releases APK 侧载；monorepo 新建 `android/` Gradle 工程（与 `openwrt/` 先例同级）。方案与 Android 系统约束核实（FGS specialUse 无时长上限 / BOOT 禁启清单不含 specialUse / Doze 豁免不含 FGS → 电池优化白名单必做）见 `docs/plan-next.md`「安卓端开发」章节。分支 `feat/android`，本轮 3 提交。
+
+- **Cargo `android` feature 与 cdylib**：`[features]` 新增 `android = []`（不带 desktop，免 tray-icon/gtk/image）；`[lib] crate-type = ["lib", "cdylib"]`；`jni = "0.21"` 挂 android target 专属依赖；`notify-rust` 移入 `cfg(not(target_os = "android"))` 依赖段（安卓系统通知走 Kotlin 通知通道）。
+- **cfg 门照 openwrt 先例铺开**：container 环境后台探测跳过 / launcher 跳过托盘与自动开浏览器（含轻量模式降级链）/ `LoginChannel::is_supported` 安卓下仅进程内渠道可选（配套测试断言）/ bridge 恒不懒加载（文案「OpenWrt/安卓版」）/ autostart 路由 android 分支（method="APK BootReceiver"、register 显式 400）/ uninstall 端内卸载拒绝按构建形态分派文案 / `/api/system/info` 新增 `"android"` 平台字段 / `notification/sender.rs` os 通道 target 门 + 安卓静默分支。另修他人未提交改动引入的既有编译破坏：`print_headless_ui_hint` 非桌面构建读 desktop 门控的 `no_tray` 加最小 shim。
+- **平台矩阵补缺**：`environment/mod.rs` 的 `UV_TARGET` 补 android 分支（复用 openwrt 的 `"unsupported"` 语义——安卓无 Python Worker/浏览器渠道，环境引导下载前拒绝）；`browser_registry.rs` 浏览器缓存目录 linux 分支扩为 `any(linux, android)`（该函数安卓永不触达，仅为编译完备）。此两处是 `cargo ndk` 真机 target 编译暴露的仅存断点。
+- **`CAMPUS_AUTH_BASE_DIR` 路径注入**：`utils/paths.rs` 新增 `resolve_base_dir`，环境变量最高优先覆盖 base 目录（安卓由 JNI 传入 filesDir），对齐既有 `CAMPUS_AUTH_WORKER_DIR` 模式，带单测。
+- **JNI 薄层 `src/ffi_android.rs`（373 行，仅 android target 编译）**：`nativeInit(baseDir)→端口`（幂等，OnceLock runtime + Mutex 实例槽）/ `nativePort` / `nativeStatus`（container.status watch 快照 JSON）/ `nativeStop`（逆序对齐 graceful_shutdown：令牌→Scheduler→Engine→Bridge→通知/EventSink→axum→清端口文件）。启动编排选 launcher 完整模式的 P0 子集直编排：`ensure_runtime_dirs` → `init_logging` → `prepare_axum_listener`（先绑端口，失败不启服务）→ `ServiceContainer::new` → Monitor 启动 → `start_axum_with_listener`；全部入口 `catch_unwind` 包裹不跨 FFI panic，错误 eprintln（logcat 可见）。TODO(P1)：迁入 launcher 正式 Android 模式（实例锁/engine_watch 恢复/日志对齐 settings）。
+- **`android/` Gradle 壳工程骨架（15 文件）**：AGP 8.7.3 / Kotlin 2.0.21 / minSdk 26 / targetSdk 35 / applicationId `rs.campusauth.app`；MainActivity（POST_NOTIFICATIONS → startForegroundService → nativeInit 拿端口 → HttpURLConnection 取 `/api/auth/local-token` → WebView `loadUrl(#auth=)`，非回环链接交系统浏览器）；AuthForegroundService（START_STICKY + `ServiceCompat.startForeground(specialUse)` + 5s 轮询状态更新常驻通知，TODO(P1) 换 WS）；BootReceiver（autostart_enabled 开关，默认关，TODO(P2) 设置 UI）；network_security_config 仅放行 127.0.0.1 明文；manifest 七项权限 + `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` 用途文案「校园网自动认证守护」。`.gitignore` 追加 gradle 构建产物与 jniLibs（.so 属构建产物不入仓）。
+- **提交策略**（遵守「共享文件禁 hunk 级拆分暂存」）：工作区另有他人未提交的前端/后端批次改动，本轮只提交干净文件与新增文件三笔——`feat: 安卓端 Rust 编译门与平台适配`（bc02045）/ `feat: 安卓端 JNI 薄层`（cd6c627）/ `feat: 安卓端 Gradle 壳工程骨架`（35f4706）；脏文件（launcher/mod.rs、launcher/modes.rs、web/routes/system.rs、environment/mod.rs、app.rs 等）中的安卓 cfg 增补保持未提交随工作树走。
+- 验证：`cargo ndk -t arm64-v8a build --lib --no-default-features --features android` 产出 `libcampus_auth.so`（ELF ARM aarch64，debug 358MB 含调试信息；依赖树含 boa_engine cdylib 一并拷入 jniLibs）；`cargo clippy --all-targets -- -D warnings` 零警告；`cargo fmt --check` 干净；`cargo test --locked` 全套通过（lib **1454** 项全过，+3 为本轮门禁测试）；host 三套 check（默认 / `--features android` / `--features openwrt`）全绿。工具链：cargo-ndk 4.1.2 + NDK r27c（本轮起本机就绪）。
+- 已知遗留（P1）：真机/模拟器冒烟（需 Android SDK 装 APK）；`#auth=` fragment 携带的 local-token 会被前端误判为 bootstrap 秘钥多走一次必败 exchange（回落逻辑兜底正常，需与前端定稿 token 注入通道）；openapi.json 未同步 `android` 平台字段与 autostart 响应描述（他人未提交契约改动之上暂缓，届时 `UPDATE_OPENAPI=1` + typegen 统一批次）；自启后服务侧不主动 nativeInit（通知停在初始化中直到打开 App，TODO(P2) 初始化下沉）。
+
 ## v5.2.0-beta.1（2026-10-27）
 
 - 修复 OpenWrt SDK 的预发布版本兼容：APK 将 alpha / beta / rc 后缀转换为原生格式（本版 `5.2.0_beta1-r1`），IPK 原生与直接打包入口使用 `~` 后缀（本版 `5.2.0~beta.1-1`），保证预发布排在同版正式版之前；程序自身版本不变。
@@ -10,6 +82,70 @@
 - 同步 Cargo.toml / Cargo.lock、frontend/package.json / package-lock.json、OpenAPI 和 OpenWrt 两份包定义为 `5.2.0-beta.1`；Python Worker 继续固定为 `1.0.0`。
 - 从逐项开发记录汇总面向用户的更新日志；发布使用带预发布标识的 Git 标签与 GitHub prerelease，正式版稳定通道不切换到此测试版。
 - 整合验证：Rust 库 1145 项通过（3 项默认忽略），前端 570 项与 OpenWrt 包装器 10 项通过；版本及锁文件一致性检查通过。
+
+## 开发中（2026-11-15 环境初始化弹窗：阶段进度 + 下载源手动选择 + 日志）
+
+> 用户要求优化初始化 UI：弹出弹窗展示初始化进度与阶段、日志，并提供一排镜像源（含测速结果）让用户手动选源。
+
+- **后端：下载源测速与偏好 API**（`src/environment/mirror.rs` 新模块）：`MirrorChoice`（auto/direct/mirror）落盘 `environment/mirror.json`（损坏/缺失一律回退 Auto，不阻断引导）；`probe_mirror_entries` 并发实测直连与各镜像对 uv 发布资产的吞吐（与下载测速共用同一 Range GET 探测实现与 256KiB 字节预算），逐源返回 kind/prefix/label/throughput。新增 `POST /api/environment/mirror-probe`（实测 + 返回当前偏好）与 `PUT /api/environment/mirror-preference`（校验 mirror 前缀必须属名单后落盘），经 `EnvironmentApi` trait 注入 web 层（默认实现替身安全：空结果 + Auto + 静默成功）。**选源生效**：`rank_mirror_urls` 显式选源时跳过测速（选中源最前、其余原序兜底；Direct 保持直连优先原序）；`python_mirror_ladder` 同步尊重偏好（Mirror=选中镜像最前→其余镜像→直连殿后；Direct=直连最前→镜像兜底；名单外的脏前缀不注入 `UV_PYTHON_INSTALL_MIRROR`，按 Auto 测速兜底）。
+- **前端：`EnvironmentInstallDialog.vue` 初始化弹窗**（挂载于设置 · 任务与环境页，替代裸按钮直呼）：① 横向阶段步骤条（检查环境→下载 uv→同步 Python 依赖→验证 Worker→对齐 OCR→安装浏览器，done/current/failed 三态随轮询流动）；② 原生 `<progress>` 进度条 + 阶段消息（`role="status"` aria-live 播报，不抢焦点）；③ **下载源选择行**：打开时实测一排选项（自动测速 / GitHub 直连 / 各镜像 host），吞吐人性化展示（KB/s、MB/s、不可用），点击即保存偏好并 toast 确认，「重新测速」可刷新；④ 日志区复用 `useLogs` 单例按 `source=worker` 过滤尾部 150 条（后端 normalize_source 将 environment/bridge/python_worker 归入 worker），自动贴底滚动。初始化 POST 同步执行期间弹窗以 1.2s 轮询 `GET /api/init-status` 的 environment 快照流动进度，同时回写全局 envStatus 保持设置页环境卡同步；关闭弹窗不中断后台初始化（footer 有明示）。`autoStart` prop 控制打开即触发（busy 占用时仅跟随进度不重复触发）；watch 带 `immediate`——宿主以 open=true 挂载同样初始化。
+- **契约同步**：openapi.json 手写 baseline 增补三条（mirror-probe / mirror-preference / `GET /api/auth/local-token`——后者为工作区既有未提交路由的缺口，补齐后契约测试全绿）；`npm run typegen` 重新生成 `api.d.ts`（`typegen:check` 逐字节一致）；前端 vitest 新增 3 例锁定镜像行渲染、偏好保存载荷与 autoStart/busy 触发口径。
+- 验证：`cargo clippy --all-targets -D warnings` / `cargo fmt --check` 零警告；后端 lib 1451 项 + 集成全部通过（含 login_chain E2E）；前端 typecheck / eslint / stylelint（24 警告 == 存量基线）/ vitest **714 项全过** / build 通过；`UPDATE_OPENAPI=1` 重生成 openapi.json 纯新增 96 行零删除、重跑零 diff（手写条目版式与管线一致）。
+
+## 开发中（2026-11-15 下载链路镜像测速与手动安装逃生门）
+
+> 用户提出检查各下载链路（uv / Python 解释器 / 更新包）的镜像代理现状：要求下载前先测速选最优镜像、失败给出手动下载指引。实测发现镜像名单部分失效（`mirror.ghproxy.com` 已死、`ghps.cc` 对 Release 资产 404、`ghfast.top` 对 Range 探测返回 403），且 uv 托管 Python 下载与更新包下载完全无镜像加速。
+
+- **镜像清单收拢并更新**：新增 `src/utils/mirrors.rs` 单一事实源（GITHUB_MIRRORS / GITHUB_API_MIRRORS + Release 资产 URL 判定与镜像前缀构造），`environment` 模块 re-export 保持既有调用路径，更新器复用同一清单。名单移除已死的 `mirror.ghproxy.com` 与 404 的 `ghps.cc`，新增实测可用的 `ghproxy.net`（现名单：ghfast.top / gh-proxy.com / ghproxy.net；失效镜像无需手工摘除，测速会自动排到末尾）。
+- **镜像测速从建连延迟升级为实测吞吐**：`rank_mirror_urls` 由 HEAD + 1 字节 Range 探测改为并发 Range GET 拉取至多 256 KiB（`UV_MIRROR_PROBE_BYTES`），以字节/秒实测吞吐降序排序——直连 GitHub「建连快但跑不动」的源不再排到真正能出数据的镜像之前。探测失败（零字节 / 非 2xx / 连接错误）的候选不再淘汰，按原序追加末尾兜底（部分代理对 Range 请求的处理与完整 GET 不一致，如 ghfast.top 对 Range 返回 403 而完整下载可用）；uv 下载前测速结果透出到进度消息（「镜像测速完成，优先使用 xxx」）。
+- **uv 下载失败追加手动安装逃生门**：所有重试穷尽后，错误消息末尾给出完整手动安装路径——直连资产 URL + 镜像加速 URL + 目标落盘路径（`<env>/uv(.exe)`）。引导入口本就在下载前探测该路径上的 uv 可执行文件（存在且 `--version` 可用即跳过下载），手动放置二进制与在线下载等价；提示置于消息末尾以在 600 字符尾部保留截断下保证可见。
+- **uv 托管 Python 下载接入镜像（此前完全直连）**：`uv sync` 首建 venv 时从 python-build-standalone（GitHub Releases）下载 CPython，国内常拖满 600s 同步超时。现在 `run_uv_sync` / `run_uv_package_alter` 前并发测速 GitHub 直连与各镜像（复用 uv 发布资产 URL，同 host 同 CDN），按实测吞吐构造 `UV_PYTHON_INSTALL_MIRROR` 取值阶梯（None=直连也在阶梯中），uv sync 重试时沿阶梯换源；Python 压缩包完整性由 uv 自带 SHA256 校验兜底。**有意不设 PyPI 包索引镜像**（`UV_DEFAULT_INDEX`）：uv.lock 按注册表 URL 记录来源，切换索引会触发重锁、破坏依赖清单指纹纪律。
+- **更新包下载镜像回退**：`download_archive` 直连失败且 URL 为 GitHub Release 资产时，经镜像代理前缀依次重试；每次重试仍走同一套 SHA256 增量校验，被污染镜像的产物会被拒。前置校验类错误（URL 白名单 / 缺摘要）与下载源无关，不重试。更新清单（latest.json / API 枚举 / 伴随 sha256 文件）为小文件且受签名/摘要保护，本轮不动。
+- 验证：`cargo check` / `cargo clippy --all-targets -D warnings` / `cargo fmt` 零警告；全量 `cargo test --no-fail-fast` 通过（lib 1444 + 集成全部，含 login_chain E2E 314s）——仅存的 3 个失败为工作区既有未提交 auth 新路由（`GET /api/auth/local-token`）未挂 OpenAPI 注解所致，与本次改动无关。新增单测：吞吐排序纯函数（同字节比耗时、失败项原序追加）、镜像 URL 判定/前缀构造、手动安装提示内容（直连 URL / 镜像 URL / 目标路径）、Python 镜像环境变量注入。
+
+## 开发中（2026-11-14 宣传片功能演示扩充）
+
+- 追加 6 秒资源实测镜头，最终成片 48.5 秒：对既有本机 Debug 完整模式实例只读采样 60.04 秒，平均 CPU 0.13%、平均 RSS 22.5 MiB；片内明确标注待机、网络监测未运行、无 Worker / 浏览器、托盘关闭，以及单核 CPU / RSS 统计口径，原始数据留在本地 `qa/performance/`。
+- 本地宣传片工程新增 10 秒浏览器自动认证镜头：虚构认证页依次展示自动填写账号、掩码密码、提交认证和连接成功；加入聚焦、提交与成功动作音效，成片扩充至 42.5 秒。原版界面镜头和无配音要求保留。
+- 验证：视频工程 TypeScript 检查通过，实际成片为 1920×1080 / 30fps / 1275 帧；新增输入、提交与成功状态抽帧检查通过，三处点击音峰测量偏差约 11ms。
+- 演示不连接真实认证服务，不保存明文密码；工程、视频与验收产物留在已忽略的 `docs/reports/promo-video/`。
+
+## 开发中（2026-11-14 任务页横幅退役 + 首页主操作收纳）
+
+> 用户反馈任务页顶部「使用现成登录任务」常驻横幅与首页状态行三个并列按钮喧宾夺主；方案经用户选定：横幅入口降级进工具栏 + 首次引导气泡，首页低频操作收进 ⋯ 悬浮菜单。
+
+- **任务页横幅退役**：删除 `TasksView.vue` 的 `.ready-tasks-banner`（浏览器 / HTTP / 脚本三面板顶部常驻宣传卡，含左侧强调边与黑色主按钮），相关 scoped 样式与 `showReadyTasks` 计算随之移除；空态文案「选择现成任务」改指「社区任务」。
+- **社区任务入口组件化**：新增 `CommunityTasksEntry.vue`（🌐 社区任务按钮，点击经 `useRepoImport.showRepoImport()` 打开任务库弹窗），挂在 Browser/Http/Scripts 三面板工具栏「从文件导入」之前。首次使用引导气泡锚定按钮下方（role="note"，纯展示不引入弹层组件）：只在「任务目录已加载 && HTTP 与脚本为空 && 浏览器列表仅剩内置 default」时出现，点 ✕ 或点按钮本身都写入 `localStorage[community-tasks-guide-dismissed]` 永久记忆，存储不可用时静默降级为会话内不再显示。**用户反馈"文字背景透明看不清"后修正**：气泡底色从 `--bg-card`（两主题下均半透明，为壁纸功能让路）换成不透明的 `--bg-modal`（与弹窗菜单同表面），阴影升级 `--shadow-float`。
+- **首页主操作收纳（用户三易其稿，最终 speed dial 形态）**：`DashboardView.vue` 状态行的「手动登录」「网络测试」两枚并列次按钮移入右下角悬浮工具条——默认收起为 48px 主色闪电球（`.dash-dock-toggle`，IconApp 注册 `zap`），点击向上展开**连体展开条**（与球同宽的胶囊容器，动作钮 48px 与球同尺寸、细分隔线分行），点动作直接执行并自动收起，外部点击 / Esc 收起（document 级 pointerdown/keydown 监听，展开态才生效）；展开动画为自球体方向的缩放上浮（transform-origin 右下），收起态动作条同时断 pointer-events 与 tabindex，不产生幽灵焦点；状态行只留「启动检测 / 停止检测」主按钮，登录中的「取消登录」保持原位，动作禁用口径沿用原按钮（`busy.action / busy.loginCooldown / busy.login`）。**悬停说明标签（用户反馈"悬浮不显示文字"）**：根因是展开条容器 `overflow: hidden` 把定位在按钮外侧的标签裁掉——移除该属性、首末钮自担圆角；触发球补 `data-tip="快捷操作"` 并加 `position: relative`（此前标签锚到整个 dock 容器）；标签用弹层面色 + 边框保证双主题可读。演进记录：初版球+⋯菜单（菜单项不可发现）→ 常驻竖排工具条（用户嫌默认全露出且散浮小方块不同尺寸丑）→ 现版收起球 + 点开同尺寸连体展开条；期间 FAB 白底版实测与浅色卡片对比不足改主色实底，弹层菜单版做过图标化+缩放动画皮肤后随形态切换一并移除（含 tokens.test.ts allowlist 里一次性用过的 reka 变量回退）。
+- **首页看板双栏化 + 卡片重排（用户指定）**：实时日志移到诊断/历史**之上**（日志是排障时最先看的信息流，用户指定置顶），网络诊断与登录历史保持 `.dashboard-split` 等宽双栏在下方；≤1100px 仍折回单列。
+- **悬浮工具条扩充常用功能（用户指定）**：展开条扩到 6 项——**开始/停止监测**（与状态行主按钮同语义双向切换，`busy.monitor` 禁用，实测启动后状态行变网络结论、再点还原）、手动登录、网络测试、**开始诊断**、**刷新数据**、**主题切换**。开始诊断经 `NetworkDiagnosticsPanel` 新增的 `defineExpose({ startDiagnostics })` 模板 ref 触发（诊断报告归面板自身状态，直接调 API 面板不展示结果；修复过一版 dock 未随动作收起的遗漏）；刷新数据一键拉取状态快照 + 登录历史 + 实时日志（幂等 GET）；主题切换与顶栏钮同语义（快捷切换写显式明/暗，跟随系统仍在外观设置页）。六钮悬停均有说明标签。
+- **闪电球自由拖动（用户指定）**：工具条位置可拖任意重定位——pointerdown/move/up + `setPointerCapture`，位移 ≥5px 判定为拖动（否则视为点击开合），拖完抑制紧随的 click 防「拖完顺手开合」；位置存 right/bottom 偏移入 `localStorage[dash-dock-pos]`（换视口仍保持「贴哪一角」语义），渲染前按当前视口夹取防旧坐标越界，resize 监听刷新夹取；球体拖到顶部区域（上方放不下展开条）时自动改为向下弹出（`column-reverse` + transform-origin 翻转）；拖动光标 grab/grabbing，`touch-action: none` 保触摸拖动不被页面滚动劫持。实测：拖动后内联样式与存储同步更新、靠顶自动切 `expand-down`。
+- **修复「拖到顶部就消失，只有刷新闪一下」**：向下展开（expand-down）模式下容器仍用 bottom 锚定——收起态容器含展开条占位约 350px 高，bottom 锚定把整段容器（含球体）顶高约 300px，球体被顶出视口；刷新后内联样式应用前闪现静态位置、应用后再度消失，即用户所见。修复：向下展开时改用 `top` 锚定球顶边（`bottom` 偏移换算为 top），球体恒停在拖放点，展开条向下生长不推移球体；展开方向判定同步改为「上方够放就向上，否则选上下空间更大的一侧」。
+- **debug 版 dist 重建竞态说明**：debug 构建下 rust-embed 运行时读盘，连续重建 `frontend/dist` 后，已打开页面持有的旧 index.html 会引用已被删除的旧哈希 chunk（404 被 SPA 回退成 text/html，控制台报 MIME 错误）——硬刷新一次即恢复，非代码缺陷；开发期避免双实例同时跑同一 dist。
+- 验证：`npm run typecheck` / `lint`（改动文件 0 问题）/ `lint:css`（24 警告 == 存量基线）/ `test`（**711 项全过**，净增 7 例）/ `build` 全绿；`CommunityTasksEntry.test.ts` 新增 7 例锁定引导出现口径（仅 default / 有用户任务 / 目录未加载 / 已记忆关闭）与两条关闭路径（✕ / 点按钮写 localStorage）；真机目检（本地起 debug 实例 + 浏览器截图）：任务页横幅消失、工具栏入口就位，首页状态行仅剩 ⋯ + 启动检测且菜单展开正常。本轮纯前端，无 Rust 改动。
+
+## 开发中（2026-11-14 前端现代化批次 1/2 + 视觉修复落地）
+
+> 承接 2026-11-13「前端现代化排查与计划」：批次 1（零视觉改动）与批次 2（微调）全部落地，真机视觉检查 V1–V6 全部处置，批次 3 的 F11 按用户选定方案（行内上移/下移按钮）落地；F12 / F13 / F14 仍挂计划。
+
+- **F1 logo 降采样**：`frontend/public/logo.png` 1254×1254（229,690 B）→ 256×256（13,928 B，−94%），解码内存 6.0 MiB → 256 KiB。四处 `.logo-mark` 蒙版与 favicon 共用该文件，CSS mask 只读 alpha，最大渲染尺寸是 About 页 96px，256 源仍满足 `build.rs` app.ico 的 16–256 条目口径（app.ico 为预生成资产不重生成）。`sips` 降采样后合成白底目检，形状与原图一致。
+- **F2 设置页滚动监听收口**：`SettingsView.vue` 分区元素挂载后缓存进 `Map<id, HTMLElement>`（分区列表静态且全程挂载），`visibleSection` 不再每次 scroll 事件做 6 次 `querySelector`；scroll 高亮计算按 `requestAnimationFrame` 合并（监听保持 passive），卸载取消在途帧。搜索隐藏分区的可见性判定（`offsetParent === null`）每次现判，不进缓存。
+- **F3 表头语义**：四个任务面板全部 27 个 `<th>` 补 `scope="col"`（Browser/Http/Scripts/Scheduled）。
+- **F4 `ToggleSwitch` 可访问名**：`role="switch"` 按钮经 `useId()` + `aria-labelledby` 指向 label span（有 label 时），无 label 的行内用法从 attrs 显式抽取 `aria-label` 落到按钮（attrs 其余成员仍透传根 div，`[data-testid] [role=switch]` 既有选择器不受影响）；定时任务列表行的启停开关补 `:aria-label="启用或停用定时任务 {名称}"`。`settingsA11y.test.ts` 新增两例静态断言（组件结构 + 行内用法必须传 label）。
+- **F5 时间格式口径**：`formatters.ts` 新增 `formatLocalDateTime`（ISO → 本地时区 `YYYY-MM-DD HH:mm:ss`，与全站口径一致），SystemSettings「上次检查」弃用跟随浏览器 locale 的 `toLocaleString()`。
+- **F6 Firefox 滚动条兜底**：`base.css` 在 `@supports not selector(::-webkit-scrollbar)` 内给 `html` 声明 `scrollbar-width: thin` + `scrollbar-color`；Chromium/Safari 实测 `scrollbar-width` 仍为 auto（护栏生效），6px/4px 细条观感不变，Firefox 不再是系统默认粗滚动条。
+- **F7 弹窗动态视口高度**：modal.css（85/92vh×2）、wizard.css（90vh）、update-dialog.css、form.css、tasks.css 三处（含 `calc`/`min`/`max` 表达式）共 7 处 `max-height` 补 `dvh` 双声明（vh 在前作回退），移动端浏览器工具栏收放不再吃掉弹窗底部；responsive.css 两处此前已有双声明。
+- **F8 设置搜索按帧合并**：`watch(searchQuery)` 改 rAF 合并（快速连击一帧最多全量扫一次），扫描只切换静态表单 class（`applySettingsSearch` 先清后标幂等），无需等 Vue flush；卸载取消在途帧。
+- **F9 滚动链收口**：12 个内层滚动容器补 `overscroll-behavior: contain`——`.log-viewer` / `.history-list` / `.settings-scroll` / `.modal-body` / `.notification-dropdown` / `.command-palette-list` / `.update-dialog-notes` / `.debug-steps` / `.debug-zoom-body` / `.wizard-container` / `.repo-import-list` / `.repo-import-detail`。
+- **F10 首屏壁纸预置**：壁纸开关从 `body.has-custom-bg` class 改为 `html[data-custom-bg]` 属性（`theme-init.js` 在首帧前只能触达 documentElement），`--bg-image` / `--bg-blur` / `--bg-opacity` 变量随属性挂 html，theme-init 与 `applyAppearance` 同一套转义口径（`JSON.stringify` 引注）；大图用户刷新不再先闪一帧纯底色。`useAppearance.test.ts` 的 documentElement 桩补 `removeAttribute`。
+- **F11 触屏排序补入口（用户选定行内按钮）**：`useDragSort` 新增 `moveBy(id, delta)`——与拖拽同一份全量列表语义与持久化载荷（三组互传），越界/未知 id 为空操作；三个面板行首拖拽柄旁加「上移/下移」真实按钮（键盘可达，首末行 disabled），脚部提示改为「拖拽行首或用 ↑↓ 调整顺序」。`drag.test.ts` 新增 moveBy 两例（移动生效 + 持久化载荷三组互传 / 三类空操作边界）；IconApp 补 `chevron-up`。
+- **V1 设置页宽屏居中**：**用户拍板保留居中列**（可读性优先，标题错位属页面级取舍），不改代码；plan-next 登记决策。
+- **V2 移动端设置标题被搜索框挤没**：≤768px 下 `.topbar-search--input` 改按视口宽度收缩（`clamp(110px, 30vw, 180px)`）——390px 实测标题区从 16px 恢复到 85px，紧凑标题完整可见。
+- **V3 AI 步骤条双 active**：第 3 步 active 条件补上 `isConfigDone &&`（此前「已有捕获结果 + 配置改动未保存」时第 1、3 步同时 active）。
+- **V4 移动端任务表脚部折行**：计数 span `white-space: nowrap`；≤768px 隐藏 spacer 与右侧提示——390px 实测脚部单行 36px，只留「共 N 个任务」。
+- **V5 浅色主题语义色/品牌色对比度**：沿用浅色 `--warning` 直接加深的先例，浅色主题 `--success` #10b981 → **#047857**（4.9~5.5:1）、`--error` #ef4444 → **#b91c1c**（5.8~6.5:1），色相不变仅压暗；约 70 处文字用法与状态圆点/实底危险按钮（白字 6.5:1）一并达标，`--success-rgb`/`--error-rgb` 不变故淡底色调不受影响。`--warning` 保持亮琥珀（圆点/加载指示的视觉签名），文字对比由 `--warning-text` 承担，`badge--warn` 改用 `--warning-text`。`.tech-badge` 文字改 `color-mix(品牌色 45%, 主题正文色)`、描边加浓到 40%——深浅两主题实测均 ≥7.3:1，品牌色相保留。
+- **V6 关于页 uv 徽标圆形化**：`.tech-badge` 统一 `min-width: 72px` + 居中，两字符徽标恢复胶囊读感（实测 72×37）。
+- 验证：`npm run typecheck` / `lint`（0 错误）/ `lint:css`（24 警告 == 存量基线，本批未新增）/ `test`（**704 项全过**，净增 4 例）/ `build` 全绿；真机目检（`/tmp/campus-visual` 实例 + 热更新 dist）：任务行首按钮单任务时正确双 disabled、关于页徽标深色文字 + 品牌描边、移动端设置标题/任务脚部修复生效、双主题 token 与 Chromium 滚动条护栏 DOM 实测符合预期。本轮纯前端 + 静态资源，无 Rust 改动。
 
 ## 开发中（2026-11-13 全面重构优化战役）
 
@@ -141,6 +277,20 @@
 - 同批回归：CommandPalette 静态守卫改指顶栏搜索入口；设置搜索可访问性静态守卫改指顶栏输入框（并断言页面内不再有第二搜索框）；vitest 697 绿 / eslint 0 error / stylelint 0 error / typecheck / build 绿。
 
 战役结役（2026-11-13）：阶段 0-9 十阶段全部收口，大关闸全量门禁通过，交付口径见 `docs/plan-next.md` 与 `docs/reports/` 战役报告（本地）。
+
+## 开发中（2026-11-13 本地界面免引导）
+
+- **回环本地 token 端点**：`GET /api/auth/local-token`（`src/web/auth.rs` 的 `local_token_handler`）在回环监听下直接下发 token；非回环绑定默认 404（显式 `--allow-unauthenticated-bind` 时同样开放，见下条）。前端 `ensureAuthToken` 在无 fragment、无缓存时自动取用（`fetchLocalToken`）。这是对 T0a-1 的反向取舍：同机其他用户/进程由此可拿到 token 并调用 `/api/scripts/run`（等价于脚本执行权）——单人机与单一共享账号场景下这条边界本就不存在，多用户共享机的跨用户风险**明确接受**；未豁免的远程（Docker/LAN）仍只认管理密码，fail-closed 门禁不变。
+- **本地访问「打开即用」**：回环访问（127.0.0.1 / localhost / [::1]）取到的 token 同时持久化到 localStorage（`frontend/src/api/client.ts` 的 `readStoredToken` / `writeStoredToken` / `clearStoredToken`），同浏览器任意标签页与浏览器重启后直接复用；远程（Docker/LAN）访问仍只写 sessionStorage，避免共享电脑上的浏览器长期保留凭据。读取顺序 localStorage → sessionStorage（兼容旧缓存）→ local-token，401 证实的失效仍两处全清。
+- **headless 入口兜底**：`--no-browser`（或打开浏览器失败）且无托盘的本地监听，启动时把带 `#auth=` 的完整界面地址打到终端 stderr（`src/launcher/modes.rs` 的 `print_headless_ui_hint`）——此前该组合下没有托盘「复制界面链接」也不自动开浏览器，只能读 0600 密钥文件，等于打不开。只写终端，不进日志文件/诊断包（后端日志按设计只记基础 URL）。
+- **Docker 默认 compose 免密**：`docker-compose.yml` 增加 `CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true`（宿主端口本就只发布 `127.0.0.1`），`local-token` 在该显式豁免下同样开放——`docker compose up` 后宿主浏览器直接打开，不再需要管理密码（此前默认 compose 因非回环绑定无凭据而启动失败）。发布到 LAN 必须删掉该行并配置管理密码，compose 注释与 `docker/README.md`「安全模型」写明（该豁免等于「能连上端口即拿到全部 API 含脚本执行」）。`AppState` 透传 `allow_unauthenticated_bind`，`auth.rs` 的 `local_token_allowed` 判定收敛为「回环监听或显式豁免」。
+- **引导页补「怎么拿 token」指引**（`frontend/src/components/AuthBootstrapGuide.vue`）：本地模式明确「本机通常自动登录，看到本页说明后端未就绪」并列出三条获取凭据的途径——托盘「打开界面 / 复制界面链接」、终端启动输出里的「界面入口（含引导秘钥，勿转发）」整行、程序数据目录 `config/.auth_bootstrap` 文件内容；新增「后端已启动，重新检查」按钮（刷新即重新命中 local-token）。远程模式列出管理密码的三种来源（`--management-password` / `CAMPUS_AUTH_MANAGEMENT_PASSWORD` / 服务端设置页）。
+- 验证：`cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` / `cargo build` / `cargo test --lib web::auth::`（21 项）/ `npm run typecheck` / `npm run lint` / `npm run build` / `vitest` 700 项全过；真机沙箱实测：清空两处存储后直接打开 `http://127.0.0.1:50731/` 自动取 token 进入仪表盘（无引导页）、带 fragment 打开写入 localStorage、重启实例后终端打印出可登录的完整入口；引导页用静态 dist 单独预览确认排版与文案。Docker 路径为静态改动（本机未装 Docker，未跑 `docker compose config`）。
+
+## 开发中（2026-11-13 前端现代化排查与计划）
+
+- **modern-web-guidance 排查**：`legacy-scan` 扫 33 篇指南 / 35 条确定性规则，仅命中 7 条（全部为 `::-webkit-scrollbar` 缺标准属性兜底）；人工复查渲染路径后，在 `docs/plan-next.md` 新立「前端现代化排查与优化批次」三批次 14 项（F1 logo 蒙版降采样 229 KB→14 KB、F2 设置页滚动监听收口、F3 表头 `scope`、F4 `ToggleSwitch` 可访问名等），零视觉项与需目检/真机项分档，并登记 4 项「明确不动」的评估结论。
+- **真机视觉检查**：复用沙箱实例（`/tmp/campus-visual`，Chromium 1440×900 / 390×844，深浅两主题）实走仪表盘 / 方案 / 任务五个 Tab / 设置六个分区 / 关于 / 命令面板 / 仓库导入弹窗 / 通知面板 / Toast，以 DOM 实测（`getBoundingClientRect` / `getComputedStyle`）登记 6 项视觉发现：设置页 1080px 居中被 max-width 打破、移动端设置路由标题被顶栏搜索框压成 16px、AI 步骤条双 active、移动端任务表脚部折行、浅色主题品牌色/语义色对比度不足（success 文本 1.86:1 等）、关于页 `uv` 徽标圆形化。明细见 `docs/plan-next.md`「真机视觉检查」。本轮只出计划，未改代码。
 
 ## 开发中（2026-11-12 全面审查修复战役）
 

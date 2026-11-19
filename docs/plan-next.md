@@ -4,6 +4,135 @@
 > 当前活跃：`v5.1.3`（`docs/changelog.md`）。P0/P1 与更新子系统待办的权威摘要以本文件与 `docs/known-issues.md` 为准（原 defect-recheck / updater-audit 过程报告已于 2026-09-12 删除）。
 > 验证块：`cargo clippy --all-targets -- -D warnings` / `cargo test` 双 feature（含 `rust-tests-unix`）/ `cargo fmt --check` / `uv run pytest` / `npm run build` + `vitest` / `e2e-login-chain` 全链路。
 
+## 代码审查收尾遗留（2026-11-19）
+
+> 2026-11-19 全面审查（报告 `docs/reports/code-review-2026-11-19.md`，本地不提交）当日已修：P1 run_loop 内联探测、全部 12 项 P2、大部分 P3（逐项见 changelog 同日四节）。仍开放的低优先项：
+
+- [ ] **断点 token 化**：全仓 14 种媒体查询值（层文件 640/768/900/1100/360，scoped 又引入 600/700/850/940/1280/1800/280/400/480；HttpFlowFields 单组件 5 种）——已并入「前端设计系统收口战役」阶段 1①（2026-11-20），完成后此处一并勾销
+- [ ] **`run_flow_once` 拆分**：`src/login/http_login.rs:727-1125`（399 行），Transform / Request 分支各拆私有函数；同批评估 `routes/{profiles,config}`（3.6k 行级）与 `http_login`（4.4k 行）按 bridge 14 子模块先例的下一轮文件拆分
+- [ ] **multipart「找 file 字段」骨架上提**：`routes/system.rs` 与 `routes/background.rs` 两处（本轮三组重复已上提 `web/validate.rs`，此组涉上传路径单独评估）
+- [ ] **helper overlay 分发顺序统一**：`helper_main.rs` overlay 分发先于 exe 备份/替换 vs `apply_pending_locked` 先替换——两处顺序统一并注明取舍（现状有 pending / RESYNC 兜底自动收敛）
+- [ ] **Python 测试替身迁移收尾**：`tests/fakes.py` 已收敛六替身、`test_worker_robustness.py` 已迁；`test_worker.py`（19 类）与 `test_worker_execution_contract.py`（21 类）待迁（清单在 fakes.py docstring）
+- [ ] **stylelint-vue 新增 warning 清零（可选）**：.vue 进门禁后新增约 20 条 no-descending-specificity（7 文件，`:deep` 等 Vue SFC 伪类已按 overrides 放行），与既有基线同 severity 暂存
+- [ ] **tokio feature 防回归钉（可选）**：ci.yml 加 `cargo tree -e features -p tokio` 快照比对
+- [ ] **ffi_android TODO(P1) 收敛**（P0 骨架→正式模式）：见下节「安卓端开发」P1 条——nativeStatus 占位混淆、tracing 单次初始化、实例锁 / engine_watch / 自启语义、LogOnce 决议、日志对齐 settings；收敛前不合并 master
+- [ ] **release.yml 嵌钥上传与签名清单非原子（P2）**：build 六矩阵各自 `gh release upload` 与 manifest job 签名清单上传非原子——`--sign-manifest` 失败时已公开的嵌钥版本按 SignedManifestMissing 拒一切更新直到下个成功发布；manifest 失败应视为发布失败（考虑 `gh release delete`）+ 维护规程要求配置 secret 前本地 `--gen-signing-key` 核对公钥一致
+- [ ] **uv 探测哨兵索引 panic（P2）**：`environment/uv/download.rs:115` JoinError 把哨兵 `usize::MAX` 塞进 results，三个调用方 `urls[idx]` 直索引——探测任务 panic 时「按失败兜底」路径自身 panic；修法 `order_from_probe_results` 过滤 `idx >= len` 或调用方改 `.get()`
+- [ ] **python_mirror_ladder 直连殿后口径成文（P2）**：`uv/sync.rs:60-67` Auto 分支把直连固定殿后，与 mirror.rs 文档「Auto=实测吞吐自动选最优」及压缩包下载 Auto 口径分叉——注释声明取舍或改完整实测序
+- [ ] **android 杂项（P3）**：jniLibs 仅 arm64-v8a（模拟器冒烟需补 x86_64）、WebView 停留判定收紧 scheme+host 且覆盖 localhost/::1、ACCESS_NETWORK_STATE 权限无使用点可删、`login/mod.rs:706` 渠道不支持文案按构建形态分派（现写死 OpenWrt）
+- [ ] **CI/供应链杂项（P3）**：release.yml `packages: write` 下沉到 docker 两 job、公钥轮换流程成文（或不轮换取舍）、audit.yml 两个 uvx 步合成一步防工具版本漂移、drag.test 补过滤态对照用例、background symlink check-then-use TOCTOU 补注释声明
+- [ ] **文档刷新（部分本轮已做）**：known-issues #29/#22④ 已就地刷新、AGENTS 与 openapi.rs「两端点」已改三端点；仍待：architecture.md 补 web/validate.rs 与 ffi_android 行、根 README.md 补 android/
+- [ ] **脏树分批提交**：工作区 113 文件未提交（本日审查修复 + 既有 UI / 镜像批次混载），按「一次 commit 只做一件事」分批提交——已并入下方「前端设计系统收口战役」阶段 0
+
+## 前端设计系统收口战役（2026-11-20 立项）
+
+> 用户诉求：「目前的 UI 有点乱」（视觉不统一 + 代码难维护两头都有），并预告后续做手机（安卓 WebView 复用同一前端）。拍板（2026-11-20）：**不引入组件库**（Element Plus / Naive UI 一类与现有 token 体系、内嵌体积（730 KB JS / 188 KB CSS 已审计合理）、a11y 投入与 700+ 测试面冲突，维持 2026-11-17「桌面不引重库」拍板），走「token 收口 + 组件层升级」。病根实测：断点 14 种散值（768×11 / 640×10 / 1100×6 / 900×4 + 960/940/850/560/280/400/480 各自为政）、token 逃逸 72 处（ai_task 36 / profiles 21 / tasks 15 + UpdateDialog 15 处字号字面量）、同一视觉角色多套平行实现（两套日志色、`.page-content` 名为外壳实非外壳、`badge--mono` 依赖倒置）、styles/ 24 文件 7784 行（tasks.css 1076 行）。手机视角：地基件（dvh / overscroll / 触控目标 ≥24px / 底部导航）已齐，缺的正是统一响应式契约与页面外壳。
+
+- [ ] **阶段 0 前置卫生**：脏树分批提交（117 文件混载审查修复 + UI / 镜像批次），吸收上方「脏树分批提交」条目
+- [ ] **阶段 1 token 硬收口（1-2 天，观感基本不变）**：
+  - ① 断点收敛 4 档语义 `--bp-*`（640/768/900/1100 归轴，960/940/850/560 归并或剔除，scoped 散值 280/400/480 回归档位）——吸收「代码审查收尾遗留」断点条目；改动面广，深浅两主题 + 窄屏（390px）目检
+  - ② 两套日志级别色合一（log-viewer `level-*` 与 dashboard `log-*`）
+  - ③ token 逃逸清零（ai_task.css / profiles.css / tasks.css 字面量 spacing + UpdateDialog 字号）
+  - ④ `badge--mono` 归位 `components/badge.css`
+  - ⑤ stylelint-vue 新增 no-descending-specificity warning 清零或基线化
+- [ ] **阶段 2 组件层升级 + 页面外壳（2-3 天，为手机铺路）**：`styles/components/*.css` 共享类与 `components/common/` 对齐成正式 base 组件目录（组件自带响应式行为，页面不再写媒体查询微调）；`.page-content` 升级真布局契约（flex/gap/最大宽度单一出处，5 页面只声明差异）；scoped 只声明 `--xxx` 变量（照 `--tsk-col-name-w` 先例）
+- [ ] **阶段 3 可选增量**：F12 content-visibility（前置：设置页定位先迁 IntersectionObserver）/ AiTaskView 拆分（T8-2 挂账）/ F13 a11y lint 守门 / F14 aria-describedby 系统化 / 密度模式（容器 style queries，Baseline 2026-05）
+
+**验收**：每阶段 `npm run lint:css` + `vitest`（覆盖率阈值不降）+ `typecheck` + `build`；视觉批次深浅两主题 + 窄屏目检（`docs/reports/ui-audit/visual-check.py` 可复跑则用）；changelog / plan-next 由主代理集中维护，子代理并发上限 5。
+
+## 安卓端开发（2026-11-17 立项）
+
+> 用户拍板（2026-11-17 凌晨，承接同日「前端框架/手机端选型」调研）：先做安卓端、只保留 HTTP 认证渠道、加后台运行；UI 用系统 WebView 加载本机 axum 复用现有 Vue 前端（`#auth=` bootstrap 流程零改动）；分发与更新走 GitHub Releases（APK 侧载，不经 Play 审核）；工程位置 monorepo——本仓新建 `android/` Gradle 工程，与 `openwrt/` 同级照抄其 feature 先例。iOS 不做（系统级无常驻后台，认证守护不可实现）。
+> 系统约束核实（2026-11-17，developer.android.com 官方原文）：FGS `specialUse` 类型无运行时时长上限（`dataSync` 在 Android 15+ 为 6h/24h 强杀）；Android 15 的 BOOT_COMPLETED 禁启清单（dataSync/camera/mediaPlayback/phoneCall/mediaProjection/microphone）**不含 specialUse**；Doze 官方豁免清单不含前台服务 → **电池优化白名单（`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）必做**；Android 16 无新 FGS 限制，但 LAN 流量 Local Network Permission 未来强制（校园门户在 LAN，targetSdk 上 36 时需前瞻声明）。
+
+### 架构
+
+```
+APK（单进程）
+├── MainActivity ── WebView → http://127.0.0.1:<port>（内嵌 Vue 前端，bootstrap 零改动）
+├── AuthForegroundService（FGS specialUse + START_STICKY + 常驻通知，5s 轮询状态 → P1 换 WS）
+│     └── JNI ↔ libcampus_auth.so（cargo-ndk arm64，feature `android` 照 openwrt 先例）
+│           ├── axum @127.0.0.1：REST/WS + rust-embed 前端产物
+│           ├── Engine：monitor 探测 → 证据判定 → http 渠道登录 → 网络验证
+│           └── 不编译：tray / 浏览器渠道 / Python bridge / 脚本渠道 / 卸载助手
+└── BootReceiver（BOOT_COMPLETED → autostart_enabled 才拉起 FGS）
+```
+
+### 后台运行对策
+
+| 约束 | 对策 |
+|------|------|
+| FGS 类型 | `specialUse`（无时长上限）+ `FOREGROUND_SERVICE_SPECIAL_USE` + `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` 用途文案 |
+| Doze | 应用内引导请求电池优化白名单（豁免后 Doze 期间可用网络 + partial wakelock） |
+| 国产 ROM（MIUI/HyperOS/ColorOS） | 应用内「保活指引」页：自启动权限、省电策略无限制、后台锁定（P2） |
+| 开机自启 | `RECEIVE_BOOT_COMPLETED` → BootReceiver → FGS（specialUse 不在 Android 15 禁启清单） |
+| Play 政策 | 不适用（GitHub Releases 侧载分发） |
+
+### 分阶段计划
+
+- [x] **P0 编译打通**（2026-11-17 完成，提交 bc02045 / cd6c627 / 35f4706；逐项更改见 changelog 同日条目）：Cargo `android` feature + `[lib] crate-type = ["lib", "cdylib"]` + `jni = "0.21"`（android target 专属）；cfg 门照 openwrt 先例（tray / notify-rust os 通道 target 门 / launcher 跳过 tray+browser / bridge 恒不懒加载 / autostart·uninstall·config 适配）；`CAMPUS_AUTH_BASE_DIR` 环境变量注入 base 目录；system 路由 `android` 平台字段；`src/ffi_android.rs` JNI 薄层（nativeInit/nativePort/nativeStatus/nativeStop，符号契约 `rs.campusauth.app.AuthNative`）；`android/` Gradle 骨架（MainActivity WebView + AuthForegroundService specialUse + BootReceiver + network_security_config 仅放行 127.0.0.1 cleartext）。**成功标准达成 = `cargo ndk -t arm64-v8a` 编出 libcampus_auth.so + clippy/fmt/test 全绿（lib 1454）**
+- [ ] **P1 前置（2026-11-19 第二轮审查发现，先于真机冒烟）**：① 密钥路径——`config/crypto.rs default_key_path` 走 `dirs::home_dir()`，android target 只读 HOME 环境变量（无 getpwuid 回退）且应用进程无 HOME → 回退 CWD `/` → `/.campus_network_auth` 创建 EACCES → `ServiceContainer::new` 失败 → nativeInit 恒返 0（真机首启即败）；修法为 android 下密钥路径挂 `CAMPUS_AUTH_BASE_DIR`（ffi 已先于容器注入）；② `MainActivity` 主线程同步调 nativeInit（Rust 契约明示数秒量级应后台线程）→ 移后台线程 + 完成后回 UI 线程加载 WebView，否则 ANR 且 startForeground 被推迟出系统窗口（ForegroundServiceDidNotStartInTime）；③ FGS `onDestroy` 走 nativeStop 后 P0 单程生命周期 → 服务被停掉再开 App 永久「启动失败」且通知已失——收敛到 launcher 正式 Android 模式时一并处理（对应 ffi TODO(P1)）；④ BootReceiver autostart 双状态源（Kotlin SharedPreferences 零写入 vs Rust `/api/autostart` 配置）——P2 接设置 UI 时以 Rust 配置为唯一事实源
+- [ ] **P1 真机 MVP**：真机全链路（掉线检测 → 自动重登 → 通知）；JNI 状态回传由 5s 轮询换 WS 订阅；启动编排从 ffi 薄层迁入 launcher 正式 Android 模式；mock 门户（`tests/mock-servers/full-portal`）+ 真机两套验证
+- [ ] **P2 系统集成**：autostart 设置 UI、电池优化引导 + 保活指引页、PC 配置经 repo 导入导出迁移、前端按 `/api/system` android 字段隐藏浏览器/脚本渠道入口、Android 16 LNP 权限位前瞻声明
+- [ ] **P3 发布链路**：release.yml Android job（cargo-ndk + gradle assembleRelease 签名）、应用内更新（版本检查 → APK 下载 → 安装意图，复用镜像回退）、四端同版注入（Gradle 版本号）、`docs/guides` 用户指南
+
+## 前端现代化排查与优化批次（2026-11-13 立项）
+
+> 用户诉求：「用 modern-web-guidance 这个 skill，看看前端还有没有需要优化的」，并要求「全面细致排查一遍，列一份计划」。
+> 排查手段：`npx modern-web-guidance legacy-scan frontend/src --json`（33 篇指南 / 35 条确定性规则，命中 7 条，全部为 `::-webkit-scrollbar`）+ 人工过渲染路径（模板语义、composable 生命周期、CSS token 层与现代特性使用、构建产物、服务端静态资源响应头）。本轮为静态审查，未起实例跑真机；标注「需真机」的项在落地时补验证。
+> 基线：30 个 JS chunk 合计 730 KB、11 个 CSS 合计 188 KB（minified）；服务端已有 `CompressionLayer`（`src/web/mod.rs:463`）与 hashed 资源 `immutable` 缓存（`src/web/static_files.rs:124`），传输与缓存层无需改动。
+> 总判断：无结构性问题。真正的成本集中在两处——一张按 6 MiB 解码的 logo 蒙版、一个每次 scroll 事件重新查 DOM 的监听；其余为语义与移动端打磨。与本文件 `T8-1` / `T8-2` 两项差异项无重叠。
+
+### 批次 1：零视觉改动（可独立合并）——已落地（2026-11-14，见 changelog 同日条目）
+
+- [x] **F1 logo 资源降采样**：`frontend/public/logo.png` 为 1254×1254 RGBA / 229,690 B，被四处 `.logo-mark` 蒙版（`frontend/src/styles/components/misc.css:272`）与 favicon（`frontend/index.html:6`）共用；CSS `mask` 只读 alpha 通道，而最大渲染尺寸是 About 页 96px（`frontend/src/styles/pages/about.css:25`）。降采样到 256×256（13,928 B，−94%），解码内存 6.0 MiB → 256 KiB。`build.rs:21` 的 app.ico 按 16–256 条目生成，256 源仍满足，已有 `resources/icons/app.ico` 无需重生成。
+- [x] **F2 设置页滚动监听收口**：`SettingsView.vue` 的 `updateActiveSection` 每次 scroll 事件对 6 个分区各做一次 `querySelector` + `offsetParent` + `getBoundingClientRect`（`visibleSection()`，第 51-56 行），而分区列表是静态的。改为挂载后缓存元素引用（`Map<id, HTMLElement>`）+ `requestAnimationFrame` 合并（监听保持 passive），卸载时取消在途帧。
+- [x] **F3 表头语义**：4 个任务面板共 31 个 `<th>` 无 `scope="col"`（`frontend/src/views/tasks/{Browser,Http,Scripts,Scheduled}TasksPanel.vue`）。
+- [x] **F4 `ToggleSwitch` 可访问名**：`role="switch"` 的可访问名落在按钮外的兄弟 `span` 上、按钮内容为空 knob（`frontend/src/components/common/ToggleSwitch.vue:29-36`）；`ScheduledTasksPanel.vue:291` 的行内用法未传 label。用 `useId()` + `aria-labelledby`（无 label 时接受 `aria-label` 透传），并在 `views/settings/settingsA11y.test.ts` 加静态断言。
+- [x] **F5 时间格式口径**：`frontend/src/views/settings/SystemSettings.vue:192` 的「上次检查」用裸 `toLocaleString()`（跟随浏览器 locale），与全站 `formatTimestamp` / `formatMtime` 口径不一致；抽出一个固定 locale 的本地时间格式化函数并复用。
+
+### 批次 2：视觉/交互微调（需深浅两主题目检）——已落地（2026-11-14，见 changelog 同日条目）
+
+- [x] **F6 滚动条标准属性兜底**：全站只有 `::-webkit-scrollbar`（`frontend/src/styles/base.css:268-284`；日志区 4px 见 `styles/pages/dashboard.css:150-166`），`scrollbar-color` / `scrollbar-width` 一个未声明，Firefox 至今是系统默认粗滚动条。按指南在 `@supports not selector(::-webkit-scrollbar)` 内给 `html` 声明 `scrollbar-width: thin` + `scrollbar-color: rgba(var(--slate-rgb), .2) transparent`（两属性均继承），Chromium/Safari 的 6px/4px 观感不变。**注意**：无条件声明标准属性会让 Chrome 接管为 `thin`（≈11px），4px 日志滚动条会变粗，故必须用 supports 护栏。
+- [x] **F7 弹窗动态视口高度**：壳层已有 `100vh` + `100dvh` 双声明（`frontend/src/styles/layout.css:4/24/93`），弹窗仍单用 `vh`：`modal.css:40`（85vh）/`:61`（92vh）/`:136`，`wizard.css:25`（90vh），`update-dialog.css:95`（52vh），`form.css:272`（60vh），`tasks.css` 多处。移动端浏览器工具栏会吃掉底部，补 dvh 双声明（vh 在前作回退）。
+- [x] **F8 设置搜索按帧合并**：`SettingsView.vue` 的 `watch(searchQuery)` 每次按键对 6 个分区全量 `textContent` + 12 组选择器查询（`frontend/src/utils/settingsSearch.ts`），打字快时是按键延迟来源；改为 rAF 合并（或 80–120ms debounce）。
+- [x] **F9 滚动链收口**：`.log-viewer` / `.history-list` / `.settings-scroll` / `.modal-body` 等内层滚动容器加 `overscroll-behavior: contain`，滚到尽头不再带动外层页面（当前全站 0 处声明）。
+- [x] **F10 首屏壁纸预置**：`frontend/public/theme-init.js` 只预置主题与 `--bg-primary`，自定义壁纸要等 Vue 挂载后由 `body.has-custom-bg::before`（`frontend/src/styles/pages/appearance.css:64`）呈现，大图用户每次加载都闪一下底色。同一份 localStorage 预置 `--bg-image` / `--bg-blur` / `--bg-opacity` 与 `html[data-custom-bg]` 选择器，`applyAppearance` 同步改切换该属性（避免与现有 class 双写）。
+
+### 批次 3：需专项 / 真机验证
+
+- [x] **F11 触屏拖拽**：`frontend/src/utils/drag.ts` 走 HTML5 DnD（`mousedown` 才挂 `draggable`），触屏完全不可用，而窄屏（≤768px）有完整底部导航。二选一：Pointer Events 自绘拖拽，或行内「上移/下移」按钮（更简单且键盘可达）。**2026-11-14 用户选定行内按钮方案并落地**（`useDragSort.moveBy` + 三面板行首按钮，与拖拽同一份全量顺序语义与持久化载荷）。
+- [ ] **F12 `content-visibility` 实验**：设置页 6 个分区全常驻挂载，首个分区之外可跳过布局。**前置**：分区定位依赖 `getBoundingClientRect` 实测值（`scrollToSection` / `updateActiveSection`），`contain-intrinsic-size` 的估算值会让目录高亮漂移——需先把定位换到 IntersectionObserver，或真机实测无漂移再上。
+- [ ] **F13 a11y lint 守门**：当前只有 `eslint-plugin-vue`（strongly-recommended），无 `eslint-plugin-vuejs-accessibility`。接入 flat config 并清首批告警，把「可访问名 / 表格语义」这类现在靠静态测试人工兜的规则交给 lint。
+- [ ] **F14 `aria-describedby` 系统化**：78 处 `.hint` / 错误文案（含非表单场景）vs 10 处 `aria-describedby`；优先把校验错误与危险操作提示挂到对应控件。
+
+### 已核对、明确不动
+
+- 服务端静态资源已压缩 + `immutable` 缓存；30 个懒加载 chunk 的切分与总体积对内嵌本地场景合理，不再拆分。
+- 焦点管理（reka Dialog）、body 滚动锁（`useBodyScrollLock`）、skip link + `<main tabindex="-1">`、`prefers-reduced-motion` 与手动 reduce-motion、`.sr-only` 覆盖、触控目标（`.btn-icon-only` 28px ≥ WCAG 2.5.8 的 24px）均已到位。
+- 日志 100 条上限 + WS 上行 5s 节流 + 重连指数退避/可见性重连/快照新鲜度比较均已实现，无需虚拟滚动或额外轮询改造。
+- 登录历史 `:key="idx"`（`DashboardView.vue:291`）评估后保留：列表整体替换、行内无组件状态，改稳定键需自造复合键且有撞键风险，收益为负。
+
+### 真机视觉检查（2026-11-13，1440×900 / 390×844，深浅两主题）——V1–V6 已全部处置（2026-11-14，见 changelog 同日条目）
+
+> 实例：`target/debug/campus-auth --base-path /tmp/campus-visual --port 50731`（沙箱配置）；覆盖仪表盘 / 方案 / 任务五个 Tab / 设置六个分区 / 关于 / 命令面板 / 仓库导入弹窗 / 通知面板 / Toast，移动端覆盖仪表盘、任务、方案、设置。下列结论均来自 DOM 实测（`getBoundingClientRect` / `getComputedStyle`），非目测；横向溢出、底部导航遮挡、浮层错位均未发现。
+
+- [x] **V1 设置页宽屏居中断裂**：`.settings-page { max-width:1080px; margin-inline:auto }`（`frontend/src/styles/pages/settings/list.css:2-9`）在 1440px 视口下把内容压到 291→1371，而页标题在 260、顶栏动作区右缘 1402——左右各错位 31px，与 changelog「卡片右缘与顶栏动作区对齐」相反（窄视口下才对齐）。**2026-11-14 用户拍板：保留居中列（可读性优先，标题错位属页面级取舍），不改代码。**
+- [x] **V2 移动端设置路由标题被搜索框挤没**：390px 下 `.top-title-area` 仅 16px，标题「设置」溢出到 x=59，而搜索框容器从 x=44 起——标题被覆盖只剩「设」。仅设置路由（顶栏放真实输入框）出现；仪表盘 / 方案 / 任务移动端标题正常。**修复**：≤768px 下 `.topbar-search--input` 按视口宽度收缩 `clamp(110px, 30vw, 180px)`，实测标题区恢复 85px。
+- [x] **V3 AI 任务页步骤条双 active**：`.ai-stepper` 在「已有捕获结果 + 配置改动未保存」时同时给第 1、3 步 `active`（实测 class：active / done / active），两处「当前步」并存。**修复**：第 3 步 active 条件补 `isConfigDone &&`，active 恒取第一个未完成步。
+- [x] **V4 移动端任务表脚部折行**：390px 下 `.tsk-foot` 的「共 1 个任务」被压到 57px 折成两行（实测高 33px），右侧提示同样折两行。**修复**：计数 span nowrap + ≤768px 隐藏 spacer 与右侧提示，实测单行 36px。
+- [x] **V5 浅色主题语义色 / 品牌色对比度**（实测 computed color/bg，已剔除渐变背景误报）：
+  - `.tech-badge`（关于页）：vue 1.83 / websockets 2.18 / playwright 2.21 / rust 2.58 / tokio 2.86 / ddddocr 2.91 / python 3.55，深色下 python 亦 3.69，均低于 4.5:1；
+  - `--success` 文本（「已就绪」「已安装」）浅色 1.86（深色 7.04）——浅色主题只加深了 `--warning` / `--warning-text`，success / error 未同步；
+  - `btn-danger-ghost`（卸载 / 立即关闭浏览器）浅色约 2.8–3.6（深色 4.61）；
+  - `badge--warn` 用 `--warning`（#d97706）而非已存在的 `--warning-text`（#a34a08），约 3.5。
+  **修复**：沿用 `--warning` 直接加深先例，浅色主题 `--success` → #047857、`--error` → #b91c1c（`--success-rgb`/`--error-rgb` 不动，淡底色调不受影响；`--warning` 保持亮琥珀供圆点/指示器，文字走 `--warning-text`）；`badge--warn` 改用 `--warning-text`；`.tech-badge` 文字改 `color-mix(品牌色 45%, 正文色)` + 描边 40%，深浅两主题实测 ≥7.3:1。
+- [x] **V6 关于页 `uv` 徽标呈圆形**（2 字符 pill + `radius-full`，像游离气泡），nit。**修复**：`.tech-badge` 统一 `min-width: 72px` + 内容居中。
+
+### 验收
+
+`npm run typecheck` / `lint` / `lint:css` / `test`（覆盖率阈值不降）/ `build`；批次 2 起加深浅两主题目检（`docs/reports/ui-audit/visual-check.py` 只读巡检，若本地已重建）。逐项完成在 `docs/changelog.md` 归档并勾销本节。
+
 ## 全面重构优化战役（2026-11-13 立项，2026-11-13 结役）
 
 > 依据两轮全栈审查（`docs/reports/refactor-optimization-review-2026-11-12.md` / `-2026-11-13.md`，本地不提交）与用户选定增量立项，共 10 阶段，总盘子约 14-18 周（单线口径）。完整任务书（依赖图 / 逐项设计要点 / 备选池 / 分歧清单）见 `docs/reports/campaign-plan-draft-2026-11-13.md`。

@@ -4,6 +4,8 @@
 
 Campus-Auth（中文名「认证喵」）是一个校园网自动认证工具。Rust 重写版为单 binary crate + Python 子进程（浏览器自动化），便携版解压即用。Rust 侧负责控制平面（网络监测、登录状态机、调度、配置、Web API、系统托盘），Python 侧作为按需执行插件负责浏览器自动化（Playwright）和 OCR（ddddocr）。
 
+安卓端（`feat/android` 分支开发中）：复用同一 Rust 控制平面——`android` feature 经 cargo-ndk 编 cdylib（`src/ffi_android.rs` JNI 薄层）+ `android/` Kotlin 壳以系统 WebView 加载本机 axum 内嵌前端；P0 编译已打通，收敛清单与阶段计划见 `docs/plan-next.md`「安卓端开发」。
+
 当前主程序版本：5.2.0-beta.1（用户可见更新见 `docs/updatelog.md`，逐项更改见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `openapi.json` 三端同版）。Python Worker 版本独立固定为 1.0.0。
 
 ## 技术栈
@@ -112,6 +114,7 @@ campus-auth/
 │   │                         #   --apply-update 等主进程退出后换 exe；--uninstall 等主进程
 │   │                         #   退出后删安装目录（Windows 需两段式：先复制到 %TEMP% 再删）
 │   ├── browser.rs            # 浏览器二进制探测与启动（登录侧共用）
+│   ├── ffi_android.rs        # Android JNI 薄层（仅 target_os = "android" 编译，feature android；P0 骨架，TODO(P1) 收敛清单见文件头）
 │   ├── app.rs                # Axum 服务器构建 + 托盘初始化
 │   ├── container.rs          # ServiceContainer: Arc 共享状态（13 服务 + EventBus/Metrics/uptime 3 横切，共 16 字段）
 │   ├── launcher/             # 启动状态机（full / lightweight / login-once；cli/config/locks/modes/engine_watch/restart/shutdown 七子模块 + mod 共享状态）
@@ -123,7 +126,7 @@ campus-auth/
 │   ├── config/               # 配置系统（ArcSwap + 加密 + 迁移）— 源码模块，对应运行时 /config（.gitignore / 锚定，勿混淆）
 │   ├── uninstall/            # 卸载计划（删什么 / 拒什么 / 怎么删）——**单一事实源**：
 │   │                         #   界面据此列清单、campus-auth-helper --uninstall 据此执行
-│   ├── web/                  # Web API + WebSocket（host.rs 回环 Host 头校验防 DNS rebinding，挂载于鉴权层之前；auth.rs bootstrap 握手鉴权；openapi.rs utoipa 契约管线；ssrf 解析钉扎；routes/ 按域拆分 20 文件：config/profiles/login/http_tasks/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai/notification/diagnostics 等，细粒度 state 注入）
+│   ├── web/                  # Web API + WebSocket（host.rs 回环 Host 头校验防 DNS rebinding——axum 内层，auth 豁免路径亦被其包裹（请求先过 auth 再到 host，组合探针测试见 web/mod.rs tests）；auth.rs bootstrap 握手鉴权；openapi.rs utoipa 契约管线；ssrf 解析钉扎；routes/ 按域拆分 20 文件：config/profiles/login/http_tasks/monitor/scheduler/tasks/scripts/tools/system/autostart/debug/history/repo/background/uninstall/ocr/ai/notification/diagnostics 等，细粒度 state 注入）
 │   ├── scheduler/            # 定时任务（独立 tokio task）
 │   ├── tasks/                # 任务管理 — 源码模块，对应运行时 /tasks（.gitignore / 锚定）
 │   ├── network/              # 网络接口
@@ -137,6 +140,7 @@ campus-auth/
 │   ├── tray/                 # 系统托盘（tray-icon）
 │   └── utils/                # 工具（paths 运行时目录布局单一事实源 / lock PID 文件锁 / metrics / io 原子写 / io_human 人话化 IO 错误文案 / archive_guard / 平台特定代码）
 ├── frontend/                 # Vue 3 + TypeScript + Vite — public/ 静态资源，dist/ 为 Vite 构建产物（rust-embed 嵌入，.gitignore 忽略）；src/api/generated/ 为 openapi-typescript 生成类型（npm run typegen 管线，切换完成前字段级契约以手写 src/api/types.ts 为准）；与 resources/ 职责分离
+├── android/                 # 安卓端 Gradle 壳工程（AGP/Kotlin：MainActivity WebView + AuthForegroundService specialUse + BootReceiver；照 openwrt/ feature 先例，计划见 docs/plan-next.md「安卓端开发」）
 ├── python_worker/            # Python Worker 子进程（Playwright + OCR）— 执行侧，对应 Rust 侧 src/bridge/；worker_main.py IPC 入口 + playwright_worker.py 组装门面（COMMANDS 18 条注册表单一事实源），伴生模块 Mixin 拆分（browser_lifecycle / browser_launch / browser_detect / step_engine / step_handlers / task_runner / profile_commands / config_session / auto_login / capture_commands / capture_kit / debug_commands / debug_session / ocr_commands / ocr_runtime / cancel_registry / worker_paths / models / variable_resolver，纯逻辑层不依赖 Playwright 可直接单测），IPC 契约见 python_worker/README.md
 ├── tests/                    # 集成测试（common/ 共享辅助）+ fixtures/ 隔离基座模板 & mock-servers/ 轻量门户（统一测试入口，见 tests/README.md）；原 mock_portal/ 已整体搬迁至 tests/mock-servers/full-portal/
 ├── fuzz/                     # cargo-fuzz 独立 crate（自带 lockfile，不纳入主工程口径）：fuzz_config_json / fuzz_migrate / fuzz_parse_ipc 三 target，CI fuzz.yml 每周冒烟
@@ -201,6 +205,7 @@ NDJSON IPC 协议：Rust 通过 stdin 发命令，Worker 通过 stdout 返结果
 - 手动更新：两条入口，信任口径**不同**——
   - **本地包复用**（`update/` 根目录扫描，`src/updater/local.rs`）：必须与远程清单声明的 SHA256 一致才复用；探测在 `check_update`（仅回报 `UpdateInfo.local_package` 供前端提示），暂存在 `download_stage_and_pending`（**重新扫描 + 边复制边哈希**，防 check→apply 之间文件被替换使信任锚断裂）；文件名取远程资产名而非本地名（决定解压分派）。不符即忽略并回退下载。
   - **手动选择安装包**（`POST /api/system/update-package`，上传 multipart）：**不比对远程摘要**——自编译包/镜像重打包必不匹配，用户显式选定即采纳，只需能从包里解出可执行文件。硬约束：target 恒取 `current_exe()`、Worker 目录须为内置 `<base>/python_worker`、版本须严格高于当前（同 helper `pending_version_allowed`，否则留下永远无法应用的 pending）、exe 摘要由本进程实算写入 pending。Web 层把 multipart **流式落临时文件**、更新器收路径再复制（不整包进内存）。
+  - **固定版本快照**（`POST /api/system/update` 携带 version/url/sha256 三项，`ApplyUpdateBody::into_pinned`，见 `src/web/routes/system.rs`）：**不走清单**——不比对 ed25519 签名与远程摘要，仅校验 URL 白名单 / SHA256 格式 / semver 高于当前，信任口径与手动上传包同级（持有 token 的本地调用方显式选定即采纳——2026-11-19 成文取舍，与「Web 服务安全防线」的纯本地应用信任模型同源）；任一校验不过即回退服务端重查清单（body 省略即重查）。
   - 共同点：落盘均走 `finalize_staged_package`（解压产物 → exe 摘要 → `pending.json`），无旁路；`UpdaterError::PackageNotNewer` / `ExtractFailed` 映射 400（用户可纠正），`LoginInProgress` / `UpdateInProgress` / `Cancelled` 映射 409。
   - **取消语义**：`cancel_pending_update()`（卸载流程调用）先在状态临界区置 `update_cancelled` 标记，等待独立任务持有的操作互斥释放，再清 `pending.json` + staging；最终 pending 提交、助手唤醒与取消标记共用临界区，阻止在途操作于取消完成后重新提交。调用方中断不提前释放正在执行的阻塞 I/O 所有权；失败卸载的恢复只复位取消标记。返回值是"**确实**取消掉了"（存在 pending 且清理后复查 pending 与 staging 均消失），不是仅"此前有 pending"。
   - 清单声明的 `size` 为咨询性字段（同 UPD-7），不符仅告警、以摘要为准
@@ -217,7 +222,7 @@ Vite 构建产物通过 `rust-embed` 编译进二进制。开发时可用 `--fea
 
 ### Web API 契约（openapi.json）
 
-根目录 `openapi.json` 是 **utoipa 生成 ⊕ 手写 baseline 按路径合并**的产物（`src/web/openapi.rs` 的 `merged_openapi_json`）：已注解域（`#[utoipa::path]`，目前 18/20 域，notification / diagnostics 尚未注解；注解须在 `src/web/openapi.rs` 的 `paths` 挂载后才进入生成管线）中已挂载域的路径条目以生成源为准（整体替换手写条目），未挂载与未注解条目维持手写；`components.schemas` 由生成管线产出（错误信封 `Error*` / 包装 `DataEnvelope<T>` 等跨域形状收口在 `web::openapi::schemas`，各 route 文件不得重复定义）。OpenAPI 版本 3.1.0，`info.version` 随 `CARGO_PKG_VERSION` 自动同步（三端同版少一处手工项）。重生成：`UPDATE_OPENAPI=1 cargo test`（生成测试重写文件；BTreeMap 键序 + 固定缩进保证重复生成零 diff）。前端经 `npm run typegen`（openapi-typescript）产出 `src/api/generated/api.d.ts`；切换到生成类型前，字段级契约的权威来源仍是手写 `frontend/src/api/types.ts`（边界见 `frontend/src/api/generated/README.md`）。
+根目录 `openapi.json` 是 **utoipa 生成 ⊕ 手写 baseline 按路径合并**的产物（`src/web/openapi.rs` 的 `merged_openapi_json`）：已注解域（`#[utoipa::path]`，routes/ 20 域已全部注解挂载——notification / diagnostics 已随 T5-1 收口，system 域零散 handler（update-state 与 mirror-probe / mirror-preference 三端点）已随 2026-11-19 契约批次接入，events / browsers 等非 route 文件域与 /ws 仍维持手写条目；注解须在 `src/web/openapi.rs` 的 `paths` 挂载后才进入生成管线）中已挂载域的路径条目以生成源为准（整体替换手写条目），未挂载与未注解条目维持手写；`components.schemas` 由生成管线产出（错误信封 `Error*` / 包装 `DataEnvelope<T>` 等跨域形状收口在 `web::openapi::schemas`，各 route 文件不得重复定义）。OpenAPI 版本 3.1.0，`info.version` 随 `CARGO_PKG_VERSION` 自动同步（三端同版少一处手工项）。重生成：`UPDATE_OPENAPI=1 cargo test`（生成测试重写文件；BTreeMap 键序 + 固定缩进保证重复生成零 diff）。前端经 `npm run typegen`（openapi-typescript）产出 `src/api/generated/api.d.ts`；切换到生成类型前，字段级契约的权威来源仍是手写 `frontend/src/api/types.ts`（边界见 `frontend/src/api/generated/README.md`）。
 
 ## 测试规范
 
@@ -346,7 +351,7 @@ Conventional Commits，中文描述：
 ### Web 服务安全防线
 
 - 回环绑定时 `src/web/host.rs` 强制校验 Host 头是 CORS 之外的独立防线（防 DNS rebinding——恶意域名解析到 127.0.0.1 后与本地服务「同源」，CORS 与浏览器 PNA 均失效）：只接受 `127.0.0.1` / `localhost` / `[::1]`（精确等值、端口忽略），策略按 `PreparedAxumListener` 携带的实际绑定地址推导（绑定非回环 = Docker/LAN 显式暴露，跳过校验）。新增监听入口时必须沿用该推导，不要绕过校验层；Host 缺失放行（HTTP/1.0 与 oneshot 测试基建无 Host，rebinding 路径必然携带域名）
-- **鉴权为 bootstrap 握手模型**（`src/web/auth.rs`；旧免鉴权 `GET /api/auth/token` 已删除）：托盘/launcher 打开界面时在 URL 尾拼 `#auth=<bootstrap>` fragment（fragment 不发往服务器、不进服务器日志），前端经 `POST /api/auth/exchange` 用 bootstrap 秘钥或管理密码换取 token，随后自行清除地址栏 fragment。bootstrap 秘钥落盘 `config/.auth_bootstrap`（创建即 0600，仅当前用户可读），与 token 同代——任一缺失/损坏即与 token 成对轮换
+- **鉴权为回环本地信任 + bootstrap 握手**（`src/web/auth.rs`）：回环监听下 `GET /api/auth/local-token` 直接下发 token，前端在无 fragment/缓存时自动取用（打开即用）——**这是 2026-11-13 的明确取舍**：同机其他用户/进程可借此拿到 token 调 `/api/scripts/run`，单人机与单一共享账号场景下接受该风险；非回环绑定默认 404，但 `--allow-unauthenticated-bind` 显式豁免时同样开放（默认 Docker compose 即此形态：容器内绑 0.0.0.0、宿主只发布 127.0.0.1，服务端无法区分宿主与局域网流量，信任边界由部署方声明；发布到 LAN 必须去掉豁免并配管理密码）。托盘/launcher 打开界面仍带 `#auth=<bootstrap>` fragment（fragment 不发往服务器、不进服务器日志，换取成功即剥除）；bootstrap 秘钥落盘 `config/.auth_bootstrap`（创建即 0600），与 token 同代成对轮换。token 按访问来源分存：回环 localStorage（跨标签/重启复用）+ sessionStorage，远程仅 sessionStorage，读取顺序 localStorage → sessionStorage，401 两处全清；`--no-browser`（或打开浏览器失败）且无托盘的本地监听在启动时把带 fragment 的完整入口打到终端 stderr（不进日志文件/诊断包——后端日志按设计只记基础 URL）
 - **非回环绑定 fail-closed 凭据门禁**（`src/app.rs` 的 `check_bind_credential_gate`，T0a-2）：远程用户拿不到 fragment，只能凭管理密码换取 token——绑定非回环 && 无生效管理密码 && 未显式豁免 → **拒绝启动**。管理密码生效优先级：CLI `--management-password` / 环境变量 `CAMPUS_AUTH_MANAGEMENT_PASSWORD` > 配置 `management_password`（exchange 每次实时读取，UI 改密码无需重启）；`--allow-unauthenticated-bind` 为显式豁免（强烈不推荐）
 - 前端 Vite dev 代理（`vite.config.ts` 的 `/api`、`/ws`）必须保留 `changeOrigin: true`——代理默认透传原始 Host（localhost:5173）会被回环校验拒绝；改动前端代理时勿删
 
