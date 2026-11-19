@@ -323,6 +323,11 @@ class CaptureCommandsMixin:
                     logger.debug("停止临时 Playwright 连接失败", exc_info=True)
                 self._playwright = None
             elif self._browser is not None or self._context is not None:
+                # 空闲回收武装口径与 handle_page_capture finally 的无条件武装
+                # 刻意并存（终态等价，非行为分叉）：此处常驻浏览器在用时才重新
+                # 武装——入口已取消旧计时，常驻不在用时没有可回收对象，武装只是
+                # 空跑；page_capture 按防御纵深无条件武装，计时器触发时自复查
+                # 常驻状态（_browser_idle_release 的空态直退分支）同样无害
                 self._arm_browser_idle_release()
 
     @asynccontextmanager
@@ -610,7 +615,11 @@ class CaptureCommandsMixin:
                 }
         finally:
             # finally 而非 except Exception：命令级超时的 task.cancel() 产生
-            # CancelledError（BaseException），except Exception 拦不住会跳过注销
+            # CancelledError（BaseException），except Exception 拦不住会跳过注销。
+            # 无条件武装与 handle_test_redirect 的「常驻在用时才武装」刻意并存：
+            # 防御纵深优先，不依赖调用方判断常驻浏览器是否在用——计时器触发时
+            # 自复查常驻状态（_browser_idle_release 的空态直退分支），常驻不在用
+            # 时只是空跑一轮计时任务，无副作用
             self._arm_browser_idle_release()
             if cancel_id:
                 cancel_registry.unregister(cancel_id)

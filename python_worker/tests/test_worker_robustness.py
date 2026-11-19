@@ -30,6 +30,7 @@ from playwright_worker import (
     cancel_registry,
 )
 from step_handlers import StepCancelled, WorkerError, _safe_op, _sanitize_error
+from fakes import FakeBrowser, FakeContext, FakePage
 
 
 def _run(coro):
@@ -168,33 +169,7 @@ def test_dispatch_guarded_error_response_after_emit_failure(monkeypatch):
 
 
 # ── 修复 4：_close_session / 热恢复清 _wired_page_ids ──
-
-
-class _WirePage:
-    """可统计 dialog 绑定次数的页面对象替身。"""
-
-    def __init__(self):
-        self.handlers: dict[str, object] = {}
-
-    def on(self, event, cb):
-        self.handlers.setdefault(event, []).append(cb)
-
-    async def close(self):
-        pass
-
-
-class _WireContext:
-    def __init__(self):
-        self.pages: list = []
-
-    async def new_page(self):
-        return _WirePage()
-
-    async def close(self):
-        pass
-
-    def on(self, event, cb):
-        pass
+# 原 _WirePage/_WireContext 已收敛至 fakes.py（FakePage/FakeContext）
 
 
 def test_close_session_clears_wired_page_ids():
@@ -202,9 +177,9 @@ def test_close_session_clears_wired_page_ids():
 
     async def _run_case():
         core = WorkerCore()
-        page = _WirePage()
+        page = FakePage()
         core._page = page
-        core._context = _WireContext()
+        core._context = FakeContext()
         core._browser = object()
         core._wired_page_ids.add(id(page))
         await core._close_session()
@@ -212,7 +187,7 @@ def test_close_session_clears_wired_page_ids():
 
         # persistent 模式（context 保留）：同样要清，防止对象 id 复用漏绑新页
         core2 = WorkerCore()
-        ctx = _WireContext()
+        ctx = FakeContext()
         core2._context = ctx
         core2._browser = None
         core2._wired_page_ids.add(123456)
@@ -228,14 +203,7 @@ def test_hot_recovery_clears_wired_page_ids_before_new_context():
 
     async def _run_case():
         core = WorkerCore()
-
-        class FakeBrowser:
-            def is_connected(self):
-                return True
-
-            async def new_context(self, **kwargs):
-                return _WireContext()
-
+        # 原内联 FakeBrowser 已收敛至 fakes.py（is_connected True + new_context）
         core._browser = FakeBrowser()
         core._context = None
         core._last_browser_settings = {"pure_mode": True}
