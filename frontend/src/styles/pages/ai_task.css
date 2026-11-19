@@ -3,9 +3,11 @@
  * 顶部步进器 + 卡片完成态指示；流式输出与底部同步进度条为本次新增。
  */
 
-/* AI 生成页作为「任务」页的一个 Tab 由容器渲染。入场动画不再在此手抄——
-   统一出口见 layout.css 的 `.content-wrapper > *`（页面级，每个页面都自动带上）。 */
+/* AI 生成页作为「任务」页的嵌套路由由 TasksView 渲染，不是 content-wrapper 的
+   直接子层：入场动画由外层外壳的 `.page-in`（motion.css 基元）承担，本页根容器
+   不再手抄任何入场规则；切 Tab 属瞬时换内容，不重复播入场。 */
 .ai-task-page {
+  /* 页面差异：向导卡片较重，本页内容底部需要比外壳 padding 多一档呼吸空间 */
   padding-bottom: var(--space-lg);
   --ai-rail: rgba(var(--primary-rgb), 0.16);
 }

@@ -393,7 +393,6 @@ function setResultStep(event: Event): void {
 .flow-list-heading > div { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .flow-list-heading strong { font-size: 15px; font-weight: 700; }
 .flow-step-count { padding: 3px 8px; border-radius: 999px; background: rgba(var(--accent-rgb), .1); color: var(--text-primary); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 650; }
-.flow-list-heading .hint { font-size: 12px; }
 .flow-collapse-all { flex: none; padding: 6px 9px; border: 0; border-radius: 7px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
 .flow-collapse-all:hover { color: var(--text-primary); background: var(--bg-card-elevated); }
 .flow-step { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); }
@@ -436,9 +435,9 @@ function setResultStep(event: Event): void {
 .flow-result-heading p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .flow-result > .form-row, .flow-result > .form-group { max-width: 940px; }
 .flow-result--side { position: static; padding: 20px; }
-.flow-result--side .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
-.flow-step-body .form-group { margin-bottom: 0; }
-.flow-result--side > .form-group:last-child { margin-bottom: 0; }
+.flow-result--side .form-row { --form-row-cols: minmax(0, 1fr); --form-row-gap: 0; }
+.flow-step-body .form-group { --form-group-margin: 0; }
+.flow-result--side > .form-group:last-child { --form-group-margin: 0; }
 .flow-intro, .flow-help { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .flow-intro { max-width: 75ch; margin-bottom: 4px; }
 .flow-options { border-top: 1px solid var(--border); }
@@ -448,7 +447,7 @@ function setResultStep(event: Event): void {
 .flow-other-values[open] { display: flex; flex-direction: column; gap: 8px; }
 .flow-advanced[open] { display: flex; flex-direction: column; gap: 14px; }
 .flow-advanced[open] > summary { padding-bottom: 0; }
-.flow-failure .form-group:last-child { margin-bottom: 0; }
+.flow-failure .form-group:last-child { --form-group-margin: 0; }
 .flow-result-help { margin-bottom: 16px; }
 .flow-values { display: flex; flex-direction: column; gap: 8px; }
 .flow-value-buttons { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; color: var(--text-secondary); }
@@ -461,7 +460,7 @@ function setResultStep(event: Event): void {
 @media (min-width: 1800px) {
   .flow-workspace:has(> .flow-result) { grid-template-columns: minmax(0, 1.35fr) minmax(360px, .85fr); }
   .flow-workspace > .flow-result { position: sticky; top: 104px; }
-  .flow-workspace > .flow-result .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .flow-workspace > .flow-result .form-row { --form-row-cols: minmax(0, 1fr); --form-row-gap: 0; }
 }
 /* 700 并入全局 768 档（index.css 断点约定清单）：步骤头紧凑化与其他表单块的
    窄屏降级同档触发，768–701 区间提前进入紧凑态，避免两档之间夹 22px 的

@@ -1,7 +1,15 @@
-/* 仪表板整体布局：填满容器，不滚动 */
-.page-content:has(.stats-grid) {
-  display: flex;
-  flex-direction: column;
+/* ═══ 仪表盘页面差异（外壳契约见 layout.css 的 .page-content）═══
+   flex 纵向与滚动模型（V1：随外层 content-wrapper 整体滚动，页面根无内部滚动容器）
+   均由契约承担；本文件只声明两处差异：
+   ① gap: 0 —— 块间距走各子块自身的 margin-bottom（--space-md），不消费契约 gap。
+      子块（环境横幅 / 统计栅格 / 双栏行）随状态条件增删，margin 跟着子块走，
+      不依赖相邻兄弟存在；末块也不产生契约 gap 会省掉的尾随空隙。
+   ② min-height: 100% —— 极矮内容下页面根仍占满滚动视口（旧 :has(.stats-grid)
+      高度豁免三处重申的 height:auto/overflow:visible 本就是 UA 默认值，已随
+      契约化退役；stats-grid 仅本页渲染，类选择器化后守卫不再需要）。 */
+.dashboard-page {
+  gap: 0;
+  min-height: 100%;
 }
 
 .stats-grid {
@@ -588,7 +596,6 @@
 }
 
 @media (max-width: 1100px) {
-  .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
   .dashboard-split { grid-template-columns: 1fr; }
   /* 单列恢复自然高度：诊断卡解除行高上限与 stretch，只留空态下限（不至于塌成一条） */
   .dashboard-split > .diag-card { max-height: none; min-height: 300px; }
@@ -598,7 +605,6 @@
 }
 
 @media (max-height: 700px) {
-  .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
   .dashboard-page .history-card { min-height: 280px; }
   .dashboard-page .log-card { min-height: 340px; }
 }

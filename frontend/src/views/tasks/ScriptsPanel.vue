@@ -15,6 +15,7 @@
 import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
 import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
@@ -214,30 +215,21 @@ onMounted(async () => {
           </tr>
           <tr v-else-if="!scripts.length">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="code" :stroke-width="1.5" />
-                <span>暂无自定义脚本</span>
-                <span class="empty-desc">
-                  脚本用于定时执行的辅助动作（打卡、签到等），也可以作为方案「登录方式 · 自定义脚本」
-                  的登录逻辑；支持 Python、Shell 或任意可执行程序
-                </span>
-                <div class="empty-actions">
+              <EmptyState icon="code" :stroke-width="1.5" title="暂无自定义脚本" description="脚本用于定时执行的辅助动作（打卡、签到等），也可以作为方案「登录方式 · 自定义脚本」的登录逻辑；支持 Python、Shell 或任意可执行程序">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewScript">
                     <IconApp name="plus" />新建脚本
                   </button>
                   <button type="button" class="btn btn-sm" @click="onImportScript">
                     <IconApp name="upload" class="icon-sm" />从文件导入
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr v-else-if="!visibleScripts.length">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的脚本</span>
-              </div>
+              <EmptyState icon="search" :stroke-width="1.5" :title="`没有匹配「${searchQuery}」的脚本`" />
             </td>
           </tr>
           <tr

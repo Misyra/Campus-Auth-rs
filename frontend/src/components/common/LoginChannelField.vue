@@ -518,7 +518,7 @@ async function runTest(): Promise<void> {
 }
 
 .browser-channel-panel .form-group {
-  margin-bottom: 0;
+  --form-group-margin: 0;
 }
 
 /* ===== 进程内渠道面板（直连 / 脚本共用同一套外观）===== */
@@ -533,7 +533,7 @@ async function runTest(): Promise<void> {
 }
 
 .channel-panel .form-group {
-  margin-bottom: var(--space-sm);
+  --form-group-margin: var(--space-sm);
 }
 
 /* 绑定缺失提示改用全局 `.note` / `.note--warn`（components/misc.css）：

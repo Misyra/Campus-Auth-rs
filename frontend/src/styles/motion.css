@@ -10,9 +10,10 @@
  *   pop-in     浮层弹入 0.16s，translateY(4px) + scale(0.98)
  *   统一缓动 --ease-out-soft = cubic-bezier(0.32, 0.72, 0, 1)（base.css）。
  *
- * 与既有动效的关系：base.css 的 pageEnter（translateY 6px / --dur-slow）仍由
- * layout.css 的 router-view 落点消费，本文件的 .page-in 是页面批后续接入的
- * Catmail 口径入口（4px / 0.18s），两者并存，页面批迁移时逐步收口。
+ * 与既有动效的关系：页面入场的唯一出处是本文件的 .page-in（4px / 0.18s），所有
+ * 顶层页面根容器统一挂载（见 layout.css 的 .page-content 契约注释）。旧结构选择器
+ * 入场 layout.css `.content-wrapper > *` 的 pageEnter（6px / --dur-slow）已退役——
+ * 它与 .page-in 同特异度且后导入，曾压制本基元口径。
  *
  * 时长 0.28s / 0.16s 为 Catmail 配方档位，不并入 base.css 的 --dur-* 三档
  * （避免档位膨胀）；消费方一律用类名，不感知具体数值。

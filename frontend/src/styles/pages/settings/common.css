@@ -1,9 +1,6 @@
 /* common.css — 设置页共享框架（连续表单 / 面板网格 / 卡片头 / 保存栏 / settings 域按钮覆盖） */
-.settings-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
+/* 页面外壳（flex 纵向）消费 layout.css 的 .page-content 契约；宽度居中 / gap:0 /
+   position:relative 等差异见 settings/list.css 的 .settings-page（后导入覆盖）。 */
 
 .settings-form {
   display: flex;

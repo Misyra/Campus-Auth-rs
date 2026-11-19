@@ -4,16 +4,17 @@
    此前页内那张竖排二级导航卡在 2280px 视口下离左边缘 400px 有余、四周全是留白，
    像一张被丢在页面中间的卡片；且它把正文推到中间，与顶栏页标题（贴左）不同列。 */
 
-/* 左对齐（不是居中）+ **填满可用宽度**：与顶栏页标题同一起始列。居中会让标题贴左、
-   正文居中，在宽屏上读成两列；限宽则把 2280px 视口右侧白扔 500px 以上（用户实测直接
-   问「为啥右边空一块」）。列表 / 帮助卡这类内容本来就该铺满，真正怕拉长的是表单里
-   的单行输入框，那一层由各任务面板在自己的列里限制。 */
-.tasks-page {
-  max-width: none;
-}
+/* 任务页外壳消费 layout.css 的 .page-content 契约（flex 纵向 + gap --space-md），
+   本文件不再声明差异：左对齐 + **填满可用宽度**是契约的默认形态（.page-content
+   从不设 max-width）。此前这里写着 `.tasks-page { max-width: none }`，但契约化前
+   `.page-content` 也早已没有任何 max-width 可被它覆盖，属死规则，随契约化删除。
+   列表 / 帮助卡这类内容本来就该铺满，真正怕拉长的是表单里的单行输入框，
+   那一层由各任务面板在自己的列里限制。 */
 
 /* 窄屏兜底导航：≤768px 时侧栏只剩图标、子项文字放不下（responsive.css 里整块隐藏），
-   这里才出现。>768px 一律不渲染为可见元素，也就不占纵向空间。 */
+   这里才出现。>768px 一律不渲染为可见元素，也就不占纵向空间（display:none 不生成
+   盒子，契约 gap 也不会给它留空）。与面板根的间距交给外壳契约的 gap，本块不写
+   margin-bottom——此前双机制并存（margin + 契约化后的 gap）会叠成 32px。 */
 .tasks-narrow-nav {
   display: none;
 }
@@ -23,7 +24,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-xs);
-    margin-bottom: var(--space-md);
     padding: var(--space-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
@@ -82,6 +82,9 @@
    一旦与其它页面的同名规则相遇，就会由导入顺序决定谁生效（静默覆盖）。 */
 
 /* ---- 列表态 ---- */
+/* 任务面板根（TasksView 嵌套 router-view 的落点，非 .page-content）：
+   纵向排布与页面外壳契约同款（flex column + gap --space-md），面板切到编辑态后
+   由 tsk-editor-page 等页面私有外壳接管。 */
 .tsk-list-page {
   display: flex;
   flex-direction: column;

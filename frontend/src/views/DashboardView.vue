@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
@@ -335,8 +336,9 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
 </script>
 
 <template>
-  <!-- page-in：消费 motion.css 的 Catmail 页面入场基元（与 layout.css 的 pageEnter
-       收口关系见报告；动画口径不在此重抄） -->
+  <!-- page-in：消费 motion.css 的 Catmail 页面入场基元（4px / --dur-base）。
+       外壳契约化后这是顶层页面入场的唯一出处——layout.css 的结构选择器入场
+       （pageEnter）已退役，不再与 .page-in 同特异度竞争。 -->
   <div class="page-content dashboard-page page-in">
     <!-- 主状态行：网络结论 + 主操作（启动/停止检测）。
          启动检测自顶栏迁入首页：它是页面的主行为，放在状态旁语义更近。 -->
@@ -459,9 +461,9 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
             <input v-model="logs.logFilter.search" type="text" placeholder="搜索日志..." class="log-search" aria-label="搜索日志" />
           </div>
           <div ref="logViewer" class="log-viewer" @scroll="onLogScroll">
-            <div v-if="!logs.filteredLogs.value.length" class="empty-state">
+            <EmptyState v-if="!logs.filteredLogs.value.length">
               <span>{{ logs.logFilter.search || logs.logFilter.level || logs.logFilter.source ? '无匹配日志' : '暂无日志' }}</span>
-            </div>
+            </EmptyState>
             <div v-else class="log-entries">
               <div
                 v-for="(item, index) in logs.filteredLogs.value"
@@ -505,14 +507,11 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         </div>
       </div>
       <div class="card-body">
-        <div v-if="!loginHistory.length" class="empty-state">
-          <IconApp name="clock" />
-          <span>暂无登录记录</span>
-          <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
-          <div class="empty-actions">
+        <EmptyState v-if="!loginHistory.length" icon="clock" title="暂无登录记录" description="配置账号后，可立即尝试一次登录">
+          <template #actions>
             <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'profiles' })">去配置账号</button>
-          </div>
-        </div>
+          </template>
+        </EmptyState>
         <div v-else class="history-list">
           <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">
             <div class="history-status">

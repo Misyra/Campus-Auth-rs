@@ -19,7 +19,8 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 8px;
+  /* 分叉通道：与所在卡片节奏不同的上间距只在 scoped 声明 --chip-row-mt */
+  margin-top: var(--chip-row-mt, 8px);
 }
 
 /* 行内速查变体：标签 + 词条同排（占位符行、脚本契约卡首行），不需要默认的上间距 */

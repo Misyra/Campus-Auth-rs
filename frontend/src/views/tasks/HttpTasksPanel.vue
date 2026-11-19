@@ -15,6 +15,7 @@
 import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
 import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import HttpFlowFields from "@/components/common/HttpFlowFields.vue";
@@ -262,24 +263,18 @@ onMounted(async () => {
           </tr>
           <tr v-else-if="!httpTasks.length">
             <td colspan="7">
-              <div class="empty-state">
-                <IconApp name="globe" :stroke-width="1.5" />
-                <span>暂无 HTTP 登录任务</span>
-                <span class="empty-desc">HTTP 登录任务直接向网关发登录请求，不开浏览器、不需要 Python 与 Playwright</span>
-                <div class="empty-actions">
+              <EmptyState icon="globe" :stroke-width="1.5" title="暂无 HTTP 登录任务" description="HTTP 登录任务直接向网关发登录请求，不开浏览器、不需要 Python 与 Playwright">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
                     <IconApp name="plus" />新建 HTTP 登录任务
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr v-else-if="!visibleRows.length">
             <td colspan="7">
-              <div class="empty-state">
-                <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的 HTTP 登录任务</span>
-              </div>
+              <EmptyState icon="search" :stroke-width="1.5" :title="`没有匹配「${searchQuery}」的 HTTP 登录任务`" />
             </td>
           </tr>
           <tr
@@ -550,7 +545,7 @@ onMounted(async () => {
 .http-ref-functions summary::-webkit-details-marker { display: none; }
 .http-ref-functions summary span { margin-left: auto; color: var(--text-secondary); font-weight: 400; }
 .http-ref-functions[open] summary svg { transform: rotate(180deg); }
-.http-ref-functions .chip-row { margin-top: 12px; }
+.http-ref-functions .chip-row { --chip-row-mt: 12px; }
 .http-optional-info summary:focus-visible, .http-writing-help summary:focus-visible, .http-ref-functions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 </style>

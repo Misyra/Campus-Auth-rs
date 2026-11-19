@@ -80,8 +80,10 @@
 
 .form-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-md);
+  /* 分叉通道：单列纵排 / 自定义列宽等变体只在 scoped 声明 --form-row-cols 与
+     --form-row-gap（照 .form-group 的 --form-group-margin 先例），不得改写声明值 */
+  grid-template-columns: var(--form-row-cols, 1fr 1fr);
+  gap: var(--form-row-gap, var(--space-md));
 }
 
 /* 双列变体：宽窄比（AI 配置页服务商预设 + Base URL 等场景） */

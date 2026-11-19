@@ -273,7 +273,10 @@
 
 .content-wrapper {
   flex: 1;
-  padding: 24px 32px 32px;
+  /* 页面级四周留白的**单一出处**：所有顶层页面共用这一组 padding（窄屏收窄见
+     responsive.css 的 768px 档）。页面文件不得再声明页面级 padding；页面私有
+     的额外 padding 属于页面差异，须注释说明（如 ai-task 的 padding-bottom）。 */
+  padding: var(--space-lg) var(--space-xl) var(--space-xl);
   overflow-y: auto;
   min-height: 0;
   scrollbar-gutter: stable;
@@ -286,25 +289,21 @@
 
 .top-actions > .btn-secondary { background: var(--navigation-hover); }
 
-/* ═══ 页面入场动画（全站唯一出处）═══
-   `.content-wrapper` 是三个 router-view 里最外层那个的落点，故 `> *` 恰好覆盖每一个
-   顶层页面（仪表盘/方案/任务/设置/关于/404）。用结构选择器而不是 `.page-content`：
-   `AppearanceView` / `AiTaskView` 的根节点不带那个类，此前 `ai_task.css` 手抄了一份、
-   外观页干脆没有——同一个转场三种待遇。任何人新增页面都自动获得一致的转场。
-
-   **只有这一条规则。** 任务页 / 设置页内部也曾各挂一份（转 Tab 时被换掉的面板），
-   但这两个页面进入时外壳与内部面板会**同时**播 pageEnter：嵌套的 animation 位移相加、
-   透明度相乘，同一个转场在它们身上明显更"重"（实测 `/tasks` 与 `/settings/*` 各命中
-   两个元素，其余页面只有一个）。嵌套动画只能二选一，留外层——它覆盖全部页面，
-   而内层那份换来的只是"切 Tab 时淡入"，切 Tab 本来就是瞬时换内容。 */
-.content-wrapper > * {
-  animation: pageEnter var(--dur-slow) var(--ease-out);
-}
-
-/* 仪表板页面：组件化卡片按内容流排布，滚动交给 content-wrapper
-   （旧版内部定高栅格会在窄列里挤压活动图表，视觉批次起改为自然流） */
-.content-wrapper > .page-content:has(.stats-grid) {
-  height: auto;
-  min-height: 100%;
-  overflow: visible;
+/* ═══ 页面外壳布局契约（单一出处）═══
+   `.page-content` 是顶层页面根容器的统一外壳类：仪表盘 / 方案 / 任务 / 设置 / 关于
+   的根节点都挂在 content-wrapper 的直接子层（404 页与设置内嵌面板除外，见各自文件）。
+   契约内容：
+   - flex 纵向 + gap：页面根的排布方向与块间距只在这里声明；页面文件只声明**差异**
+     （如 settings 的 max-width 居中与 gap:0、dashboard 的 margin 间距模式、
+     appearance 的栅格——它已内嵌进设置页，不再消费本契约）。
+   - 页面级 padding：单一出处是上方 .content-wrapper，页面不重复声明。
+   - 入场动画不在外壳上挂：页面根统一消费 motion.css 的 `.page-in`（新页面照抄一个
+     类名即可）。旧结构选择器入场（`.content-wrapper > *` 的 pageEnter）已退役——
+     它与 `.page-in` 同特异度且后导入，曾压制了 motion.css 的基元口径（6px/--dur-slow
+     vs 4px/--dur-base）。AiTaskView 是 /tasks 的嵌套路由、本就不是直接子层，
+     入场由外层 TasksView 外壳承担，切 Tab 瞬时换内容。 */
+.page-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }

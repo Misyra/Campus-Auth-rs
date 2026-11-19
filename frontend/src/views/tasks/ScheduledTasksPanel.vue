@@ -15,6 +15,7 @@ import { IS_OPENWRT } from "@/utils/platform";
 import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
 import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import ToggleSwitch from "@/components/common/ToggleSwitch.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
@@ -242,16 +243,13 @@ onMounted(async () => {
           </tr>
           <tr v-else-if="!st.scheduledTasks.value.length">
             <td colspan="8">
-              <div class="empty-state">
-                <IconApp name="calendar" :stroke-width="1.5" />
-                <span>暂无定时任务</span>
-                <span class="empty-desc">让「浏览器任务」或「脚本」在每天固定时间、或程序启动后自动跑一次</span>
-                <div class="empty-actions">
+              <EmptyState icon="calendar" :stroke-width="1.5" title="暂无定时任务" description="让「浏览器任务」或「脚本」在每天固定时间、或程序启动后自动跑一次">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewScheduledTask">
                     <IconApp name="plus" />新建定时任务
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr
@@ -529,9 +527,7 @@ onMounted(async () => {
     <div v-if="st.scheduledTaskHistoryLoading.value" class="loading-state">
       <div class="spinner"></div><p>加载中...</p>
     </div>
-    <div v-else-if="!st.scheduledTaskHistory.value.length" class="empty-state">
-      <p>暂无执行记录</p>
-    </div>
+    <EmptyState v-else-if="!st.scheduledTaskHistory.value.length" title="暂无执行记录" />
     <div v-else class="history-list">
       <div
         v-for="(record, index) in st.scheduledTaskHistory.value"

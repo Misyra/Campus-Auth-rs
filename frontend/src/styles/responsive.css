@@ -18,8 +18,10 @@
   }
 
   /* 单列看板按内容自然滚动：诊断/日志折单列后，历史卡已是页面末位全宽卡，
-     其列表限高由 dashboard.css 的 .history-list 统一承担，无需窄屏再加码 */
-  .content-wrapper > .page-content:has(.stats-grid) { height: auto; min-height: 100%; overflow: visible; }
+     其列表限高由 dashboard.css 的 .history-list 统一承担，无需窄屏再加码。
+     （旧 :has(.stats-grid) 高度豁免的本档重申已随外壳契约化退役：
+     height:auto/overflow:visible 是 UA 默认值，min-height:100% 收口进
+     dashboard.css 的 .dashboard-page 差异声明，全宽窄屏下同样生效。） */
   .dashboard-page .log-card { height: 440px; min-height: 320px; }
 }
 

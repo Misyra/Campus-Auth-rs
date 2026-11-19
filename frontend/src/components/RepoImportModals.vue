@@ -19,6 +19,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import Modal from "./common/Modal.vue";
 import IconApp from "./common/IconApp.vue";
+import EmptyState from "./common/EmptyState.vue";
 import { repoApi } from "@/api";
 import type { RepoTask } from "@/api/types";
 import { TASK_REPO_SOURCES } from "@/utils/constants";
@@ -276,28 +277,30 @@ watch(
         <div v-else class="repo-detail-empty">选择任务，查看登录方式与来源</div>
       </div>
     </div>
-    <div v-else-if="repo.repoImport.value.loading" class="empty-state empty-state--dashed repo-import-hint">
-      <IconApp name="refresh" class="spin" :stroke-width="1.5" />
-      <strong class="empty-title">正在获取任务索引</strong>
+    <EmptyState v-else-if="repo.repoImport.value.loading" dashed class="repo-import-hint">
+      <template #icon><IconApp name="refresh" class="spin" :stroke-width="1.5" /></template>
+      <template #title>正在获取任务索引</template>
+      <!-- 说明文字保留手写 .empty-desc（默认插槽直排）：scoped 的 .repo-import-hint .empty-desc
+           限宽规则只命中带本组件 scope id 的插槽内容，走 #description 插槽会丢该样式 -->
       <span class="empty-desc">读取当前来源的可导入任务…</span>
-    </div>
-    <div v-else class="empty-state empty-state--dashed repo-import-hint">
-      <IconApp name="globe-grid" :stroke-width="1.5" />
+    </EmptyState>
+    <EmptyState v-else dashed class="repo-import-hint">
+      <template #icon><IconApp name="globe-grid" :stroke-width="1.5" /></template>
       <!-- 「还没点加载」与「加载成功但这一类没有条目」是两件事。 -->
-      <strong class="empty-title">{{ repo.repoImport.value.loaded ? '该来源暂无可导入任务' : repo.repoImport.value.source === 'custom' && !repo.repoImport.value.url.trim() ? '输入自定义索引地址' : '任务库尚未加载' }}</strong>
+      <template #title>{{ repo.repoImport.value.loaded ? '该来源暂无可导入任务' : repo.repoImport.value.source === 'custom' && !repo.repoImport.value.url.trim() ? '输入自定义索引地址' : '任务库尚未加载' }}</template>
       <span v-if="repo.repoImport.value.loaded" class="empty-desc">
         可切换来源，或使用包含浏览器、HTTP、脚本任务的自定义索引。
       </span>
       <span v-else class="empty-desc">{{ repo.repoImport.value.source === 'custom' && !repo.repoImport.value.url.trim() ? '填写地址后点击「加载任务库」获取任务。' : '可点击「加载任务库」重试，或切换来源。' }}</span>
       <!-- 指向仓库**主页**而非用户手填的索引地址：索引地址是给程序 GET 的 raw JSON，
            此前把它当作可读页面链接，点开是一屏 JSON 而不是仓库首页 -->
-      <div class="empty-actions">
+      <template #actions>
         <a v-if="repo.sourceHomeUrl.value" :href="repo.sourceHomeUrl.value" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">
           <IconApp name="globe" class="icon-sm" />
           直接查看仓库
         </a>
-      </div>
-    </div>
+      </template>
+    </EmptyState>
     <template #footer>
       <span class="repo-footer-hint">{{ repo.repoImport.value.selected ? `已选：${repo.repoImport.value.selected.name}` : repo.filteredRepoTasks.value.length ? '选择任务查看详情' : '任务来自社区仓库，导入前请核对内容' }}</span>
       <button v-if="repo.repoImport.value.selected" class="btn btn-primary btn-sm" :disabled="repo.repoImport.value.previewLoading" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">

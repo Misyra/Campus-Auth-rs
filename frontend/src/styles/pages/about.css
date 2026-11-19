@@ -1,4 +1,8 @@
 .about-container {
+  /* width:100% 保证块布局与 flex 布局（外壳契约把 .page-content 变为 flex column，
+     auto 外边距的子项不再 stretch）下同为「撑满 960px 上限后居中」——没有它，
+     flex 子项按 fit-content 收缩，窄内容会把容器缩窄。 */
+  width: 100%;
   max-width: 960px;
   margin: 0 auto;
   /* 技术徽章品牌色。与 AboutView.vue 的 tech-stack 清单**一一对应**：

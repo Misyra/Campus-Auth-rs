@@ -14,6 +14,7 @@
 import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
 import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import { computed, onMounted, ref, watch } from "vue";
@@ -248,24 +249,18 @@ onMounted(async () => {
           </tr>
           <tr v-else-if="!browserTasks.length">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="layout" :stroke-width="1.5" />
-                <span>暂无任务配置</span>
-                <span class="empty-desc">点击上方「社区任务」使用已有登录流程，或新建任务</span>
-                <div class="empty-actions">
+              <EmptyState icon="layout" :stroke-width="1.5" title="暂无任务配置" description="点击上方「社区任务」使用已有登录流程，或新建任务">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
                     <IconApp name="plus" />新建任务
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr v-else-if="!visibleTasks.length">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的任务</span>
-              </div>
+              <EmptyState icon="search" :stroke-width="1.5" :title="`没有匹配「${searchQuery}」的任务`" />
             </td>
           </tr>
           <tr

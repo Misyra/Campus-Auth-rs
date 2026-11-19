@@ -32,7 +32,9 @@ function setTab(name: string): void {
 </script>
 
 <template>
-  <div class="page-content tasks-page">
+  <!-- page-in：消费 motion.css 的页面入场基元（外壳契约化后 pageEnter 已退役，
+       顶层页面根统一挂本类，见 layout.css 的 .page-content 契约注释） -->
+  <div class="page-content tasks-page page-in">
     <!-- 窄屏兜底导航：≤768px 时主侧栏只剩 64px 图标，子项文字放不下，侧栏里的二级
          导航整块隐藏（见 responsive.css），这里退化为横向可换行的 pill 行——否则窄屏
          只能靠手输地址到达其余四个面板。>768px 整块 display:none，不占位。

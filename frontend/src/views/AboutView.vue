@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import { IS_OPENWRT } from "@/utils/platform";
 import { autostartDescription } from "@/utils/autostart";
 import Modal from "@/components/common/Modal.vue";
@@ -76,7 +77,8 @@ const {
 </script>
 
 <template>
-  <div class="page-content">
+  <!-- page-in：页面入场基元（motion.css），顶层页面根统一挂载 -->
+  <div class="page-content page-in">
     <div class="about-container">
       <div class="about-hero card">
         <span class="about-logo logo-mark" role="img" aria-label="Logo"></span>
@@ -215,7 +217,7 @@ const {
         </div>
 
         <template v-else>
-          <div v-if="uninstallDetectError" class="empty-state empty-state--sm">{{ uninstallDetectError }}</div>
+          <EmptyState v-if="uninstallDetectError" small>{{ uninstallDetectError }}</EmptyState>
           <!-- 拦下卸载的原因：守卫拒绝 或 卸载助手缺失（后者一定导致"清完残留却删不掉程序"） -->
           <div v-else-if="uninstallBlockReason" class="uninstall-blocked">{{ uninstallBlockReason }}</div>
           <template v-else>

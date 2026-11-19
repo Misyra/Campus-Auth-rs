@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /** 认证方案页：方案列表与编辑器、重定向检测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import LoginChannelField from "@/components/common/LoginChannelField.vue";
 import ProxyBypassHelp from "@/components/common/ProxyBypassHelp.vue";
@@ -273,7 +274,8 @@ async function confirmImport(): Promise<void> {
 </script>
 
 <template>
-  <div class="page-content">
+  <!-- profiles-page：页面差异类（gap:0，见 profiles.css 文件头）；page-in 为页面入场基元 -->
+  <div class="page-content profiles-page page-in">
     <!-- ===== 编辑器模式 ===== -->
     <template v-if="showEditor && p.editingProfile.value">
       <div class="profiles-topbar profile-editor-topbar">
@@ -569,14 +571,16 @@ async function confirmImport(): Promise<void> {
         <div class="loading-state"><div class="spinner"></div><p>正在加载方案…</p></div>
       </div>
 
-      <!-- 空状态：复用全局 .empty-state（misc.css），标题/描述走通用工具类 -->
+      <!-- 空状态：EmptyState base 组件（样式仍出自全局 .empty-state，misc.css） -->
       <div v-else-if="!Object.keys(p.profiles.value).length" class="card">
-        <div class="empty-state">
-          <IconApp name="wifi" :stroke-width="1.5" />
-          <strong class="empty-title">暂无配置方案</strong>
-          <span class="empty-desc">为不同网络环境创建独立的认证配置</span>
+        <EmptyState
+          icon="wifi"
+          :stroke-width="1.5"
+          title="暂无配置方案"
+          description="为不同网络环境创建独立的认证配置"
+        >
           <button class="btn btn-sm btn-primary" @click="openEditor(null)">创建第一个方案</button>
-        </div>
+        </EmptyState>
       </div>
 
       <!-- 方案列表 -->

@@ -1,5 +1,7 @@
-/* 外观页：常用偏好优先，分区在宽屏并排，在小屏顺序阅读。 */
-.appearance-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+/* 外观页：常用偏好优先，分区在宽屏并排，在小屏顺序阅读。
+   本页已作为外观分区整体内嵌进设置页（panels.ts），根容器不是 .page-content、
+   不消费外壳契约——栅格排布（窄屏单列 / ≥1100px 双列）是本分区自有的布局形态。 */
+.appearance-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-md); align-items: start; }
 .appearance-intro { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 4px 0; }
 .appearance-intro h2 { font-size: var(--text-xl); font-weight: 650; letter-spacing: -.02em; }
 .appearance-intro p { margin-top: 5px; color: var(--text-muted); font-size: var(--text-md); }

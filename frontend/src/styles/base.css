@@ -356,19 +356,9 @@ textarea {
   min-height: 100dvh;
 }
 
-/* 页面/面板入场动画的**唯一出口**在 layout.css（覆盖顶层页面、设置页面板、任务页面板
-   三处 router-view 落点）。此处不再单独给 `.page-content` 挂动画：它只被其中一部分页面
-   使用，且 `AppearanceView` / `AiTaskView` 的根节点根本不带该类，于是需要用的人只能
-   手抄一份（`ai_task.css` 曾如此）——那正是转场忽有忽无的根因。 */
-
-@keyframes pageEnter {
-  from {
-    transform: translateY(6px);
-  }
-  to {
-    transform: translateY(0);
-  }
-}
+/* 页面入场动画的唯一出处是 motion.css 的 `.page-in`（页面根容器统一挂载，见
+   layout.css 的 .page-content 契约注释）。旧 pageEnter 关键帧已随其消费方退役，
+   此处不再保留动画入口——base.css 只提供与动效无关的全局共享关键帧。 */
 
 /* 全局共享关键帧（组件/页面样式引用） */
 @keyframes pulse {
