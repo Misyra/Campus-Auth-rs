@@ -6,11 +6,11 @@
 //! 路径上的独立防线：rebinding 请求的 Host 恒为攻击者域名，与回环白名单
 //! 不匹配即被拒。
 //!
-//! 对豁免端点的意义（见 `web::auth` 模块说明）：唯一豁免的 `POST
-//! /api/auth/exchange` 不发放任何凭据——bootstrap 秘钥从不经网络下发（只随
-//! 界面 URL fragment 出现，fragment 不会发往服务器），管理密码分支在回环
-//! 绑定下一律拒绝，rebinding 页面无从换取 token；本校验对该端点是纵深
-//! 防御而非唯一屏障。
+//! 对豁免端点的意义（见 `web::auth` 模块说明）：`POST /api/auth/exchange`
+//! 与 `GET /api/auth/local-token`（仅回环监听可用）都不要求已有 token，是本
+//! 校验的主要防护对象——rebinding 请求的 Host 恒为攻击者域名，会在本层被拒，
+//! 拿不到 `local-token` 的响应；`exchange` 另有 bootstrap 秘钥与管理密码分支
+//! 兜底（回环下密码分支一律拒绝），本校验对它同样是纵深防御。
 //!
 //! 策略按实际绑定地址决定（[`HostPolicy::from_bind_ip`]）：
 //! - 绑定回环（默认）：强制校验；

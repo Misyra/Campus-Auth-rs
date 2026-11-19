@@ -79,6 +79,7 @@ pub fn build_router(
     shutdown_tx: tokio::sync::watch::Sender<()>,
     host_policy: HostPolicy,
     management_password_override: Option<String>,
+    allow_unauthenticated_bind: bool,
 ) -> anyhow::Result<axum::Router> {
     // 通用 WebSocket 事件通道（screenshot / step_progress 等），供 Bridge 推送
     let (ws_tx, _) = broadcast::channel::<String>(WS_EVENT_CAPACITY);
@@ -96,6 +97,7 @@ pub fn build_router(
         credentials.bootstrap.into(),
         management_password_override.map(Arc::from),
         host_policy,
+        allow_unauthenticated_bind,
     );
 
     // CORS 与 gzip 均由内层 `web::build_router` 统一处理（历史遗留 #16）：
@@ -227,6 +229,7 @@ pub fn start_axum_with_listener(
     log_tx: broadcast::Sender<LogEntry>,
     prepared: PreparedAxumListener,
     management_password_override: Option<String>,
+    allow_unauthenticated_bind: bool,
 ) -> anyhow::Result<AxumServeHandle> {
     let PreparedAxumListener {
         listener,
@@ -243,6 +246,7 @@ pub fn start_axum_with_listener(
         shutdown_tx,
         host_policy,
         management_password_override,
+        allow_unauthenticated_bind,
     )?;
 
     // Router 构建成功后才发布运行端口，避免 auth token 等初始化失败时留下
@@ -287,9 +291,16 @@ pub async fn start_axum(
     host: Option<&str>,
     credential_gate: &BindCredentialGate,
     management_password_override: Option<String>,
+    allow_unauthenticated_bind: bool,
 ) -> anyhow::Result<AxumServeHandle> {
     let prepared = prepare_axum_listener(port, host, credential_gate).await?;
-    start_axum_with_listener(container, log_tx, prepared, management_password_override)
+    start_axum_with_listener(
+        container,
+        log_tx,
+        prepared,
+        management_password_override,
+        allow_unauthenticated_bind,
+    )
 }
 
 /// 优雅关闭 Axum 服务器

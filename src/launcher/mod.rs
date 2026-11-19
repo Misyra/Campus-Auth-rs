@@ -337,8 +337,9 @@ async fn run_after_logging(
     // TrayManager::spawn 内部单点执行——macOS 返回空句柄，托盘永不启动
     // Docker 环境无显示服务器，强制禁用托盘
     #[cfg(feature = "desktop")]
-    let no_tray_effective =
-        state.app_config.no_tray || crate::app::is_docker_env() || cfg!(feature = "openwrt");
+    let no_tray_effective = state.app_config.no_tray
+        || crate::app::is_docker_env()
+        || cfg!(any(feature = "openwrt", feature = "android"));
     #[cfg(feature = "desktop")]
     if !no_tray_effective {
         let tray = TrayManager::new(crate::tray::TrayDeps {
@@ -381,12 +382,14 @@ async fn run_after_logging(
 /// 日志只记录不含 fragment 的基础 URL，绝不记录 bootstrap 秘钥；凭据文件尚未
 /// 生成/读取失败时退化为不带 fragment 的普通 URL（此时 Axum 启动路径已生成凭据，
 /// 正常情况下不会走到退化分支）。
-fn open_browser(base_path: &Path, port: u16) {
+fn open_browser(base_path: &Path, port: u16) -> bool {
     let bootstrap = crate::web::auth::read_bootstrap_file(base_path);
     let url = crate::web::auth::ui_url(port, bootstrap.as_deref());
     if let Err(e) = open::that(&url) {
         warn!("打开浏览器失败 (http://127.0.0.1:{port}): {e}");
+        false
     } else {
         info!("已打开浏览器: http://127.0.0.1:{port}（已携带 auth fragment）");
+        true
     }
 }

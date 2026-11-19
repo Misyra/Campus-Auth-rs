@@ -40,10 +40,11 @@ Web 控制台：`http://localhost:50721`
 
 ## 安全模型（管理凭据与暴露面）
 
-鉴权采用「token + 握手凭据」模型（详见 `docs/guides/user-guide.md` 鉴权段）：全部 `/api/*` 与 `/ws/*` 请求必须携带 token，token 只能经 `POST /api/auth/exchange` 用**不经网络发放的凭据**换取——
+鉴权采用「token + 握手凭据」模型（详见 `docs/guides/user-guide.md` 鉴权段）：全部 `/api/*` 与 `/ws/*` 请求必须携带 token，token 来自以下三种途径之一：
 
-- **回环绑定**：界面 URL 以 `#auth=<bootstrap>` fragment 携带握手秘钥（fragment 不会发往服务器、不进服务器日志），本机打开界面即自动完成换取；
-- **非回环绑定**（Docker 默认 `0.0.0.0` / 局域网暴露）：fragment 无法送达远程用户，必须配置**管理密码**，远程用户在界面输入管理密码换取 token。
+- **回环绑定（桌面版）**：`GET /api/auth/local-token` 直接下发 token，界面打开即用；托盘链接仍以 `#auth=<bootstrap>` fragment 携带握手秘钥作为等价入口；
+- **默认 Docker compose**：容器内绑 `0.0.0.0`（端口映射要求），但宿主只发布到 `127.0.0.1`，并通过 `CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true` 显式声明该信任边界——效果同回环：打开即用，无需管理密码。**容器里看不到宿主端口映射，服务端无法自行区分宿主回环与局域网流量，这个声明是部署方的责任**；
+- **发布到局域网**：必须删除 `CAMPUS_AUTH_ALLOW_UNAUTH_BIND` 并配置**管理密码**，远程用户在界面输入密码换取 token。
 
 **fail-closed 门禁**：绑定非回环地址且未配置管理密码时启动直接失败（错误信息给出三条出路），除非显式 `--allow-unauthenticated-bind`（env `CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true`）豁免。
 
@@ -58,7 +59,7 @@ Web 控制台：`http://localhost:50721`
    ```
 2. 前端设置页 / `PATCH /api/config` 写入 `app_settings.management_password`（明文存储，与代理地址同档；运行期修改即时生效，无需重启）。
 
-**如实说明的风险**：容器内服务默认无 TLS，管理密码与 token 在局域网 HTTP 明文传输中可被同网段嗅探；管理密码明文存于 settings.json（可读取数据卷的进程/用户可见）。因此管理密码只应视为「防同网段扫描器顺手接管」的门槛，**不是**远程访问认证的替代——公网/不可信网络请务必经反向代理（TLS）或 VPN 隧道接入，并在代理层配置独立认证。
+**如实说明的风险**：`CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true` 等于「谁能连上这个端口，谁就能拿到 token 并调用全部 API（含脚本执行）」——它只适合「宿主只发布到 `127.0.0.1`」的部署。把它和 `0.0.0.0` 端口发布叠加，等于把整个控制面连同脚本执行接口裸奔到局域网。容器内服务默认无 TLS，管理密码与 token 在局域网 HTTP 明文传输中可被同网段嗅探；管理密码明文存于 settings.json。公网/不可信网络请务必经反向代理（TLS）或 VPN 隧道接入，并在代理层配置独立认证。
 
 ## 容器运行身份（非 root 降权）
 

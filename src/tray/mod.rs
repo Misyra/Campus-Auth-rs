@@ -618,6 +618,7 @@ async fn handle_action(
                     deps.host.as_deref(),
                     &gate,
                     deps.management_password_override.clone(),
+                    deps.allow_unauthenticated_bind,
                 )
                 .await
                 {

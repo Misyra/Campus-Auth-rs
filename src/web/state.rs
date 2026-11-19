@@ -73,6 +73,12 @@ pub struct AppState {
     /// Host 头校验策略（见 `web::host` 模块说明；由监听绑定地址推导，
     /// 回环绑定强制校验以阻断 DNS rebinding，Docker/LAN 显式暴露时跳过）
     pub host_policy: super::host::HostPolicy,
+    /// 显式豁免无凭据非回环绑定（`--allow-unauthenticated-bind`）：
+    /// 为 true 时 `GET /api/auth/local-token` 同样可用。面向「容器内绑 0.0.0.0、
+    /// 宿主只发布到 127.0.0.1」的默认 Docker 部署——服务端无法区分该流量来自
+    /// 宿主还是局域网，故必须由部署方显式声明。若把端口发布到 LAN，务必去掉
+    /// 该豁免并配置管理密码。
+    pub allow_unauthenticated_bind: bool,
     /// Web 长操作生命周期登记（AI 单飞、OCR 并发取消与卸载排空）
     pub(crate) operations: Arc<WebOperations>,
 }
@@ -92,6 +98,7 @@ impl AppState {
         auth_bootstrap: Arc<str>,
         management_password_override: Option<Arc<str>>,
         host_policy: super::host::HostPolicy,
+        allow_unauthenticated_bind: bool,
     ) -> Self {
         // 细粒度依赖从容器抽出（trait object 化），handler 不再触达 container
         let history: Arc<dyn HistoryStore> = container.history.clone();
@@ -129,6 +136,7 @@ impl AppState {
             auth_bootstrap,
             management_password_override,
             host_policy,
+            allow_unauthenticated_bind,
             operations: Arc::new(WebOperations::new()),
         }
     }

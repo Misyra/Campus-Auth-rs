@@ -100,6 +100,9 @@ function toggleChecked(): string | null {
 beforeEach(() => {
   document.body.innerHTML = "";
   sessionStorage.clear();
+  // 预置 token：组件内 API 调用不再触发 ensureAuthToken 的回环 local-token 探测，
+  // 避免多一次 fetch 干扰本文件的调用计数断言
+  sessionStorage.setItem("campus_auth_token", "tok-test");
 });
 
 afterEach(() => {

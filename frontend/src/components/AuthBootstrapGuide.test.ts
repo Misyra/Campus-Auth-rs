@@ -81,14 +81,23 @@ afterEach(() => {
 });
 
 describe("AuthBootstrapGuide 本地模式（回环访问）", () => {
-  it("展示托盘指引与粘贴框，不出现密码表单", () => {
+  it("展示获取凭据的三种途径与粘贴框，不出现密码表单", () => {
     mount();
     const text = document.body.textContent ?? "";
     expect(text).toContain("系统托盘");
     expect(text).toContain("打开界面");
     expect(text).toContain("复制界面链接");
+    // 无托盘/无桌面场景：终端启动输出里的整行入口；以及数据目录下的秘钥文件
+    expect(text).toContain("界面入口");
+    expect(text).toContain("config/.auth_bootstrap");
     expect(document.querySelector("#auth-bootstrap-key")).not.toBeNull();
     expect(document.querySelector("#auth-bootstrap-password")).toBeNull();
+  });
+
+  it("后端已启动时点「重新检查」重走正常启动路径", () => {
+    mount();
+    clickButton("重新检查");
+    expect(reloadMock).toHaveBeenCalledTimes(1);
   });
 
   it("粘贴完整带 #auth= 的 URL：按 bootstrap 交换并在成功后刷新恢复", async () => {
@@ -126,12 +135,15 @@ describe("AuthBootstrapGuide 本地模式（回环访问）", () => {
 });
 
 describe("AuthBootstrapGuide 远程模式（非回环访问）", () => {
-  it("展示密码表单，不出现托盘指引", () => {
+  it("展示密码表单与密码来源说明，不出现托盘指引", () => {
     setUrl("http://nas.example.com:50721/");
     mount();
     const text = document.body.textContent ?? "";
     expect(document.querySelector("#auth-bootstrap-password")).not.toBeNull();
     expect(text).not.toContain("系统托盘菜单");
+    // 密码从哪来：启动参数 / 环境变量 / 服务端设置页
+    expect(text).toContain("--management-password");
+    expect(text).toContain("CAMPUS_AUTH_MANAGEMENT_PASSWORD");
   });
 
   it("密码提交成功：换取 token、写缓存并刷新恢复", async () => {

@@ -4,10 +4,13 @@
  * 覆盖在主界面之上接管交互（免鉴权 GET /api/auth/token 已移除后的新信任模型）。
  *
  * 两种模式按访问来源分流（isRemoteAccess）：
- * - 本地（回环）：指引从系统托盘「打开界面 / 复制界面链接」重开本页；另给一个
- *   粘贴框（接受完整带 #auth= 的 URL 或裸秘钥），让高级用户不重启托盘也能恢复本页。
- * - 远程（非回环，Docker/LAN）：托盘不可用，改用管理密码换取 token；
- *   服务端未配置管理密码时透传 AUTH_NOT_CONFIGURED 并给出配置指引。
+ * - 本地（回环）：本机访问通常自动登录，引导页只在「后端未就绪 / local-token 不可用」
+ *   时出现；给出三条获取凭据的途径——托盘「打开界面/复制界面链接」、终端启动输出里的
+ *   「界面入口（含引导秘钥）」整行、数据目录 `config/.auth_bootstrap` 内容——并附粘贴框
+ *   （接受完整带 #auth= 的 URL 或裸秘钥）与「重新检查」（后端刚启动时刷新即恢复）。
+ * - 远程（非回环，Docker/LAN）：托盘不可用，改用管理密码换取 token；同时说明密码的
+ *   三种来源（启动参数 / 环境变量 / 服务端设置页）；未配置时透传 AUTH_NOT_CONFIGURED
+ *   并给出配置指引。
  *
  * 成功引导后整页刷新恢复应用：useUi.init() 有单次守卫（initialized 标志）不可重入，
  * 各 store 的订阅/轮询/WS 均在 init 时建立，就地恢复无法保证等价时序；而此时
@@ -82,6 +85,11 @@ async function submitPassword(): Promise<void> {
     submitting.value = false;
   }
 }
+
+/** 后端可能刚启动（或刚重启）：重走一次正常启动路径，命中 local-token / 缓存即恢复 */
+function retry(): void {
+  window.location.reload();
+}
 </script>
 
 <template>
@@ -89,12 +97,18 @@ async function submitPassword(): Promise<void> {
     <div class="auth-bootstrap-card">
       <span class="logo-mark auth-bootstrap-logo" aria-hidden="true"></span>
       <h2 id="auth-bootstrap-title" class="auth-bootstrap-title">界面需要重新引导</h2>
-      <p class="auth-bootstrap-desc">当前页面没有可用的访问凭据，无法连接本程序的后端服务。</p>
+      <p class="auth-bootstrap-desc">当前页面没有可用的访问凭据。</p>
 
       <template v-if="!remote">
         <p class="auth-bootstrap-main">
-          请从系统托盘菜单选择「打开界面」或「复制界面链接」后重新打开本页。
+          本机访问通常会自动登录。看到本页说明后端尚未就绪：确认程序正在运行后点「重新检查」；
+          仍无法进入时，按下面任一方式获取访问凭据。
         </p>
+        <ul class="auth-bootstrap-steps">
+          <li>系统托盘菜单 →「打开界面」；或「复制界面链接」后粘贴到下方输入框；</li>
+          <li>从终端启动（含无托盘 / 无桌面环境）时，复制启动输出里「界面入口（含引导秘钥，勿转发）」的整行地址；</li>
+          <li>打开程序数据目录下的 <code>config/.auth_bootstrap</code>，粘贴文件内容（64 位十六进制）。</li>
+        </ul>
         <div class="auth-bootstrap-form">
           <input
             id="auth-bootstrap-key"
@@ -116,12 +130,20 @@ async function submitPassword(): Promise<void> {
           </button>
         </div>
         <p class="auth-bootstrap-hint">
-          高级方式：粘贴托盘「复制界面链接」得到的完整地址，或只粘贴其中的引导秘钥，无需重启托盘即可恢复本页。
+          粘贴完整界面链接、或只粘贴其中的引导秘钥均可，无需重启托盘。
         </p>
+        <button type="button" class="btn btn-secondary btn-sm auth-bootstrap-retry" @click="retry">
+          后端已启动，重新检查
+        </button>
       </template>
 
       <template v-else>
-        <p class="auth-bootstrap-main">请输入管理密码以继续访问。</p>
+        <p class="auth-bootstrap-main">远程访问需要使用管理密码换取访问凭据。</p>
+        <ul class="auth-bootstrap-steps">
+          <li>管理密码由服务端启动参数 <code>--management-password</code> 或环境变量 <code>CAMPUS_AUTH_MANAGEMENT_PASSWORD</code> 配置；</li>
+          <li>也可在服务端「设置 · 系统与更新 · 访问与安全」中设置，修改后即时生效；</li>
+          <li>本机（127.0.0.1 / localhost）打开界面无需密码；服务端未配置密码时会拒绝远程访问。</li>
+        </ul>
         <div class="auth-bootstrap-form">
           <input
             id="auth-bootstrap-password"
@@ -149,9 +171,7 @@ async function submitPassword(): Promise<void> {
             {{ submitting ? "验证中..." : "解锁" }}
           </button>
         </div>
-        <p class="auth-bootstrap-hint">
-          管理密码在「设置 · 系统与更新 · 访问与安全」中配置；本机经托盘打开界面时无需此密码。
-        </p>
+        <p class="auth-bootstrap-hint">不知道密码时请联系部署者。</p>
       </template>
 
       <p v-if="errorText" class="auth-bootstrap-error" role="alert">{{ errorText }}</p>
@@ -205,6 +225,31 @@ async function submitPassword(): Promise<void> {
   font-weight: 500;
 }
 
+/* 获取凭据的三条途径：托盘链接 / 终端启动行 / 数据目录秘钥文件 */
+.auth-bootstrap-steps {
+  margin: 0;
+  padding-left: 1.2em;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.auth-bootstrap-steps code {
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  word-break: break-all;
+}
+
+.auth-bootstrap-retry {
+  align-self: flex-start;
+}
+
 .auth-bootstrap-hint {
   font-size: var(--text-sm);
 }
@@ -232,8 +277,9 @@ async function submitPassword(): Promise<void> {
   outline-offset: 2px;
 }
 
+/* 共享 .btn 默认即 nowrap；此处只经分叉变量声明同一取值（纪律：scoped 不改写共享声明值） */
 .auth-bootstrap-form .btn {
-  white-space: nowrap;
+  --btn-white-space: nowrap;
 }
 
 .auth-bootstrap-error {

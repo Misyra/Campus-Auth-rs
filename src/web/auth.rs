@@ -10,20 +10,28 @@
 //! - 启动时与 bootstrap 握手秘钥**成对**生成并持久化到 `config/.auth_token` /
 //!   `config/.auth_bootstrap`（创建即 0600，仅当前用户可读）；任一缺失/损坏
 //!   重建时两者一并轮换，保证 fragment、exchange 比对与 token 始终同代；
-//! - **不存在任何免鉴权发放 token 的端点**。旧 `GET /api/auth/token` 已删除：
-//!   它对本地跨用户进程完全敞开（HTTP 取 token 绕开文件 0600 ACL，配合
-//!   `POST /api/scripts/run` 即任意脚本 RCE），且其豁免论证只覆盖浏览器威胁，
-//!   对非浏览器客户端（CORS/Host 校验均不适用）无效；
-//! - 界面 URL 以 `#auth=<bootstrap>` fragment 携带握手秘钥（fragment 不会被
+//! - **回环绑定的本地免引导**：`GET /api/auth/local-token` 在回环监听下直接
+//!   下发 token（本机进程视为可信）。这是 2026-11-13 的明确取舍：旧的免鉴权
+//!   `GET /api/auth/token` 被删，是因为它把「本机其他用户」升级成「应用用户」
+//!   （配合 `POST /api/scripts/run` 即任意脚本执行）；单人机与单一共享账号
+//!   场景下这条边界本就不存在，而每次打开都要带 fragment 的代价反而成了纯本地
+//!   使用的主障碍。多用户共享机上的跨用户提权风险由此**明确接受**；
+//!   非回环绑定默认 404，但显式 `--allow-unauthenticated-bind` 时同样可用
+//!   （默认 Docker compose 即此形态：容器内绑 0.0.0.0、宿主只发布到
+//!   127.0.0.1——服务端无法区分宿主与局域网的流量，信任边界由部署方声明）；
+//!   未豁免的远程仍只认管理密码，不存在远程免鉴权发 token 的入口；
+//! - 界面 URL 仍以 `#auth=<bootstrap>` fragment 携带握手秘钥（fragment 不会被
 //!   浏览器发往服务器、不进服务器日志）；前端经 `POST /api/auth/exchange`
-//!   用 bootstrap 换 token，随后应自行清除地址栏 fragment；
+//!   用 bootstrap 换 token，随后应自行清除地址栏 fragment（本地首次打开失败
+//!   时由上面的 local-token 兜底，二者等价）；
 //! - bootstrap 比对用常量时间比较，失败 401；管理密码分支仅**非回环绑定**
 //!   （Docker/LAN 显式暴露）接受——回环威胁是本地进程与恶意网页，管理密码
 //!   面向远程管理员，回环开放该分支只会给本地攻击者多一条可猜解路径；
 //!   密码未配置 → 401 `AUTH_NOT_CONFIGURED`；非回环绑定且无凭据由监听器
 //!   准备点 fail-closed 拒绝启动（见 `app::check_bind_credential_gate`）；
-//! - 本机同用户进程仍可读取秘钥文件——这与"能直接读配置/杀进程"的权限等价，
-//!   不构成额外暴露面；其他用户进程被 0600 文件权限挡住，且再无 HTTP 旁路。
+//! - 本机同用户进程仍可读取秘钥文件，且回环下可直接经 local-token 取 token——
+//!   两者都与「能直接读配置/杀进程」的同用户权限等价；其他用户进程在回环绑定下
+//!   同样可取 token（2026-11-13 已接受的取舍），非回环绑定不开放该端点。
 //!
 //! TODO: viewer 只读 token 权限矩阵——将来如需「只读访客」能力，在
 //! [`AuthCredentials`] 增加第三类秘钥（viewer_token），授予点即
@@ -267,6 +275,31 @@ pub struct ExchangeBody {
     pub password: Option<String>,
 }
 
+/// 本地代发端点是否可用：回环监听，或显式豁免无凭据非回环绑定
+///
+/// 后者（`--allow-unauthenticated-bind`）服务的是「容器内绑 0.0.0.0、宿主只发布到
+/// 127.0.0.1」的默认 Docker 部署：容器里看不到宿主端口映射，无法自行区分宿主回环
+/// 与局域网访问，只能由部署方显式声明信任边界。把端口发布到 LAN 时必须去掉该豁免。
+fn local_token_allowed(policy: HostPolicy, allow_unauthenticated_bind: bool) -> bool {
+    policy == HostPolicy::LoopbackOnly || allow_unauthenticated_bind
+}
+
+/// GET /api/auth/local-token — 回环监听（或显式豁免的非回环绑定）下直接下发 token
+///
+/// 取舍见模块文档：回环绑定视为「本机可信」（与能读配置/执行脚本的同用户权限
+/// 等价）；非回环且未显式豁免时一律 404——远程仍只认管理密码，不存在
+/// 远程免鉴权入口。响应同样是 `{"data":{"token":"..."}}` + `Cache-Control: no-store`。
+pub async fn local_token_handler(State(state): State<AppState>) -> Response {
+    if !local_token_allowed(state.host_policy, state.allow_unauthenticated_bind) {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "本地代发端点仅在回环监听或显式豁免无凭据绑定时可用",
+        );
+    }
+    token_response(&state.auth_token)
+}
+
 /// POST /api/auth/exchange — 以 bootstrap 秘钥或管理密码换取鉴权 token
 ///
 /// 请求体恰含其一：`{"bootstrap": "<64hex>"}` 或 `{"password": "<管理密码>"}`；
@@ -452,7 +485,7 @@ pub async fn auth_middleware(
     if req.method() == Method::OPTIONS {
         return next.run(req).await;
     }
-    if path == "/api/auth/exchange" || path == "/api/health" {
+    if path == "/api/auth/exchange" || path == "/api/auth/local-token" || path == "/api/health" {
         return next.run(req).await;
     }
     if req.method() == Method::GET
@@ -510,6 +543,14 @@ mod tests {
         let token = generate_token();
         assert_eq!(token.len(), 64);
         assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    /// 本地代发端点：回环监听，或显式豁免无凭据的非回环绑定（Docker 默认 compose）
+    #[test]
+    fn test_local_token_allowed() {
+        assert!(local_token_allowed(HostPolicy::LoopbackOnly, false));
+        assert!(!local_token_allowed(HostPolicy::AllowAny, false));
+        assert!(local_token_allowed(HostPolicy::AllowAny, true));
     }
 
     /// query 参数提取：正常 / 缺失 / 空 / 多参数混合

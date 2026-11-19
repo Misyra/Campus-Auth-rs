@@ -33,6 +33,7 @@ pub(super) async fn launch_full(state: &mut LauncherState) -> Result<()> {
         state.log_tx.clone(),
         prepared,
         state.app_config.management_password_override.clone(),
+        state.app_config.allow_unauthenticated_bind,
     )
     .context("Web 控制台启动失败")?;
     let port = handle.port;
@@ -54,7 +55,12 @@ pub(super) async fn launch_full(state: &mut LauncherState) -> Result<()> {
     // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
     // 此前配置项是死开关，UI「静默启动」切换无任何效果
     if state.app_config.auto_open_browser {
-        open_browser(&state.app_config.base_path, port);
+        // 打开失败（无桌面环境等）时同样给出终端入口，避免界面彻底不可达
+        if !open_browser(&state.app_config.base_path, port) {
+            print_headless_ui_hint(state, port, display_host);
+        }
+    } else {
+        print_headless_ui_hint(state, port, display_host);
     }
 
     // Engine 崩溃恢复
@@ -212,4 +218,30 @@ fn spawn_background_update_check(state: &LauncherState) {
             .start_background_check(state.shutdown_token.clone());
         state.track_background_task(handle);
     }
+}
+
+/// 无浏览器 + 无托盘（且回环监听）时，把带引导秘钥的完整界面地址打到终端。
+///
+/// 该组合下没有任何界面入口——托盘「复制界面链接」不存在、也不自动开浏览器，
+/// 用户只能去读 0600 的密钥文件，headless 自测/无桌面环境等于「打不开」。
+/// 只写 stderr（终端可见），**不进日志文件与诊断包**：后端日志按设计只记录
+/// 不含 fragment 的基础 URL，引导秘钥不得落盘。
+fn print_headless_ui_hint(state: &LauncherState, port: u16, display_host: &str) {
+    // no_tray 字段仅桌面构建存在；其余构建恒无托盘，视同「无托盘」成立
+    #[cfg(feature = "desktop")]
+    let no_tray = state.app_config.no_tray;
+    #[cfg(not(feature = "desktop"))]
+    let no_tray = true;
+    if display_host != "127.0.0.1"
+        || !no_tray
+        || app::is_docker_env()
+        || cfg!(any(feature = "openwrt", feature = "android"))
+    {
+        return;
+    }
+    let bootstrap = crate::web::auth::read_bootstrap_file(&state.app_config.base_path);
+    eprintln!(
+        "界面入口（含引导秘钥，勿转发）：{}",
+        crate::web::auth::ui_url(port, bootstrap.as_deref())
+    );
 }

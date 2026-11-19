@@ -26,6 +26,13 @@ services:
       - CAMPUS_AUTH_PORT=50721
       # 数据根目录（容器内固定为 /data，与 VOLUME 对应）
       - CAMPUS_AUTH_BASE_PATH=/data
+      # 默认部署只发布到宿主机回环（见上方 ports: 127.0.0.1:50721:50721）。
+      # 容器内看不到宿主端口映射，无法自行区分「宿主回环」与「局域网」流量，
+      # 故在此显式声明信任边界：免管理密码，界面打开即用。
+      # ⚠ 如果把 ports 改成发布到 0.0.0.0 / 局域网，必须删掉这一行并设置
+      #   CAMPUS_AUTH_MANAGEMENT_PASSWORD，否则同网段任何设备都能直接接管
+      #   （含脚本执行接口）。
+      - CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true
       # 可选：自定义日志级别（debug / info / warn / error）
       # - RUST_LOG=info
       # 可选：GitHub 代理（国内网络加速 uv/playwright 下载）
