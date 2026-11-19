@@ -28,18 +28,18 @@
 
 > 用户诉求：「目前的 UI 有点乱」（视觉不统一 + 代码难维护两头都有），并预告后续做手机（安卓 WebView 复用同一前端）。拍板（2026-11-20）：**不引入组件库**（Element Plus / Naive UI 一类与现有 token 体系、内嵌体积（730 KB JS / 188 KB CSS 已审计合理）、a11y 投入与 700+ 测试面冲突，维持 2026-11-17「桌面不引重库」拍板），走「token 收口 + 组件层升级」。病根实测：断点 14 种散值（768×11 / 640×10 / 1100×6 / 900×4 + 960/940/850/560/280/400/480 各自为政）、token 逃逸 72 处（ai_task 36 / profiles 21 / tasks 15 + UpdateDialog 15 处字号字面量）、同一视觉角色多套平行实现（两套日志色、`.page-content` 名为外壳实非外壳、`badge--mono` 依赖倒置）、styles/ 24 文件 7784 行（tasks.css 1076 行）。手机视角：地基件（dvh / overscroll / 触控目标 ≥24px / 底部导航）已齐，缺的正是统一响应式契约与页面外壳。2026-11-20 追加拍板：**重构彻底一点、不留技术债，之前挂账的问题本次统一清掉**——阶段 3 清债项全部转正、设置页 tab 化重建同步引入 schema 驱动混合架构（T8-1 转正，settingsSearch 的 DOM 抓取耦合一并退役）。
 
-- [ ] **阶段 0 前置卫生**：脏树分批提交（117 文件混载审查修复 + UI / 镜像批次），吸收上方「脏树分批提交」条目
-- [ ] **阶段 1 token 硬收口（1-2 天，观感基本不变）**：
-  - ① 断点收敛 4 档语义 `--bp-*`（640/768/900/1100 归轴，960/940/850/560 归并或剔除，scoped 散值 280/400/480 回归档位）——吸收「代码审查收尾遗留」断点条目；改动面广，深浅两主题 + 窄屏（390px）目检
-  - ② 两套日志级别色合一（log-viewer `level-*` 与 dashboard `log-*`）
-  - ③ token 逃逸清零（ai_task.css / profiles.css / tasks.css 字面量 spacing + UpdateDialog 字号）
-  - ④ `badge--mono` 归位 `components/badge.css`
-  - ⑤ stylelint-vue 新增 no-descending-specificity warning 清零或基线化
+- [x] **阶段 0 前置卫生**（2026-11-20 完成：17 批分批落库 9c584d28..952b7a52，工作区清零）
+- [x] **阶段 1 token 硬收口**（2026-11-20 全部完成）：
+  - ① 断点收敛：实测仅 3 处真散值（850→900 / 700→768 / 600→640；台账中 940/1280/280/400/480 实为元素宽度非断点），四档 `--bp-*` + index.css 约定清单 + breakpoints.test.ts 守卫（047cffd2）
+  - ② 日志级别色合一：徽标侧并入 `log-*` 单一体系，dashboard.css 零改动（d14a06b）
+  - ③ token 逃逸清零：68 行等值回填，±2px 归并 47 值列目检清单（10f92ca）
+  - ④ `badge--mono`：核实 T8-3 已迁移、无需动作
+  - ⑤ stylelint 42 条警告全清零 + `--max-warnings 0` 门禁钉死（dec4803）；1c 建议的 12/6/2px 档位已由 V2 地基批落定义
 - [ ] **阶段 2 组件层升级 + 页面外壳（2-3 天，为手机铺路）**：`styles/components/*.css` 共享类与 `components/common/` 对齐成正式 base 组件目录（组件自带响应式行为，页面不再写媒体查询微调）；`.page-content` 升级真布局契约（flex/gap/最大宽度单一出处，5 页面只声明差异）；scoped 只声明 `--xxx` 变量（照 `--tsk-col-name-w` 先例）
-- [ ] **阶段 3 清债转正（2026-11-20「不留技术债」拍板，原「可选增量」全部转正）**：F12 content-visibility（前置：设置页定位先迁 IntersectionObserver）/ AiTaskView（953 行）拆 3 composable（T8-2）/ F13 a11y lint 守门（eslint-plugin-vuejs-accessibility）/ F14 aria-describedby 系统化（78 处 hint 优先挂校验错误与危险操作）/ 密度模式（容器 style queries，Baseline 2026-05）
+- [ ] **阶段 3 清债转正（2026-11-20「不留技术债」拍板，原「可选增量」全部转正）**：AiTaskView 拆分 **[x] 已完成**（953→299 行，三 composable + 60 单测，模板编译产物逐字节一致证等价，覆盖率不降反升，8f03cae）；F12 content-visibility（IntersectionObserver 前置已随 V4 scrollspy 落地，V4 落库后评估主体）/ F13 a11y lint 守门（eslint-plugin-vuejs-accessibility）/ F14 aria-describedby 系统化（78 处 hint 优先挂校验错误与危险操作）/ 密度模式（容器 style queries，Baseline 2026-05）
 - [ ] **阶段 4 视觉重构（2026-11-20 用户三拍板并入：顶部 tab 替代左侧子导航 / 拆 8 区 / 先地基后视觉）**：
-  - ① **滚动快修**：删 `list.css:12` 的 `.content-wrapper:has(> .settings-page)` overflow:hidden 与 `.settings-scroll` 自身滚动（`list.css:20`），回归 `.content-wrapper` 整体滚动——修「只有中间内容区能滚、左右空白区滚不动」缺陷；迁移 scrollToSection 目标 / save-bar 定位 / 防 sr-only 撑高的 position:relative 守卫三处耦合
-  - ② **仪表盘重排**：`.dashboard-split` 改 stretch 等高——左网络诊断 `height:100%`、右实时日志固定 420px 主导行高（内部 `.log-viewer` 滚动不变），登录历史移到双栏下方全宽；≤1100px 折单列恢复各自 min-height
+  - ① **[x] 滚动快修**（6c177a07：删 `:has()` 强制 hidden 回归 `.content-wrapper` 整体滚动，scrollIntoView 声明式定位 + save-bar sticky 吸附 + 监听迁移 wrapper + sr-only 守卫随迁）
+  - ② **[x] 仪表盘重排**（0f39bc8：`--dash-split-h: 420px` 单变量钳制实现严格等高，诊断卡 footer 贴底 + 内部滚动吸收余高，历史卡全宽 420 限高收尾，stagger 动效接入；发现 `.page-in` 被 layout.css pageEnter 同特异度后到压制空挂——阶段 2 收口退役 pageEnter）
   - ③ **设置页 tab 化 8 区**：左侧栏「设置」子项收走变单入口，sticky 顶部 tab 条（图标+文字、active 走 accent-soft 浅蓝底、scrollspy 高亮、平滑滚动锚点）；分区拆为 网络检测 / 登录与时段 / 浏览器 / 任务与环境 / 系统 / 更新与日志 / 推送通知 / 外观（以现有面板为拆分单位）；窄屏 tab 横向滚动替代 `settings-mobile-jump` select；`settingsSearch.ts` 的行级类名表（`ROW_UNIT_SELECTOR` 12 项）与 settingsA11y / settingsForm / settingsSearch 三组测试同步适配；**同批引入 schema 驱动混合架构**（T8-1 转正）：标准设置行走 schema 模型 + 渲染器（行定义 / 校验 / 持久化单一出处），appearance / 通知通道卡等异型面板留槽位；settingsSearch 从 DOM textContent 抓取改为 schema 数据驱动，`ROW_UNIT_SELECTOR` 类名表退役
   - ④ **Catmail 设计语言映射**（结构模式移植，**不引 Tailwind / 组件库**）：新增 `--panel-elevation`（1px 贴地 + 大 blur 漫射双层阴影）/ `--ease-out-soft`（cubic-bezier(0.32,0.72,0,1)）/ accent-soft 派生 token（由 `--accent-rgb` color-mix 派生，兼容运行时注入）；card 质感统一（subtle 边 + 12px 圆角 + 双层阴影）、badge/banner 收敛为「淡底+浅边+深字」变量类、动效（页面入场 0.18s + 卡片级联 stagger 40ms + reduced-motion 全关）、hover-reveal 滚动条（F6 supports 护栏体系内）。**色彩体系不动**：不迁 OKLCH、不改 useAppearance 运行时注入 token 名；字号恒走 `--text-*`（font_scale 覆盖红线）。参考调研：Catmail（React19+Tailwind v4，`/Users/misyra/Dev/Catmail/frontend/src/index.css` token 全集）
 

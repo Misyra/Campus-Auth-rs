@@ -2,6 +2,19 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.1”。
 
+## 开发中（2026-11-20 前端统一重构战役批次：收口收尾 + 设计地基 + 新功能 + 大组件拆分 + 仪表盘重排）
+
+> 承接同日立项节。子代理并行流水线推进、逐批独立落库；阶段 1 全部收官，零警告门禁（`lint:css --max-warnings 0`）钉死。
+
+- **阶段 1b 日志级别色合一（d14a06b）**：DashboardView 徽标绑定 `level-*`→`log-*`、log-viewer.css 4 选择器迁移，dashboard.css 级别色条区段零改动；「后端拼写 WARN/TRACE 徽标不着色」历史口径注释钉住。
+- **阶段 1c token 逃逸清零（10f92ca）**：ai_task/tasks/profiles 三文件 68 行 spacing 字面量等值回填 `--space-*`（视觉零变化）；±2px 就近归并 47 值列目检清单；UpdateDialog 字号与 badge--mono 核实 T8-3 已治理、无需动作；12/6/2px 逃逸档位建议交地基批落定义。
+- **新功能：持久会话自由浏览与「打开浏览器」入口（2934733）**：复用 `profile_session_start` 加 `record=false` 自由浏览模式（不新增 Worker 命令——复用既有互斥矩阵 / 幽灵收尾 / 占用注册表）；`POST /api/profiles/{id}/config-session/start?record=false`（未启用持久会话 400）+ stop 端点「未录制会话拒绝非 discard 结算」守卫（钉死空录制覆盖既有录制动作的数据丢失路径）；`ConfigSessionOwner.record` 归属字段；PersistentSessionSection「打开浏览器」按钮（未启用禁用+就地提示、409 toast）+ 4 例测试；openapi 重生成 + typegen 同步；user-guide 补用法。cargo test 1474 / clippy / fmt / vitest / typegen:check 全绿。
+- **V2 Catmail 设计语言地基（a933d44）**：新增 `--panel-elevation`（双层柔和阴影）/ `--overlay-elevation`（浮层三层）/ `--ease-out-soft` / `--accent-soft`（color-mix 派生，运行时强调色自动跟随）/ `--space-md-sm`(12px) / `--space-sm-xs`(6px) / `--space-3xs`(2px)；card 质感升级（双层阴影）、btn primary accent 投影 + 顶部高光（hover 改 color-mix 现场派生，`--accent-hover` token 保留）、badge/chip 三段式配方收口；新增 motion.css（page-in / fade-rise + stagger-children 40ms 步进 / pop-in，prefers-reduced-motion 与 html.reduce-motion 双闸关停）挂载 index.css；滚动条改 hover-reveal（F6 @supports 护栏与日志区 4px 特例保留）。色彩体系零迁移（不迁 OKLCH、不动运行时注入 token 名）。
+- **阶段 1d stylelint 警告全清零（dec4803）**：42 条→0——39 条结构性修复（选择器重排 / 合并，0 条 disable），3 条红线项（btn/card，当时被 V2 批占用）由主代理收口：btn 两态互斥换序、card `:has` 选择器列表升序重排、`no-backdrop-filter .card` 用 `:where()` 压平具体度钉在 `:has` 块之前（!important 承担覆盖力，语义不变）；`lint:css` 加 `--max-warnings 0` 钉死零警告门禁。
+- **T8-2 AiTaskView 拆分（8f03cae）**：953→299 行，拆 useAiLlmConfig（352）/ useAiCapture（123）/ useAiGenerate（326）三 composable（显式注入、无模块级可变态、不自注册生命周期钩子）；模板行为等价以 `@vue/compiler-dom` 编译产物逐字节一致证明；新增 60 例单测（786 全过），原 670 行 0% 覆盖脚本升至 96-100%，覆盖率不降反升。
+- **阶段 4② 仪表盘重排（0f39bc8）**：`.dashboard-split` 改「左网络诊断 + 右实时日志」stretch 等高——单变量 `--dash-split-h: 420px` 钳制（日志卡定高主导行高、诊断卡 max-height 钳住轨道贡献，内容溢出转卡内滚动，两卡上下缘严格对齐）；诊断卡按钮组迁入 card-footer 贴底、检查列表 flex-grow 吸收余高；登录历史移双栏下方全宽（列表单一滚动容器 420px，与日志卡同节奏）；`.stats-grid` 接入 stagger-children 级联；发现根级 `.page-in` 被 layout.css pageEnter 同特异度后到压制（空挂），待阶段 2 收口退役 pageEnter。脚本区零改动（仅模板搬移 + 样式）。
+- 验证：每批 `npm run lint:css`（0 error 0 warning，零容忍门禁）+ vitest 全过（726→786）+ typecheck；功能批另过 cargo test 1474 / clippy / fmt；类型检查唯一红点为 V4 在途文件（其批自清）。
+
 ## 开发中（2026-11-20 前端统一重构战役立项：脏树清库 + 设置页滚动模型修复）
 
 > 2026-11-20 用户拍板「重构彻底一点、不留技术债，之前的问题统一重构优化掉」：前端收口战役与 UI 视觉重构合并为统一战役（结构收口 → 视觉重构 → 组件层 → 清债转正；设置页同步引入 schema 驱动混合架构）；同日三拍板 = 设置页顶部 tab 替代左侧子导航 / 分区拆 8 区 / 先地基后视觉。方案、现状诊断与 Catmail 设计语言调研结论集中记录于 plan-next「前端设计系统收口战役」节。
