@@ -80,7 +80,9 @@ fn embedded_pubkey_b64() -> Option<&'static str> {
 
 /// 解析编译期嵌入的公钥
 ///
-/// `build.rs` 已在构建期校验格式，此处解析失败属防御分支：按未启用签名校验
+/// `build.rs` 已在构建期以 `VerifyingKey::from_bytes` 做过完整解析（44 字符
+/// base64 形态 + 曲线点合法性双重校验），本解析失败分支正常构建下不可达，
+/// 属防御性保留：万一命中（构建事故 / 编译期常量异常），按未启用签名校验
 /// 处理（保可用性）并显著告警，不让一次构建事故静默摧毁更新可用性。
 /// `pub(crate)` 供 `check.rs` GitHub Release 路径取钥并按构建形态分流回退
 /// 口径（见 [`verify_manifest_value`] 与 `check.rs` 的对应注释）。
@@ -89,7 +91,10 @@ pub(crate) fn embedded_verifying_key() -> Option<VerifyingKey> {
     match decode_pubkey(b64) {
         Ok(key) => Some(key),
         Err(e) => {
-            tracing::warn!("编译期嵌入的清单签名公钥无法解析，按未启用签名校验处理: {e}");
+            tracing::warn!(
+                "编译期嵌入的清单签名公钥无法解析（构建期已校验，正常不可达），\
+                 按未启用签名校验处理: {e}"
+            );
             None
         }
     }
@@ -274,7 +279,11 @@ fn decode_signing_key(signing_key_b64: &str) -> Result<SigningKey, String> {
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&bytes);
     bytes.zeroize();
-    Ok(SigningKey::from_bytes(&seed))
+    let key = SigningKey::from_bytes(&seed);
+    // from_bytes 内部按值拷贝构造密钥，栈上 seed 副本此后无用，立即清零
+    // 防止私钥种子明文残留栈帧（generate_signing_keypair 同口径）
+    seed.zeroize();
+    Ok(key)
 }
 
 #[cfg(test)]

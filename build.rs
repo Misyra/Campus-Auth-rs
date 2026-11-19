@@ -1,5 +1,7 @@
 //! 嵌入 Windows 程序版本资源、发布清单签名公钥（可选），并为 MSVC 助手启用现代公共控件。
 
+use base64::Engine as _;
+
 fn main() {
     println!("cargo:rerun-if-changed=resources/windows/helper.manifest");
     println!("cargo:rerun-if-changed=resources/icons/app.ico");
@@ -65,6 +67,23 @@ fn embed_manifest_pubkey() {
             .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/' || c == b'=');
     if !valid {
         panic!("resources/manifest-pubkey 不是合法的 ed25519 公钥 base64（预期 44 字符）");
+    }
+    // 完整解析校验：44 字符 base64 只保证形态，不保证解码出的 32 字节是合法
+    // ed25519 曲线点——损坏/被替换的公钥会通过形态检查，却在运行期解析失败而
+    // fail-open 降级为不校验签名。构建期用 VerifyingKey::from_bytes 做完整
+    // 解析，失败即构建报错（fail-closed），与运行期 embedded_verifying_key
+    // 共用同一解析入口，不存在两套判定漂移
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(key)
+        .unwrap_or_else(|e| panic!("resources/manifest-pubkey base64 解码失败: {e}"));
+    let arr: [u8; 32] = bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+        panic!(
+            "resources/manifest-pubkey 应解码为 32 字节公钥，实际 {} 字节",
+            v.len()
+        )
+    });
+    if let Err(e) = ed25519_dalek::VerifyingKey::from_bytes(&arr) {
+        panic!("resources/manifest-pubkey 不是合法的 ed25519 公钥（曲线点解析失败）: {e}");
     }
     println!("cargo:rustc-env=CAMPUS_MANIFEST_PUBKEY_B64={key}");
 }

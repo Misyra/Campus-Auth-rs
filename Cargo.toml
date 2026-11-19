@@ -70,8 +70,10 @@ aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive", "alloc", "serde"] }
 rand = "0.8"
 # 发布清单 ed25519 离线签名（T6-4）：release 流水线签清单 + 客户端嵌公钥严格校验。
-# 纯 Rust 实现（无 C 依赖）；密钥生成直接用 rand 的 OsRng 填 32 字节种子，无需 rand_core 特性
-ed25519-dalek = "2"
+# 纯 Rust 实现（无 C 依赖）；密钥生成直接用 rand 的 OsRng 填 32 字节种子，无需 rand_core 特性。
+# zeroize 显式声明防漂移：它是 2.x 的默认特性（SigningKey 的 ZeroizeOnDrop 私钥
+# drop 清零依赖它），上游若收缩默认特性集，隐式依赖会静默失去该保证
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 
 # CLI & 日志
 clap = { version = "4", features = ["derive", "env"] }
@@ -204,3 +206,8 @@ codegen-units = 1
 [build-dependencies]
 # 为 Windows 主程序和助手嵌入可被手动更新识别的版本资源。
 winresource = "0.1.31"
+# 构建期完整解析待嵌入的清单签名公钥（VerifyingKey::from_bytes 校验曲线点
+# 合法性）：形态检查拦不住"合法 base64 但非法公钥"的损坏文件，那类文件会在
+# 运行期解析失败而 fail-open 降级为不校验签名，必须在构建期 fail-closed
+ed25519-dalek = "2"
+base64 = "0.22"
