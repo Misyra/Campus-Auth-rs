@@ -11,10 +11,14 @@ describe("OpenWrt 功能入口", () => {
     vi.resetModules();
     const nav = await import("./navTree");
     expect(nav.TASK_NAV_CHILDREN.map((child) => child.id)).toEqual(["http", "scripts", "scheduled"]);
+    // 设置分区清单自阶段 4③ 起由 schema 单一事实源维护（侧栏已改单入口）
+    const sections = (await import("../views/settings/schema")).SETTINGS_SECTIONS;
     // 推送通知由后端发送（不经浏览器/Worker），路由器版保留
-    expect(nav.SETTINGS_NAV_CHILDREN.map((child) => child.id)).toEqual([
-      "monitor",
+    expect(sections.map((section) => section.id)).toEqual([
+      "network",
+      "login",
       "system",
+      "update",
       "notification",
       "appearance",
     ]);
@@ -26,7 +30,8 @@ describe("OpenWrt 功能入口", () => {
     const nav = await import("./navTree");
     expect(nav.TASK_NAV_CHILDREN.map((child) => child.id)).toContain("browser");
     expect(nav.TASK_NAV_CHILDREN.map((child) => child.id)).toContain("ai");
-    expect(nav.SETTINGS_NAV_CHILDREN.map((child) => child.id)).toContain("browser");
-    expect(nav.SETTINGS_NAV_CHILDREN.map((child) => child.id)).toContain("tasks");
+    const sections = (await import("../views/settings/schema")).SETTINGS_SECTIONS;
+    expect(sections.map((section) => section.id)).toContain("browser");
+    expect(sections.map((section) => section.id)).toContain("tasks");
   });
 });

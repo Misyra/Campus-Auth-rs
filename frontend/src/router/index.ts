@@ -46,25 +46,24 @@ const routes = [
     name: "settings",
     meta: { title: "设置" },
     component: () => import("@/views/SettingsView.vue"),
-    redirect: { name: "settings-monitor" },
+    // 阶段 4③：设置页改单路由 + 分区锚点（/settings#<id>），分区内导航由页内
+    // sticky tab 条承担。旧分类子路由全部保留**路由名**并重定向到对应锚点——
+    // 书签深链（/settings/browser）与程序化 push({ name: "settings-tasks" })
+    // （DashboardView 环境横幅、AboutView 修复入口、useUi 浏览器引导）都经
+    // 这批重定向继续可达；重定向在守卫前解析，beforEach 看到的目标已是 settings。
     children: [
-      { path: "", redirect: { name: "settings-monitor" } },
-      // 账号/认证地址/登录方式已全部移交「配置方案」页（单一入口）：保留
-      // 旧深链与书签的重定向，避免用户手上的 /settings/account 变成 404
+      // 账号/认证地址/登录方式已全部移交「配置方案」页（单一入口）
       { path: "account", redirect: { name: "profiles" } },
-      // 所有分类由父页同时挂载，保留路由名称以兼容书签与其它页面入口。
-      { path: "monitor", name: "settings-monitor", meta: { title: "设置" }, components: {} },
-      { path: "browser", name: "settings-browser", meta: { title: "设置" }, components: {} },
-      { path: "tasks", name: "settings-tasks", meta: { title: "设置" }, components: {} },
-      // 分类路由仅表达长页定位，旧环境深链继续定位到任务与环境。
-      { path: "environment", redirect: { name: "settings-tasks" } },
-      { path: "system", name: "settings-system", meta: { title: "设置" }, components: {} },
-      // 旧「网络与更新」Tab 已并入「系统与更新」：保留深链与书签重定向
-      { path: "network", redirect: { name: "settings-system" } },
-      // 推送通知：通道增删改与测试发送、触发事件与免打扰时段
-      { path: "notification", name: "settings-notification", meta: { title: "设置" }, components: {} },
-      // 外观原为侧栏独立页，并入设置页：它是纯本机显示偏好，与其余设置同类
-      { path: "appearance", name: "settings-appearance", meta: { title: "设置" }, components: {} },
+      { path: "monitor", name: "settings-monitor", redirect: { path: "/settings", hash: "#network" } },
+      { path: "browser", name: "settings-browser", redirect: { path: "/settings", hash: "#browser" } },
+      { path: "tasks", name: "settings-tasks", redirect: { path: "/settings", hash: "#tasks" } },
+      // 旧环境深链继续定位到任务与环境。
+      { path: "environment", redirect: { path: "/settings", hash: "#tasks" } },
+      { path: "system", name: "settings-system", redirect: { path: "/settings", hash: "#system" } },
+      // 旧「网络与更新」Tab 并入「系统与更新」→ 现归「系统」分区
+      { path: "network", redirect: { path: "/settings", hash: "#system" } },
+      { path: "notification", name: "settings-notification", redirect: { path: "/settings", hash: "#notification" } },
+      { path: "appearance", name: "settings-appearance", redirect: { path: "/settings", hash: "#appearance" } },
     ],
   },
   // 旧「AI 生成任务」独立页已并入「任务」页 Tab：保留深链与书签重定向
@@ -88,9 +87,8 @@ router.beforeEach(async (to, from) => {
   if (IS_OPENWRT && ["tasks-browser", "tasks-ai"].includes(String(to.name))) {
     return { name: "tasks-http" };
   }
-  if (IS_OPENWRT && ["settings-browser", "settings-tasks"].includes(String(to.name))) {
-    return { name: "settings-system" };
-  }
+  // OpenWrt 的浏览器/任务分区裁剪已改为 schema 装配期过滤（views/settings/schema.ts），
+  // 旧 settings-* 子路由名经重定向解析后不再出现为导航目标，此处无需再拦
   const { dirty, fetchConfig, saveFailed } = useConfig();
   // 仅当真正离开设置区域（含子路由）才拦截；设置页内部切换不打扰用户
   if (dirty.value && from.path.startsWith("/settings") && !to.path.startsWith("/settings")) {

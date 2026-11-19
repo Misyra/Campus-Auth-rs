@@ -368,7 +368,7 @@ async function init(): Promise<void> {
   };
   armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
   // 自启动不再全局轮询：状态只在设置页挂载时拉取、操作（开关/应用预设）后刷新，
-  // 见 SystemSettings 的 onMounted 与 useConfig.toggleAutostart / useRunMode.applyRunMode。
+  // 见 SystemStartupRows 的 onMounted 与 useConfig.toggleAutostart / useRunMode.applyRunMode。
   // init 此处的一次拉取供向导运行模式判定与其它展示点读缓存值。
 
   // 应用外观

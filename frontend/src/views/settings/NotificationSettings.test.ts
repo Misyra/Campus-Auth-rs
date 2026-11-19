@@ -1,10 +1,15 @@
 // @vitest-environment happy-dom
 /**
- * NotificationSettings（设置 · 推送通知分区）行为测试（createApp 直挂，免
- * @vue/test-utils，与 NetworkDiagnosticsPanel.test.ts 同范式）。useConfig 是
- * 模块级单例，直接预置 config.notification 后挂载真实组件。
+ * 推送通知分区行为测试（createApp 直挂，免 @vue/test-utils，与
+ * NetworkDiagnosticsPanel.test.ts 同范式）。useConfig 是模块级单例，直接预置
+ * config.notification 后挂载真实组件。
  *
- * 锁定四类交互：
+ * 阶段 4③ 面板拆分后的挂载面：推送设置三行（启用开关/重试参数）由 schema +
+ * SchemaRow 渲染（覆盖见 settingsA11y.test.ts），本文件挂载三个槽位组件——
+ * NotificationChannelsPanel（通道增删改与测试发送）、NotificationEventsRows
+ * （触发事件 chip）、NotificationQuietRows（免打扰时段）。
+ *
+ * 锁定五类交互：
  * - 通道增删：添加通道按所选类型生成草稿卡片，删除即移除（结果缓存同步清掉）；
  * - 类型切换：type 下拉切换就地重建通道为对应变体，字段表单随类型切换、
  *   公共字段（名称/启用/超时）保留；
@@ -14,8 +19,10 @@
  * - 事件类型开关组与免打扰时段绑定写入 config 草稿（保存仍由页面统一负责）。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createApp, nextTick, type App } from "vue";
-import NotificationSettings from "./NotificationSettings.vue";
+import { createApp, nextTick, type App, type Component } from "vue";
+import NotificationChannelsPanel from "./panels/NotificationChannelsPanel.vue";
+import NotificationEventsRows from "./panels/NotificationEventsRows.vue";
+import NotificationQuietRows from "./panels/NotificationQuietRows.vue";
 import { useConfig } from "@/composables/useConfig";
 import { DEFAULT_CONFIG } from "@/utils/constants";
 import type { NotificationConfig, NotificationTestResult } from "@/api/types";
@@ -38,14 +45,14 @@ let container: HTMLDivElement | null = null;
 /** 预置通知配置（单例快照清空后写默认值） */
 function seedNotification(overrides: Partial<NotificationConfig> = {}): NotificationConfig {
   const config = useConfig().config;
-  config.notification = { ...structuredClone(DEFAULT_CONFIG.notification), ...overrides };
+  Object.assign(config.notification, { ...structuredClone(DEFAULT_CONFIG.notification), ...overrides });
   return config.notification;
 }
 
-function mount(): void {
+function mount(component: Component): void {
   container = document.createElement("div");
   document.body.appendChild(container);
-  app = createApp(NotificationSettings);
+  app = createApp(component);
   app.mount(container);
 }
 
@@ -110,9 +117,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("NotificationSettings 通道增删", () => {
+describe("NotificationChannelsPanel 通道增删", () => {
   it("添加通道按所选类型生成草稿卡片，再点删除即移除", async () => {
-    mount();
+    mount(NotificationChannelsPanel);
     expect(channelCards()).toHaveLength(0);
     addChannelByUI();
     await flush();
@@ -139,7 +146,7 @@ describe("NotificationSettings 通道增删", () => {
         send_key: "sct",
       })),
     });
-    mount();
+    mount(NotificationChannelsPanel);
     expect(channelCards()).toHaveLength(10);
     addChannelByUI();
     await flush();
@@ -147,10 +154,10 @@ describe("NotificationSettings 通道增删", () => {
   });
 });
 
-describe("NotificationSettings 类型切换", () => {
+describe("NotificationChannelsPanel 类型切换", () => {
   it("切换 type 就地重建通道：字段表单随类型切换、公共字段保留", async () => {
     const notification = seedNotification();
-    mount();
+    mount(NotificationChannelsPanel);
     addChannelByUI();
     await flush();
     const card = channelCards()[0];
@@ -183,10 +190,10 @@ describe("NotificationSettings 类型切换", () => {
   });
 });
 
-describe("NotificationSettings 系统通知通道", () => {
+describe("NotificationChannelsPanel 系统通知通道", () => {
   it("切换到系统通知：表单仅剩超时字段，无凭据输入框", async () => {
     const notification = seedNotification();
-    mount();
+    mount(NotificationChannelsPanel);
     addChannelByUI();
     await flush();
     const card = channelCards()[0];
@@ -223,7 +230,7 @@ describe("NotificationSettings 系统通知通道", () => {
     const notification = seedNotification({
       channels: [JSON.parse(JSON.stringify(wire))],
     });
-    mount();
+    mount(NotificationChannelsPanel);
     const card = channelCards()[0];
     // UI 编辑名称与超时；页面统一「保存」把 config.notification 原样序列化进 PATCH /api/config
     const nameInput = card.querySelector<HTMLInputElement>('input[aria-label="通道 1 名称"]');
@@ -244,7 +251,7 @@ describe("NotificationSettings 系统通知通道", () => {
   });
 });
 
-describe("NotificationSettings 测试发送三分支", () => {
+describe("NotificationChannelsPanel 测试发送三分支", () => {
   function clickTest(card: HTMLElement): void {
     const btn = findButton("测试发送", card);
     expect(btn, "通道卡片缺少测试发送按钮").not.toBeNull();
@@ -263,7 +270,7 @@ describe("NotificationSettings 测试发送三分支", () => {
         data: { results: [{ id: "ch-1", name: "本地", type: "webhook", success: true }] },
       } satisfies { data: NotificationTestResult });
     });
-    mount();
+    mount(NotificationChannelsPanel);
     clickTest(channelCards()[0]);
     await settle();
     const result = document.querySelector(".notif-test-result");
@@ -283,7 +290,7 @@ describe("NotificationSettings 测试发送三分支", () => {
         },
       }),
     );
-    mount();
+    mount(NotificationChannelsPanel);
     clickTest(channelCards()[0]);
     await settle();
     const result = document.querySelector(".notif-test-result--fail");
@@ -300,7 +307,7 @@ describe("NotificationSettings 测试发送三分支", () => {
     stubFetch(async () =>
       jsonResponse({ error: { code: "INTERNAL_ERROR", message: "内部错误" } }, { status: 500 }),
     );
-    mount();
+    mount(NotificationChannelsPanel);
     clickTest(channelCards()[0]);
     await settle();
     const result = document.querySelector(".notif-test-result--fail");
@@ -318,7 +325,7 @@ describe("NotificationSettings 测试发送三分支", () => {
       release = resolve;
     });
     stubFetch(async () => gate);
-    mount();
+    mount(NotificationChannelsPanel);
     clickTest(channelCards()[0]);
     await flush();
     const btn = findButton("测试发送", channelCards()[0]);
@@ -330,10 +337,10 @@ describe("NotificationSettings 测试发送三分支", () => {
   });
 });
 
-describe("NotificationSettings 事件与免打扰绑定", () => {
+describe("NotificationEventsRows 事件类型绑定", () => {
   it("事件类型开关组勾选写入 config.events 草稿", async () => {
     const notification = seedNotification({ events: [] });
-    mount();
+    mount(NotificationEventsRows);
     const chip = [...document.querySelectorAll<HTMLLabelElement>(".notif-event-chip")].find(
       (l) => l.textContent?.includes("登录成功"),
     );
@@ -347,10 +354,12 @@ describe("NotificationSettings 事件与免打扰绑定", () => {
     await flush();
     expect(notification.events).not.toContain("login_succeeded");
   });
+});
 
+describe("NotificationQuietRows 免打扰时段绑定", () => {
   it("免打扰时段 time 输入与 时/分 字段互转", async () => {
     const notification = seedNotification({ quiet_enabled: true });
-    mount();
+    mount(NotificationQuietRows);
     const start = document.querySelector<HTMLInputElement>("#settings-notification-quiet-start");
     expect(start, "缺少免打扰开始时间输入").not.toBeNull();
     expect(start!.value).toBe("22:00");

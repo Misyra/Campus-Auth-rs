@@ -71,7 +71,7 @@ describe("视图中的任务类入口", () => {
     "utf-8",
   );
   const envPage = readFileSync(
-    resolve(__dirname, "../views/settings/TaskEnvironmentSettings.vue"),
+    resolve(__dirname, "../views/settings/panels/TaskOverviewRows.vue"),
     "utf-8",
   );
 
@@ -86,6 +86,7 @@ describe("视图中的任务类入口", () => {
   });
 
   it("「任务仓库 →」同样使用共享常量", () => {
+    // 阶段 4③：原 TaskEnvironmentSettings 按面板拆分，「任务仓库 →」迁入任务概览槽位组件
     expect(envPage).toContain(":href=\"TASK_REPO_URL\"");
     expect(envPage).not.toMatch(/href="https:\/\/github\.com\/Misyra/);
   });

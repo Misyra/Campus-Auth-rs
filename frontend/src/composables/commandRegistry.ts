@@ -2,9 +2,10 @@
  * 命令面板的命令集：构建与关键词过滤（纯函数 + 单例入口编排）。
  *
  * 只被 CommandPalette.vue（懒加载 chunk）与本目录测试引用，不进首屏 chunk。
- * 命令全部复用既有单例入口（不新增 API）：导航走 router（任务/设置子项的
- * 名称与图标取自 navTree 单一事实源，OpenWrt 裁剪随 supportedNav 自动生效）；
- * 动作复用 useUi / useUpdateDialog / useRepoImport；主题切换写 useAppearance。
+ * 命令全部复用既有单例入口（不新增 API）：导航走 router（任务子项的名称与图标
+ * 取自 navTree、设置分区取自 views/settings/schema.ts 两处单一事实源，OpenWrt
+ * 裁剪随各自的支持过滤自动生效）；动作复用 useUi / useUpdateDialog / useRepoImport；
+ * 主题切换写 useAppearance。
  *
  * 有意不提供的命令（现状无独立入口，做成命令只会伪装成可用）：
  * - 打开调试面板：面板随调试会话开启，DebugPanel 的关闭即 stopDebug，无"只开面板"路径；
@@ -17,7 +18,8 @@ import { useAppearance } from "./useAppearance";
 import { useUpdateDialog } from "./useUpdateDialog";
 import { useRepoImport } from "./useRepoImport";
 import { useSettingsNavigation } from "./useSettingsNavigation";
-import { SETTINGS_NAV_CHILDREN, TASK_NAV_CHILDREN, type NavChild } from "../utils/navTree";
+import { TASK_NAV_CHILDREN } from "../utils/navTree";
+import { SETTINGS_SECTIONS } from "../views/settings/schema";
 import type { IconName } from "@/components/common/IconApp.vue";
 
 /** 面板内分组标题；命令按注册顺序排列，同组自然连续 */
@@ -57,10 +59,11 @@ export function buildCommandItems(): PaletteCommand[] {
   const navigate = (name: string): (() => void) => () => {
     void router.push({ name });
   };
-  // 设置分区与侧栏 navigateSettings 同口径：已在目标分区时仅滚动定位，不再 push
-  const gotoSettingsChild = (child: NavChild): (() => void) => () => {
-    if (router.currentRoute.value.name === child.name) requestScroll(child.id);
-    else void router.push({ name: child.name });
+  // 设置分区与设置页 tab 同口径：已在设置页时仅滚动定位，否则带锚点进入
+  // （分区清单与图标/说明取自 views/settings/schema.ts 单一事实源，OpenWrt 裁剪随其生效）
+  const gotoSettingsSection = (sectionId: string): (() => void) => () => {
+    if (router.currentRoute.value.name === "settings") requestScroll(sectionId);
+    else void router.push({ path: "/settings", hash: `#${sectionId}` });
   };
   const taskCommands = TASK_NAV_CHILDREN.map((child) => ({
     id: `nav-task-${child.id}`,
@@ -70,13 +73,13 @@ export function buildCommandItems(): PaletteCommand[] {
     keywords: child.title,
     run: navigate(child.name),
   }));
-  const settingsCommands = SETTINGS_NAV_CHILDREN.map((child) => ({
-    id: `nav-settings-${child.id}`,
+  const settingsCommands = SETTINGS_SECTIONS.map((section) => ({
+    id: `nav-settings-${section.id}`,
     group: "导航" as const,
-    label: `设置 · ${child.label}`,
-    icon: child.icon,
-    keywords: child.title,
-    run: gotoSettingsChild(child),
+    label: `设置 · ${section.label}`,
+    icon: section.icon,
+    keywords: section.title,
+    run: gotoSettingsSection(section.id),
   }));
 
   const commands: PaletteCommand[] = [

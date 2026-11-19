@@ -157,9 +157,10 @@ describe("命令过滤与执行", () => {
     await settle();
     const groupLabels = [...document.querySelectorAll(".command-palette-group-label")].map((el) => el.textContent);
     expect(groupLabels).toEqual(["导航", "操作", "外观"]);
-    // 导航 14（仪表盘/配置方案/任务子项 5/设置子项 6/关于）+ 操作 4（默认未登录时
-    // 「取消登录」被 when 隐藏）+ 主题 2（默认浅色下「主题：浅色」被 when 隐藏）
-    expect(options().length).toBe(20);
+    // 导航 16（仪表盘/配置方案/任务子项 5/设置分区 8/关于——阶段 4③ 起设置分区
+    // 取自 schema 的 8 个分区）+ 操作 4（默认未登录时「取消登录」被 when 隐藏）
+    // + 主题 2（默认浅色下「主题：浅色」被 when 隐藏）
+    expect(options().length).toBe(22);
     expect(options()[0].textContent).toContain("仪表盘");
   });
 

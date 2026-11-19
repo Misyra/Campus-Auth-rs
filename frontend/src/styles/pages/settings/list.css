@@ -24,16 +24,57 @@
    同一节奏，右内边距归零让卡片右缘与顶栏动作区/其它页内容右缘对齐 */
 .settings-scroll { padding-inline: 2px 0; }
 .settings-scroll > .settings-form { margin-top: 0; padding-bottom: 16px; gap: 48px; }
-/* 锚定落点 = content-wrapper 的 scroll-padding-block（20px）+ 本值 = 40px，
-   对齐旧模型「wrapper 顶内边距 24px + 偏移 16px」的视觉位置 */
-.settings-category { min-width: 0; scroll-margin-top: 20px; }
+/* 锚定落点 = content-wrapper 的 scroll-padding-block（20px）+ 本值 = 96px：
+   分区标题落在 sticky tab 条（约 50px）之下并留呼吸空间，与 scrollspy 阅读带
+   （SettingsView 的 SPY_ROOT_MARGIN 顶边 -96px）同一条线 */
+.settings-category { min-width: 0; scroll-margin-top: 76px; }
 .settings-category + .settings-category { padding-top: 28px; border-top: 1px solid var(--border); }
 .settings-category-heading { margin: 0 2px 22px; font-size: var(--text-xl); font-weight: 650; color: var(--text-primary); }
-.settings-mobile-jump { display: none; }
+
+/* ===== 顶部分区导航条（阶段 4③）=====
+   sticky 圆角容器 + 图标+文字按钮；active 走 --accent-soft 浅底（V2 token）。
+   滚动模型与页面一致：容器是外层 content-wrapper，本条随页面滚到顶后钉住。
+   窄屏不放不下时整条横向滚动（替代旧 settings-mobile-jump select，该 select 已退役）。 */
+.settings-tabs {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  flex: none;
+  padding: 6px;
+  margin-bottom: 20px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.settings-tabs::-webkit-scrollbar { display: none; }
+.settings-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
+}
+.settings-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+.settings-tab.active { background: var(--accent-soft); color: var(--accent-text, var(--accent)); font-weight: 600; }
+.settings-tab-icon { width: 15px; height: 15px; flex-shrink: 0; }
 
 /* 设置搜索：输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，
-   见 composables/useSettingsSearch）；本页只保留无命中的空态提示。
-   过滤逻辑在 utils/settingsSearch.ts：无命中的分区整体隐藏，命中行加 .settings-search-hit。 */
+   见 composables/useSettingsSearch）；匹配按 schema 数据计算（utils/settingsSearch.ts），
+   本页只把结果落到类名：无命中的分区整体隐藏，命中的行/槽位加 .settings-search-hit。 */
 .settings-search-empty { flex: none; margin: 0 2px 16px; color: var(--text-secondary); font-size: var(--text-md); }
 .settings-category.settings-search-hidden { display: none; }
 /* 相邻分隔线挂在「前一个分区存在」上：分区被过滤掉后不再给后继分区留上边框 */
@@ -96,13 +137,13 @@
 .settings-list-page .card-body + .card-body { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
 .settings-list-page .card-body:has(+ .card-body) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 /* `.setting-row-control .form-row`（flex 右对齐）已于 2026-11-13 删除：模板里
-   .setting-row-control（SettingsRow 插槽容器与监测/浏览器页共 6 处）内均无 .form-row
-   后代——.form-row 现存于 HttpFlowFields、档案/AI/任务弹窗，都不在设置页，规则从不命中；
-   即便日后出现，也会被下方 .settings-list-page .card-body .form-row 的 display:contents
-   以更高特异度（0,3,0 > 0,2,0）无条件中和。 */
-.settings-list-page :is(.settings-grid-2col, .ocr-settings-grid) { display: block; }
-.settings-list-page .settings-grid-2col > div:not(.setting-row),
-.settings-list-page .card-body .form-row { display: contents; }
+   .setting-row-control 内均无 .form-row 后代——.form-row 现存于 HttpFlowFields、
+   档案/AI/任务弹窗，都不在设置页，规则从不命中（彼时配套的
+   `.settings-list-page .card-body .form-row { display: contents }` 中和规则
+   已随阶段 4③ 面板拆分一并退役）。 */
+/* `.settings-grid-2col` / `.ocr-settings-grid` 已随阶段 4③ 面板拆分退役：
+   两个类仅存的模板使用点在旧分区组件（SystemSettings / TaskEnvironmentSettings），
+   组件按面板拆分后不再使用；行式布局由 .setting-row 与 card-body 自然流承担。 */
 
 .setting-row {
   display: grid;
@@ -157,7 +198,9 @@
 .settings-list-page .run-mode-option-desc { display: none; }
 .settings-list-page .update-check-row { justify-content: flex-end; gap: 8px; }
 .settings-list-page .update-check-row .hint { width: 100%; text-align: right; }
-.settings-list-page .card-body > :is(.browser-safe-info, .form-help-text, .note, .manual-update-tip) { margin: 16px 0; }
+/* 槽位组件以包裹 div 进入 card-body，说明块/提示条不再是直接子元素，
+   故由直接子选择器放宽为后代选择器（与拆分前的间距一致） */
+.settings-list-page .card-body :is(.browser-safe-info, .form-help-text, .note, .manual-update-tip) { margin: 16px 0; }
 .settings-list-page .env-lead { margin: 0; padding-top: 18px; }
 .settings-list-page .env-status-row { padding-block: 12px; }
 .settings-list-page.environment-page .env-checklist { grid-template-columns: minmax(0, 1fr); gap: 0; margin: 0; }
@@ -176,9 +219,7 @@
 .settings-list-page section:has(.field-help:focus-visible) { position: relative; z-index: var(--z-overlay); }
 
 @media (max-width: 768px) {
-  .settings-mobile-jump { display: flex; align-items: center; gap: 12px; margin: 0 2px 16px; flex: none; }
-  .settings-mobile-jump label { flex: none; margin: 0; font-size: var(--text-md); color: var(--text-secondary); }
-  .settings-mobile-jump select { flex: 1; min-width: 0; width: auto; padding-block: 9px; }
+  /* 分区内导航由顶部 tab 条承担（窄屏横向滚动），旧 settings-mobile-jump select 已退役 */
   .settings-scroll > .settings-form { gap: 36px; }
   .settings-category + .settings-category { padding-top: 24px; }
   /* 手机已经有底部保存状态，顶栏保留完整页面名称。 */
