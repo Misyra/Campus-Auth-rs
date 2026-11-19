@@ -231,6 +231,10 @@ pub struct ConfigSessionOwner {
     pub session_id: String,
     /// 发起配置会话的方案 id
     pub profile_id: String,
+    /// 会话是否开启录制（start 请求的 `record` 口径）：stop 端点据此拦截
+    /// 「未录制会话的非 discard 结算」——那会以空数组覆盖方案既有录制
+    /// （自由浏览模式打开的会话没有录制内容可落盘）
+    pub record: bool,
 }
 
 /// 配置会话归属注册表（单活跃会话，`Mutex` 保护）
@@ -552,6 +556,7 @@ mod tests {
         let owner = ConfigSessionOwner {
             session_id: "abc".into(),
             profile_id: "dorm".into(),
+            record: true,
         };
         reg.set(owner.clone());
         assert_eq!(reg.peek(), Some(owner.clone()), "peek 不应取走记录");
@@ -566,10 +571,12 @@ mod tests {
         reg.set(ConfigSessionOwner {
             session_id: "old".into(),
             profile_id: "dorm".into(),
+            record: true,
         });
         let newer = ConfigSessionOwner {
             session_id: "new".into(),
             profile_id: "lab".into(),
+            record: false,
         };
         reg.set(newer.clone());
         assert_eq!(reg.peek(), Some(newer), "set 应覆盖旧记录");

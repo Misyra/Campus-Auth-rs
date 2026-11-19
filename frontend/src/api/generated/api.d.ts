@@ -1433,13 +1433,22 @@ export interface paths {
          *     - `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth
          *       口径对齐 Worker 启动逻辑）。
          *
+         *     两种模式（`?record=` 查询参数，缺省 `true`）：
+         *     - **录制配置会话**（缺省）：headed 持久浏览器 + 注入录制器，stop 结算时
+         *       录制动作与开关写回方案；
+         *     - **自由浏览**（`record=false`）：同样 headed 持久浏览器并导航到门户地址，
+         *       但不注入录制器——供已启用持久会话的方案单独「打开浏览器」手动登录
+         *       （勾选门户「记住密码」），用完直接关窗即结束（Worker 幽灵收尾，
+         *       user_data_dir 原样保留）。该模式要求方案已启用 `persistent_session_enabled`
+         *       （400 拦截），stop 端点拒绝其非 discard 结算（无录制可落盘）。
+         *
          *     占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化
          *     错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，
          *     在途登录 / 调试 / 重定向检测期间快速失败（409）。
          *
-         *     归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属
-         *     注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的
-         *     录制写进 B 方案」。
+         *     归属记录：start 成功后把 (session_id, profile_id, record) 记入 Bridge 的
+         *     归属注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案
+         *     会话的录制写进 B 方案」与「未录制会话的落盘结算」。
          *
          *     超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）
          *     耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
@@ -1470,6 +1479,11 @@ export interface paths {
          *     并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。
          *
          *     discard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。
+         *
+         *     未录制会话（自由浏览模式打开，`owner.record == false`）拒绝非 discard
+         *     结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以空数组
+         *     **覆盖方案既有录制**——守卫钉死这条数据丢失路径，自由浏览会话只能以
+         *     discard（仅关闭）方式结束。
          *
          *     超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
          *     耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
@@ -2270,6 +2284,16 @@ export interface components {
         ConfigSessionStartData: {
             /** @description 配置浏览器是否已拉起且录制已开启（成功响应恒为 true） */
             started: boolean;
+        };
+        /** @description POST /api/profiles/{id}/config-session/start 查询参数 */
+        ConfigSessionStartQuery: {
+            /**
+             * @description `true`（缺省）为录制配置会话（注入录制器，stop 可落盘录制）；
+             *     `false` 为**自由浏览**模式：同样拉起 headed 持久浏览器并导航到门户地址，
+             *     但不注入录制器——供已启用持久会话的方案单独打开浏览器手动登录（勾选
+             *     门户「记住密码」），用完直接关窗即结束（幽灵收尾口径与录制会话一致）
+             */
+            record?: boolean;
         };
         /** @description POST /api/profiles/{id}/config-session/stop 响应载荷 */
         ConfigSessionStopData: {
@@ -7455,7 +7479,10 @@ export interface operations {
     };
     post_api_profiles_id_config_session_start: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description false 时以自由浏览模式打开持久浏览器（不注入录制器），须先启用持久会话；缺省 true 为录制配置会话 */
+                record: boolean;
+            };
             header?: never;
             path: {
                 /** @description Profile ID */
@@ -7465,7 +7492,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 配置浏览器已拉起且录制已开启（会话存续期不受命令级超时约束，直到 stop） */
+            /** @description 配置浏览器已拉起（录制模式录制已开启；自由浏览模式不录制；会话存续期不受命令级超时约束，直到 stop） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7474,7 +7501,7 @@ export interface operations {
                     "application/json": components["schemas"]["DataEnvelope_ConfigSessionStartData"];
                 };
             };
-            /** @description 非浏览器渠道（持久会话仅浏览器渠道支持） */
+            /** @description 非浏览器渠道（持久会话仅浏览器渠道支持），或自由浏览模式要求方案已启用持久会话 */
             400: {
                 headers: {
                     [name: string]: unknown;

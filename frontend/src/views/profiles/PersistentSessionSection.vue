@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * 持久会话（浏览器记住密码）分区：开关 + 配置会话编排
- * （打开浏览器配置 → 浏览器内登录门户 → 完成/放弃 → 重新录制）。
+ * （打开浏览器配置 → 浏览器内登录门户 → 完成/放弃 → 重新录制）
+ * + 自由浏览入口（打开浏览器，不录制，供已启用持久会话的方案单独开浏览器）。
  *
  * 分工与「登录方式」（LoginChannelField）对齐：
  * - 开关（persistent_session_enabled）随方案草稿走既有保存通道（PUT /api/profiles/{id}）；
@@ -17,6 +18,7 @@ import ToggleSwitch from "@/components/common/ToggleSwitch.vue";
 import { computed, ref } from "vue";
 import { configSessionApi } from "@/api";
 import { ApiError, extractApiError } from "@/api/client";
+import { useToast } from "@/composables/useToast";
 import type { RecordedAction } from "@/api/types";
 
 /** 本组件读写的最小字段集（宿主草稿类型可含更多字段） */
@@ -36,6 +38,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{ sessionStopped: [] }>();
 
+const { toastOnly } = useToast();
+
 /** 开关说明文案（任务冻结口径，逐字使用） */
 const ENABLE_HINT =
   "启用后自动登录将打开持久浏览器上下文：门户记住密码自动回填账号密码，系统回放你录制的登录点击；失败时提示重新配置";
@@ -43,11 +47,16 @@ const ENABLE_HINT =
 const HELP =
   "「打开浏览器配置」会拉起一个真实浏览器：在里面登录门户并勾选门户的记住密码，" +
   "期间你在登录页上的点击会被录制下来。启用后自动登录不再执行任务步骤，而是复用" +
-  "门户记住的密码与你录制的点击。\n\n配置会话全局一次只能有一个；浏览器被手动关掉后" +
-  "点「完成配置」会提示会话已结束，重新打开即可。";
+  "门户记住的密码与你录制的点击。\n\n「打开浏览器」直接拉起同一个持久浏览器供自由" +
+  "使用（不录制）：手动登录并勾选记住密码后关闭窗口即可，适合只想补存凭据、不想" +
+  "重新录制的场景。\n\n配置会话全局一次只能有一个；浏览器被手动关掉后点「完成配置」" +
+  "会提示会话已结束，重新打开即可。";
 
 /** 会话阶段：starting 拉起浏览器中；active 配置浏览器进行中；stopping 正在结束 */
 const phase = ref<"idle" | "starting" | "active" | "stopping">("idle");
+
+/** 当前会话模式：record 录制配置会话；free 自由浏览（不录制，无完成配置动作） */
+const mode = ref<"record" | "free">("record");
 
 /** 最近一次「完成配置」的录制数（来自 stop 响应；草稿中的动作表不随之改写） */
 const lastRecordedCount = ref<number | null>(null);
@@ -81,20 +90,38 @@ function conflictCopy(): string {
   return "已有配置会话进行中";
 }
 
-/** 打开配置浏览器（首次=打开浏览器配置；已有录制=重新录制，后端覆盖旧录制） */
-async function startSession(): Promise<void> {
+/**
+ * 打开会话。record 模式（首次=打开浏览器配置；已有录制=重新录制，后端覆盖旧
+ * 录制）409 走既有就地文案；free 模式（自由浏览，record=false，须已启用持久
+ * 会话）409 走 toast——占用提示是瞬时行动指引而非表单状态，就地错误区留给
+ * 真正的失败信息。
+ */
+async function startSession(sessionMode: "record" | "free"): Promise<void> {
   if (!hasSavedProfile.value || phase.value !== "idle") return;
+  if (sessionMode === "free" && !enabled.value) return;
   phase.value = "starting";
+  mode.value = sessionMode;
   errorMsg.value = "";
   try {
-    await configSessionApi.start(props.profileId as string);
+    await configSessionApi.start(
+      props.profileId as string,
+      sessionMode === "free" ? { record: false } : undefined,
+    );
     phase.value = "active";
   } catch (error) {
     phase.value = "idle";
-    errorMsg.value =
-      error instanceof ApiError && error.status === 409
-        ? conflictCopy()
-        : extractApiError(error, "打开配置浏览器失败");
+    if (error instanceof ApiError && error.status === 409) {
+      if (sessionMode === "free") {
+        toastOnly(false, "配置会话进行中，请先关闭");
+      } else {
+        errorMsg.value = conflictCopy();
+      }
+    } else {
+      errorMsg.value = extractApiError(
+        error,
+        sessionMode === "free" ? "打开浏览器失败" : "打开配置浏览器失败",
+      );
+    }
   }
 }
 
@@ -130,8 +157,9 @@ async function finishSession(): Promise<void> {
  * 放弃：调 stop（discard=true）只关浏览器——后端不落盘录制、不写方案，「放弃 =
  * 不采纳录制」由前后端共同保证（响应仍带真实 recorded_count，本路径一律丢弃：
  * 不写开关、不更新录制数、不通知宿主）。「完成配置」走缺省 stop（落盘采纳）。
+ * `errorFallback` 供自由浏览关闭路径换用贴合其语义的失败文案。
  */
-async function abandonSession(): Promise<void> {
+async function abandonSession(errorFallback = "结束配置会话失败"): Promise<void> {
   if (phase.value !== "active" && phase.value !== "stopping") return;
   phase.value = "stopping";
   errorMsg.value = "";
@@ -143,10 +171,20 @@ async function abandonSession(): Promise<void> {
     errorMsg.value =
       error instanceof ApiError && error.status === 409
         ? ""
-        : extractApiError(error, "结束配置会话失败");
+        : extractApiError(error, errorFallback);
   } finally {
     phase.value = "idle";
   }
+}
+
+/**
+ * 关闭自由浏览浏览器：与放弃同走 stop（discard=true）——自由浏览会话没有录制
+ * 可落盘（后端也拒绝其非 discard 结算），不写方案、不通知宿主；409（用户已
+ * 直接关窗，Worker 幽灵收尾）即目的已达成，静默收场。
+ */
+async function closeFreeBrowser(): Promise<void> {
+  if (mode.value !== "free") return;
+  await abandonSession("关闭浏览器失败");
 }
 </script>
 
@@ -182,15 +220,31 @@ async function abandonSession(): Promise<void> {
         class="btn btn-sm"
         data-testid="session-start"
         :disabled="phase !== 'idle'"
-        @click="startSession"
+        @click="startSession('record')"
       >
         <IconApp name="globe" class="icon-sm" />
-        {{ phase === "starting" ? "正在打开浏览器…" : hasRecording ? "重新录制" : "打开浏览器配置" }}
+        {{ phase === "starting" && mode === "record" ? "正在打开浏览器…" : hasRecording ? "重新录制" : "打开浏览器配置" }}
       </button>
-      <span v-else class="hint">保存方案后才能打开配置浏览器（会话按方案 ID 落盘）。</span>
+      <!-- 自由浏览入口：已启用持久会话后可单独打开持久浏览器手动登录（不录制）；
+           未启用时禁用并提示（后端同样以 400 门禁兜底） -->
+      <button
+        v-if="hasSavedProfile"
+        type="button"
+        class="btn btn-sm"
+        data-testid="session-open"
+        :disabled="!enabled || phase !== 'idle'"
+        @click="startSession('free')"
+      >
+        <IconApp name="globe" class="icon-sm" />
+        {{ phase === "starting" && mode === "free" ? "正在打开浏览器…" : "打开浏览器" }}
+      </button>
+      <span v-if="!hasSavedProfile" class="hint">保存方案后才能打开配置浏览器（会话按方案 ID 落盘）。</span>
+      <span v-else-if="!enabled" class="hint" data-testid="session-open-hint">
+        启用持久会话并保存方案后才能直接打开浏览器。
+      </span>
     </div>
 
-    <!-- 配置会话进行中横幅：指引 + 完成配置 / 放弃 -->
+    <!-- 配置会话进行中横幅：录制模式给指引 + 完成/放弃；自由浏览模式给关窗指引 + 关闭按钮 -->
     <div
       v-if="phase === 'active' || phase === 'stopping'"
       class="session-banner"
@@ -198,28 +252,46 @@ async function abandonSession(): Promise<void> {
       role="status"
     >
       <div class="session-banner-copy">
-        <strong>配置会话进行中</strong>
-        <span>在打开的浏览器中登录门户（勾选门户的记住密码），完成后点击「完成配置」。</span>
+        <template v-if="mode === 'free'">
+          <strong>浏览器已打开</strong>
+          <span>在浏览器中手动登录门户（勾选门户的记住密码），登录态会保存在本方案的持久目录；用完直接关闭浏览器窗口即可。</span>
+        </template>
+        <template v-else>
+          <strong>配置会话进行中</strong>
+          <span>在打开的浏览器中登录门户（勾选门户的记住密码），完成后点击「完成配置」。</span>
+        </template>
       </div>
       <div class="session-banner-actions">
         <button
+          v-if="mode === 'free'"
           type="button"
           class="btn btn-sm"
-          data-testid="session-abandon"
+          data-testid="session-close"
           :disabled="phase === 'stopping'"
-          @click="abandonSession"
+          @click="closeFreeBrowser"
         >
-          放弃
+          {{ phase === "stopping" ? "正在关闭…" : "关闭浏览器" }}
         </button>
-        <button
-          type="button"
-          class="btn btn-sm btn-primary"
-          data-testid="session-finish"
-          :disabled="phase === 'stopping'"
-          @click="finishSession"
-        >
-          {{ phase === "stopping" ? "正在结束…" : "完成配置" }}
-        </button>
+        <template v-else>
+          <button
+            type="button"
+            class="btn btn-sm"
+            data-testid="session-abandon"
+            :disabled="phase === 'stopping'"
+            @click="abandonSession()"
+          >
+            放弃
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            data-testid="session-finish"
+            :disabled="phase === 'stopping'"
+            @click="finishSession"
+          >
+            {{ phase === "stopping" ? "正在结束…" : "完成配置" }}
+          </button>
+        </template>
       </div>
     </div>
 

@@ -275,6 +275,7 @@ pub mod schemas {
         schemas::DataEnvelope<crate::web::routes::profiles::ConfigSessionStopData>,
         crate::web::routes::profiles::ConfigSessionStartData,
         crate::web::routes::profiles::ConfigSessionStopData,
+        crate::web::routes::profiles::ConfigSessionStartQuery,
         crate::web::routes::profiles::ConfigSessionStopQuery,
         // ---- login 域（T5-1a）----
         schemas::DataEnvelope<crate::web::routes::login::LoginTriggerData>,

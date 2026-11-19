@@ -15,10 +15,14 @@
  * - discard 请求契约：放弃 URL 带 discard=true，完成配置 URL 不带；
  * - 完成配置失败：横幅保留可重试，放弃可退出；
  * - 截断提示；未保存方案只给指引；start 进行中防连点。
+ * - 自由浏览（打开浏览器）：未启用持久会话时禁用并提示；启用后 start 带
+ *   `?record=false`，横幅为自由浏览文案且只有「关闭浏览器」（走 discard=true）；
+ *   409 占用走 toast 固定文案「配置会话进行中，请先关闭」；不写草稿、不通知宿主。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createApp, nextTick, reactive, type App } from "vue";
 import PersistentSessionSection from "./PersistentSessionSection.vue";
+import { useToast } from "@/composables/useToast";
 import type { RecordedAction } from "@/api/types";
 import type { PersistentSessionDraft } from "./PersistentSessionSection.vue";
 
@@ -103,6 +107,8 @@ beforeEach(() => {
   // 预置 token：组件内 API 调用不再触发 ensureAuthToken 的回环 local-token 探测，
   // 避免多一次 fetch 干扰本文件的调用计数断言
   sessionStorage.setItem("campus_auth_token", "tok-test");
+  // toast 是模块级单例（真计时器 3s 后才清空）：逐用例复位防跨用例串扰
+  useToast().toast.message = "";
 });
 
 afterEach(() => {
@@ -380,5 +386,99 @@ describe("PersistentSessionSection", () => {
     await settle();
     expect(button.disabled).toBe(true); // 会话进行中仍禁用 start
     expect(document.querySelector('[data-testid="session-banner"]')).not.toBeNull();
+  });
+
+  // ============ 自由浏览（打开浏览器，record=false）============
+
+  it("自由浏览：未启用持久会话时按钮禁用并提示，点击不发请求", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    mountHost({ profileId: "dorm", draft: { persistent_session_enabled: false } });
+    const open = document.querySelector<HTMLButtonElement>('[data-testid="session-open"]');
+    expect(open, "已保存方案应渲染自由浏览按钮").not.toBeNull();
+    expect(open?.disabled).toBe(true);
+    expect(document.querySelector('[data-testid="session-open-hint"]')?.textContent).toContain(
+      "启用持久会话并保存方案",
+    );
+    // disabled 元素 click 不派发（happy-dom 同真实 DOM 语义）+ 组件守卫早退双保险
+    open!.click();
+    await flush();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("自由浏览：start 带 ?record=false，横幅为自由浏览文案，关闭浏览器走 discard=true", async () => {
+    const urls: string[] = [];
+    stubFetch((url) => {
+      urls.push(url);
+      if (url.includes("/config-session/start")) {
+        return Promise.resolve(jsonResponse({ data: { started: true } }));
+      }
+      // 自由浏览关闭的回包无录制可采纳：响应内容应被整路丢弃
+      return Promise.resolve(
+        jsonResponse({ data: { recorded_count: 0, truncated: false, persistent_session_enabled: true } }),
+      );
+    });
+    let stoppedEmitted = 0;
+    const draft = mountHost({
+      profileId: "dorm",
+      draft: { persistent_session_enabled: true, recorded_actions: makeActions(2) },
+      onStopped: () => stoppedEmitted++,
+    });
+
+    click("session-open");
+    await settle();
+    // start 契约：自由浏览必须带 record=false（后端不注入录制器）
+    expect(urls.some((u) => u.includes("/config-session/start?record=false"))).toBe(true);
+    // 横幅为自由浏览文案 + 只有「关闭浏览器」（无完成配置/放弃录制动作）
+    const banner = document.querySelector('[data-testid="session-banner"]');
+    expect(banner?.textContent).toContain("浏览器已打开");
+    expect(banner?.textContent).toContain("直接关闭浏览器窗口");
+    expect(document.querySelector('[data-testid="session-close"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="session-finish"]')).toBeNull();
+    expect(document.querySelector('[data-testid="session-abandon"]')).toBeNull();
+
+    click("session-close");
+    await settle();
+    // 关闭走 discard=true；不写草稿、既有录制数展示不动、不通知宿主
+    expect(urls.some((u) => u.includes("/config-session/stop?discard=true"))).toBe(true);
+    expect(document.querySelector('[data-testid="session-banner"]')).toBeNull();
+    expect(draft.persistent_session_enabled).toBe(true);
+    expect(document.querySelector('[data-testid="session-count"]')?.textContent).toContain("已录制 2 个动作");
+    expect(stoppedEmitted).toBe(0);
+    expect(document.querySelector('[data-testid="session-error"]')).toBeNull();
+  });
+
+  it("自由浏览 start 409：toast 固定文案「配置会话进行中，请先关闭」，不占用就地错误区", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        jsonResponse({ error: { code: "CONFLICT", message: "已存在活跃配置会话" } }, { status: 409 }),
+      ),
+    );
+    const { toast } = useToast();
+    mountHost({ profileId: "dorm", draft: { persistent_session_enabled: true } });
+    click("session-open");
+    await settle();
+    expect(toast.message).toBe("配置会话进行中，请先关闭");
+    expect(toast.success).toBe(false);
+    expect(document.querySelector('[data-testid="session-error"]')).toBeNull();
+    // 失败后回到 idle：按钮恢复可用
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="session-open"]')?.disabled).toBe(false);
+  });
+
+  it("自由浏览关闭时 stop 409（用户已直接关窗）静默收场", async () => {
+    stubFetch((url) => {
+      if (url.includes("/config-session/start")) {
+        return Promise.resolve(jsonResponse({ data: { started: true } }));
+      }
+      return Promise.resolve(
+        jsonResponse({ error: { code: "CONFLICT", message: "无活跃配置会话" } }, { status: 409 }),
+      );
+    });
+    mountHost({ profileId: "dorm", draft: { persistent_session_enabled: true } });
+    click("session-open");
+    await settle();
+    click("session-close");
+    await settle();
+    expect(document.querySelector('[data-testid="session-banner"]')).toBeNull();
+    expect(document.querySelector('[data-testid="session-error"]')).toBeNull();
   });
 });

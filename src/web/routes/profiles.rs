@@ -172,6 +172,22 @@ pub struct ConfigSessionStopData {
     pub persistent_session_enabled: bool,
 }
 
+/// POST /api/profiles/{id}/config-session/start 查询参数
+#[derive(Deserialize, ToSchema)]
+pub struct ConfigSessionStartQuery {
+    /// `true`（缺省）为录制配置会话（注入录制器，stop 可落盘录制）；
+    /// `false` 为**自由浏览**模式：同样拉起 headed 持久浏览器并导航到门户地址，
+    /// 但不注入录制器——供已启用持久会话的方案单独打开浏览器手动登录（勾选
+    /// 门户「记住密码」），用完直接关窗即结束（幽灵收尾口径与录制会话一致）
+    #[serde(default = "true_default")]
+    pub record: bool,
+}
+
+/// `serde(default)` 需要的 `true` 常量函数（保持缺省录制口径）
+fn true_default() -> bool {
+    true
+}
+
 /// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
 #[derive(Deserialize, ToSchema)]
 pub struct ProfileCreateBody {
@@ -1037,13 +1053,22 @@ pub async fn auto_switch(
 /// - `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth
 ///   口径对齐 Worker 启动逻辑）。
 ///
+/// 两种模式（`?record=` 查询参数，缺省 `true`）：
+/// - **录制配置会话**（缺省）：headed 持久浏览器 + 注入录制器，stop 结算时
+///   录制动作与开关写回方案；
+/// - **自由浏览**（`record=false`）：同样 headed 持久浏览器并导航到门户地址，
+///   但不注入录制器——供已启用持久会话的方案单独「打开浏览器」手动登录
+///   （勾选门户「记住密码」），用完直接关窗即结束（Worker 幽灵收尾，
+///   user_data_dir 原样保留）。该模式要求方案已启用 `persistent_session_enabled`
+///   （400 拦截），stop 端点拒绝其非 discard 结算（无录制可落盘）。
+///
 /// 占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化
 /// 错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，
 /// 在途登录 / 调试 / 重定向检测期间快速失败（409）。
 ///
-/// 归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属
-/// 注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的
-/// 录制写进 B 方案」。
+/// 归属记录：start 成功后把 (session_id, profile_id, record) 记入 Bridge 的
+/// 归属注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案
+/// 会话的录制写进 B 方案」与「未录制会话的落盘结算」。
 ///
 /// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）
 /// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
@@ -1056,10 +1081,11 @@ pub async fn auto_switch(
     tag = "profiles",
     params(
         ("id" = String, Path, description = "Profile ID"),
+        ("record" = bool, Query, description = "false 时以自由浏览模式打开持久浏览器（不注入录制器），须先启用持久会话；缺省 true 为录制配置会话"),
     ),
     responses(
-        (status = 200, description = "配置浏览器已拉起且录制已开启（会话存续期不受命令级超时约束，直到 stop）", body = DataEnvelope<ConfigSessionStartData>),
-        (status = 400, description = "非浏览器渠道（持久会话仅浏览器渠道支持）", body = ErrorResponse),
+        (status = 200, description = "配置浏览器已拉起（录制模式录制已开启；自由浏览模式不录制；会话存续期不受命令级超时约束，直到 stop）", body = DataEnvelope<ConfigSessionStartData>),
+        (status = 400, description = "非浏览器渠道（持久会话仅浏览器渠道支持），或自由浏览模式要求方案已启用持久会话", body = ErrorResponse),
         (status = 404, description = "方案不存在", body = ErrorResponse),
         (status = 409, description = "已有活跃配置会话（Worker 占用互斥）或会话槽位忙（在途登录/调试/重定向检测）", body = ErrorResponse),
         (status = 500, description = "持久会话目录创建失败或命令超时等内部错误", body = ErrorResponse),
@@ -1070,6 +1096,7 @@ pub async fn start_config_session(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
     Path(id): Path<String>,
+    Query(query): Query<ConfigSessionStartQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let profile = config.load_profile(&id)?;
     // 渠道校验：持久会话依赖门户「记住密码」（cookie/localStorage 持久化），
@@ -1077,6 +1104,13 @@ pub async fn start_config_session(
     if profile.login_channel != LoginChannel::Browser {
         return Err(ApiError::BadRequest(
             "持久会话仅浏览器渠道支持，请先将本方案的登录渠道切换为浏览器".into(),
+        ));
+    }
+    // 自由浏览模式门禁：该模式的意义就是「用已启用的持久浏览器」，未启用时
+    // 拒绝（录制模式不受此限——它是把开关打开的引导路径）
+    if !query.record && !profile.persistent_session_enabled {
+        return Err(ApiError::BadRequest(
+            "请先启用本方案的持久会话（勾选「启用持久会话」并保存）后再打开浏览器".into(),
         ));
     }
     // portal_url 与 browser_settings 取运行时口径（含认证地址回退链与全局浏览器设置）
@@ -1093,7 +1127,7 @@ pub async fn start_config_session(
     let params = serde_json::json!({
         "user_data_dir": user_data_dir,
         "portal_url": rt.profile.effective_browser_login_url(),
-        "record": true,
+        "record": query.record,
         "browser_settings": rt.browser,
     });
     let resp = bridge.execute_config_session_start(params).await?;
@@ -1121,8 +1155,13 @@ pub async fn start_config_session(
     bridge.set_config_session_owner(crate::bridge::ConfigSessionOwner {
         session_id,
         profile_id: id.clone(),
+        record: query.record,
     });
-    tracing::info!(profile_id = %id, "配置会话已启动（headed 持久浏览器）");
+    tracing::info!(
+        profile_id = %id,
+        record = query.record,
+        "配置会话已启动（headed 持久浏览器）"
+    );
     Ok(data(serde_json::json!({ "started": true })))
 }
 
@@ -1143,6 +1182,11 @@ pub struct ConfigSessionStopQuery {
 /// 并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。
 ///
 /// discard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。
+///
+/// 未录制会话（自由浏览模式打开，`owner.record == false`）拒绝非 discard
+/// 结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以空数组
+/// **覆盖方案既有录制**——守卫钉死这条数据丢失路径，自由浏览会话只能以
+/// discard（仅关闭）方式结束。
 ///
 /// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
 /// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
@@ -1183,6 +1227,15 @@ pub async fn stop_config_session(
             "活跃配置会话属于方案「{}」，请在该方案下停止",
             owner.profile_id
         )));
+    }
+    // 未录制会话（自由浏览模式）没有可落盘的录制内容，非 discard 结算会以
+    // 空数组覆盖方案既有录制——在归属校验后、派发前拦下（归属保留，可改用
+    // discard 重新结算）
+    if !owner.record && !query.discard {
+        return Err(ApiError::BadRequest(
+            "本次会话以自由浏览模式打开（未录制），无可保存的录制内容；请用「仅关闭」方式结束会话"
+                .into(),
+        ));
     }
     let resp = bridge
         .execute_config_session_stop(serde_json::json!({ "session_id": owner.session_id }))
@@ -3340,6 +3393,7 @@ mod tests {
         let owner = bridge.owner().expect("start 成功后应记录归属");
         assert_eq!(owner.session_id, "sess-1");
         assert_eq!(owner.profile_id, "dorm");
+        assert!(owner.record, "录制模式（缺省）归属应带 record=true");
     }
 
     /// start 时 Worker 报占用（重复启动）→ 409
@@ -3418,6 +3472,118 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    /// 自由浏览模式（?record=false）：派发 record=false 并记录未录制归属
+    #[tokio::test]
+    async fn config_session_start_free模式派发并记录归属() {
+        let (app, inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Ok(
+                serde_json::json!({"session_id": "sess-2", "recorded": false}),
+            )])));
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .persistent_session_enabled = true;
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/start?record=false").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["started"], true);
+
+        let sent = bridge.sent();
+        assert_eq!(sent.len(), 1, "应恰好派发一条命令");
+        assert_eq!(sent[0].0, "profile_session_start");
+        assert_eq!(sent[0].1["record"], false, "自由浏览模式不得注入录制器");
+        let owner = bridge.owner().expect("start 成功后应记录归属");
+        assert_eq!(owner.profile_id, "dorm");
+        assert!(!owner.record, "自由浏览模式归属应带 record=false");
+    }
+
+    /// 自由浏览模式门禁：方案未启用持久会话 → 400，且不派发命令
+    #[tokio::test]
+    async fn config_session_start_free模式未启用持久会话400() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/start?record=false").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("启用本方案的持久会话"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty(), "门禁先于派发");
+        assert!(bridge.owner().is_none(), "拒绝时不得留下归属记录");
+    }
+
+    /// 未录制会话（自由浏览模式）拒绝非 discard 结算：空数组照单落盘会覆盖
+    /// 方案既有录制；改用 discard 仅关闭则放行并清空归属
+    #[tokio::test]
+    async fn config_session_stop_未录制会话拒绝落盘结算() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            // discard 结算的 Worker 回包（record=false 契约：空数组）
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [],
+                "truncated": false,
+            })),
+        ])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: false,
+        });
+        // 先录制前既有动作，验证不被空数组覆盖
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .recorded_actions = vec![crate::config::schema::RecordedAction {
+            action_type: "click".into(),
+            selector: "#real-btn".into(),
+            strategy: "id".into(),
+            ts: 42,
+            value: None,
+        }];
+
+        // 非 discard：400 且不派发、归属保留（可改用 discard 重新结算）
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("自由浏览模式打开（未录制）"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty(), "守卫先于派发");
+        assert!(bridge.owner().is_some(), "守卫不得清空归属");
+
+        // discard=true：仅关闭放行，既有录制原样保留
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?discard=true").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "discard 不写回，回方案当前值"
+        );
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
+        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        drop(guard);
+        assert!(bridge.owner().is_none(), "discard 结算后归属应清空");
+    }
+
     /// stop 非 discard：录制解析后事务写回方案（动作 + 开关），归属随结算清空
     #[tokio::test]
     async fn config_session_stop_落盘写回方案() {
@@ -3433,6 +3599,7 @@ mod tests {
         bridge.set_config_session_owner(ConfigSessionOwner {
             session_id: "sess-1".into(),
             profile_id: "dorm".into(),
+            record: true,
         });
         let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3473,6 +3640,7 @@ mod tests {
         bridge.set_config_session_owner(ConfigSessionOwner {
             session_id: "sess-1".into(),
             profile_id: "dorm".into(),
+            record: true,
         });
         let resp =
             post_config_session(&app, "/api/profiles/dorm/config-session/stop?discard=true").await;
@@ -3511,6 +3679,7 @@ mod tests {
         bridge.set_config_session_owner(ConfigSessionOwner {
             session_id: "sess-1".into(),
             profile_id: "dorm".into(),
+            record: true,
         });
         let resp = post_config_session(&app, "/api/profiles/default/config-session/stop").await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -3536,6 +3705,7 @@ mod tests {
         bridge.set_config_session_owner(ConfigSessionOwner {
             session_id: "sess-1".into(),
             profile_id: "dorm".into(),
+            record: true,
         });
         let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);

@@ -316,8 +316,12 @@ export const profilesApi = {
 /**
  * 浏览器持久会话的「配置会话」（headed 配置浏览器 + 交互录制）。
  *
- * start 打开以方案认证地址为门户地址的配置浏览器并开启录制；stop 结束会话并把
- * 录制动作落盘方案（recorded_actions + persistent_session_enabled=true），带
+ * start 打开以方案认证地址为门户地址的配置浏览器并开启录制；`options.record`
+ * 传 `false` 时为**自由浏览**模式（`?record=false`）：同样拉起持久浏览器并导航
+ * 到门户地址，但不注入录制器——供已启用持久会话的方案单独「打开浏览器」手动
+ * 登录（勾选门户记住密码），用完直接关窗即结束；该模式要求方案已启用持久会话
+ * （后端 400 拦截），且 stop 只能以 discard 结束。stop 结束会话并把录制动作
+ * 落盘方案（recorded_actions + persistent_session_enabled=true），带
  * `discard=true` 时仅关闭浏览器：不落盘录制、不写方案（响应仍返回真实
  * recorded_count，是否采纳由调用方决定）。会话全局互斥：已有活跃会话时 start
  * 返回 409（前端显示固定文案「已有配置会话进行中」），无活跃会话时 stop 也返回
@@ -325,9 +329,11 @@ export const profilesApi = {
  * （与重定向检测同量级）。
  */
 export const configSessionApi = {
-  start: (profileId: string) =>
+  start: (profileId: string, options?: { record?: boolean }) =>
     http.post<ConfigSessionStartResult>(
-      `/api/profiles/${pathSegment(profileId)}/config-session/start`,
+      `/api/profiles/${pathSegment(profileId)}/config-session/start${
+        options?.record === false ? "?record=false" : ""
+      }`,
       null,
       { timeout: 60000 },
     ),

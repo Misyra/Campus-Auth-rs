@@ -176,6 +176,16 @@
     ],
     "type": "object"
    },
+   "ConfigSessionStartQuery": {
+    "description": "POST /api/profiles/{id}/config-session/start 查询参数",
+    "properties": {
+     "record": {
+      "description": "`true`（缺省）为录制配置会话（注入录制器，stop 可落盘录制）；\n`false` 为**自由浏览**模式：同样拉起 headed 持久浏览器并导航到门户地址，\n但不注入录制器——供已启用持久会话的方案单独打开浏览器手动登录（勾选\n门户「记住密码」），用完直接关窗即结束（幽灵收尾口径与录制会话一致）",
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   },
    "ConfigSessionStopData": {
     "description": "POST /api/profiles/{id}/config-session/stop 响应载荷",
     "properties": {
@@ -8917,7 +8927,7 @@
   },
   "/api/profiles/{id}/config-session/start": {
    "post": {
-    "description": "编排口径与登录编排的持久自动登录装配同源：\n- `user_data_dir`：按方案 id 拼接的持久目录（browser_profiles/<id>/），\n  派发前 ensure 创建（持久目录按需创建口径）；\n- `portal_url`：方案浏览器导航有效地址（认证地址回退链，留空时落触发\n  地址，恒非空）；\n- `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth\n  口径对齐 Worker 启动逻辑）。\n\n占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化\n错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，\n在途登录 / 调试 / 重定向检测期间快速失败（409）。\n\n归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属\n注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的\n录制写进 B 方案」。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）——超时判定成立且槽位由本请求持有时，Bridge 先等 Worker\n自愈释放槽位再返回超时。",
+    "description": "编排口径与登录编排的持久自动登录装配同源：\n- `user_data_dir`：按方案 id 拼接的持久目录（browser_profiles/<id>/），\n  派发前 ensure 创建（持久目录按需创建口径）；\n- `portal_url`：方案浏览器导航有效地址（认证地址回退链，留空时落触发\n  地址，恒非空）；\n- `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth\n  口径对齐 Worker 启动逻辑）。\n\n两种模式（`?record=` 查询参数，缺省 `true`）：\n- **录制配置会话**（缺省）：headed 持久浏览器 + 注入录制器，stop 结算时\n  录制动作与开关写回方案；\n- **自由浏览**（`record=false`）：同样 headed 持久浏览器并导航到门户地址，\n  但不注入录制器——供已启用持久会话的方案单独「打开浏览器」手动登录\n  （勾选门户「记住密码」），用完直接关窗即结束（Worker 幽灵收尾，\n  user_data_dir 原样保留）。该模式要求方案已启用 `persistent_session_enabled`\n  （400 拦截），stop 端点拒绝其非 discard 结算（无录制可落盘）。\n\n占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化\n错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，\n在途登录 / 调试 / 重定向检测期间快速失败（409）。\n\n归属记录：start 成功后把 (session_id, profile_id, record) 记入 Bridge 的\n归属注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案\n会话的录制写进 B 方案」与「未录制会话的落盘结算」。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）——超时判定成立且槽位由本请求持有时，Bridge 先等 Worker\n自愈释放槽位再返回超时。",
     "operationId": "post_api_profiles_id_config_session_start",
     "parameters": [
      {
@@ -8927,6 +8937,15 @@
       "required": true,
       "schema": {
        "type": "string"
+      }
+     },
+     {
+      "description": "false 时以自由浏览模式打开持久浏览器（不注入录制器），须先启用持久会话；缺省 true 为录制配置会话",
+      "in": "query",
+      "name": "record",
+      "required": true,
+      "schema": {
+       "type": "boolean"
       }
      }
     ],
@@ -8939,7 +8958,7 @@
         }
        }
       },
-      "description": "配置浏览器已拉起且录制已开启（会话存续期不受命令级超时约束，直到 stop）"
+      "description": "配置浏览器已拉起（录制模式录制已开启；自由浏览模式不录制；会话存续期不受命令级超时约束，直到 stop）"
      },
      "400": {
       "content": {
@@ -8949,7 +8968,7 @@
         }
        }
       },
-      "description": "非浏览器渠道（持久会话仅浏览器渠道支持）"
+      "description": "非浏览器渠道（持久会话仅浏览器渠道支持），或自由浏览模式要求方案已启用持久会话"
      },
      "404": {
       "content": {
@@ -9000,7 +9019,7 @@
   },
   "/api/profiles/{id}/config-session/stop": {
    "post": {
-    "description": "非 discard：解析 Worker 回传的 `recorded_actions`，经方案更新事务（与 PUT\n同一 profiles_lock 临界区）一次性写回\n`recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：\n并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。\n\ndiscard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）。",
+    "description": "非 discard：解析 Worker 回传的 `recorded_actions`，经方案更新事务（与 PUT\n同一 profiles_lock 临界区）一次性写回\n`recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：\n并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。\n\ndiscard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。\n\n未录制会话（自由浏览模式打开，`owner.record == false`）拒绝非 discard\n结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以空数组\n**覆盖方案既有录制**——守卫钉死这条数据丢失路径，自由浏览会话只能以\ndiscard（仅关闭）方式结束。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）。",
     "operationId": "post_api_profiles_id_config_session_stop",
     "parameters": [
      {
