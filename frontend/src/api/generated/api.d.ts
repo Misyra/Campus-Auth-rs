@@ -213,6 +213,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/local-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /api/auth/local-token — 回环监听（或显式豁免）下直接下发鉴权 token */
+        get: operations["get___api_auth_local_token"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/autostart/disable": {
         parameters: {
             query?: never;
@@ -744,6 +761,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/environment/mirror-preference": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * PUT /api/environment/mirror-preference — 保存下载源选择偏好
+         * @description 偏好落盘 `environment/mirror.json`，随后的 uv 下载 / Python 解释器下载 /
+         *     镜像测速排序均按该偏好执行（显式选源跳过测速）。
+         */
+        put: operations["put_api_environment_mirror_preference"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/environment/mirror-probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/environment/mirror-probe — 并发测速 GitHub 直连与各镜像源
+         * @description 初始化弹窗镜像选择行的数据源：每次调用都实测（对 uv 发布资产 Range 拉取
+         *     256KiB），返回逐源吞吐结果与当前选源偏好（auto/direct/mirror）。
+         */
+        post: operations["post_api_environment_mirror_probe"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/events": {
         parameters: {
             query?: never;
@@ -1150,6 +1209,11 @@ export interface paths {
          *     - success=true：提取 `result.data`（形如 `{"text": "..."}`）作为业务负载返回；
          *     - success=false：把 worker 的 error 消息转为 HTTP 错误（否则错误被埋在 200
          *       响应体里，前端既不显示识别结果也不提示失败）。
+         *
+         *     超时回执时延注记（不适用）：OCR 是轻量旁路命令，从不占会话槽位——
+         *     命令预算（[`OCR_REQUEST_TIMEOUT`]）耗尽后直接返回超时，不附加
+         *     `GRACE_WAIT_DURATION` 槽位宽限等待（见 `crate::bridge::GRACE_WAIT_DURATION`
+         *     常量处说明的归属校验条件）。
          */
         post: operations["post_api_ocr_recognize"];
         delete?: never;
@@ -1376,6 +1440,11 @@ export interface paths {
          *     归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属
          *     注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的
          *     录制写进 B 方案」。
+         *
+         *     超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）
+         *     耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
+         *     见该常量处说明）——超时判定成立且槽位由本请求持有时，Bridge 先等 Worker
+         *     自愈释放槽位再返回超时。
          */
         post: operations["post_api_profiles_id_config_session_start"];
         delete?: never;
@@ -1401,6 +1470,10 @@ export interface paths {
          *     并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。
          *
          *     discard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。
+         *
+         *     超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
+         *     耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
+         *     见该常量处说明）。
          */
         post: operations["post_api_profiles_id_config_session_stop"];
         delete?: never;
@@ -2037,7 +2110,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["get___api_update-state"];
+        /**
+         * GET /api/update-state — 上次更新检查状态（设置页"上次检查时间"数据源）
+         * @description 只读回放 `update/last_check.json`：手动"立即检查"与后台自动检查成功/失败
+         *     都会刷新；文件缺失（从未检查过）时各字段为默认空值，由前端显示"从未检查"。
+         */
+        get: operations["get_api_update_state"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2492,6 +2570,24 @@ export interface components {
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_MirrorPreferenceData: {
+            /** @description PUT /api/environment/mirror-preference 响应载荷 */
+            data: {
+                /** @description 保存后的选源偏好（回显） */
+                selected: components["schemas"]["MirrorSelectionData"];
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_MirrorProbeData: {
+            /** @description POST /api/environment/mirror-probe 响应载荷 */
+            data: {
+                /** @description 逐源实测吞吐结果 */
+                results: components["schemas"]["MirrorProbeEntryData"][];
+                /** @description 当前选源偏好（与测速结果一并返回，弹窗打开即选中对应行） */
+                selected: components["schemas"]["MirrorSelectionData"];
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
         DataEnvelope_MonitorStatusData: {
             /** @description GET /api/monitor/status 响应载荷（`StatusSnapshot` 线格式镜像） */
             data: {
@@ -2888,6 +2984,29 @@ export interface components {
                 keep_data_blocked?: string | null;
                 /** @description 程序目录（保留数据时只移除程序文件） */
                 program: components["schemas"]["UninstallEntryData"];
+            };
+        };
+        /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
+        DataEnvelope_UpdateStateData: {
+            /**
+             * @description 上次更新检查状态载荷（`updater::LastCheckState` 的线格式镜像，字段一一对应；
+             *     漂移由 `update_state_data_matches_last_check_state_wire_shape` 守卫钉住）
+             */
+            data: {
+                /** @description 上次检查失败原因（成功时为空串） */
+                error: string;
+                /** @description 是否发现更新（检查失败时为 false） */
+                has_update: boolean;
+                /** @description `highest_seen_version` 对应的更新通道键（"stable"/"prerelease"/"all"） */
+                highest_seen_channel: string;
+                /** @description 已见过的最高清单版本（版本回滚保护记忆；空串 = 尚无记录） */
+                highest_seen_version: string;
+                /** @description 上次检查时间（UTC RFC3339；从未检查过为空串） */
+                last_check_at: string;
+                /** @description 远程最新版本号（检查失败或从未检查为空串） */
+                latest_version: string;
+                /** @description 远程发布是否缺少当前平台的安装包（区分"已是最新"与"无本平台包"） */
+                platform_unavailable: boolean;
             };
         };
         /** @description 统一成功响应包装 `{ "data": T }`（禁止 `success` 字段） */
@@ -3529,6 +3648,61 @@ export interface components {
              * @description Worker 启动次数
              */
             worker_spawn_total: number;
+        };
+        /** @description PUT /api/environment/mirror-preference 响应载荷 */
+        MirrorPreferenceData: {
+            /** @description 保存后的选源偏好（回显） */
+            selected: components["schemas"]["MirrorSelectionData"];
+        };
+        /** @description PUT /api/environment/mirror-preference 载荷：下载源选择偏好 */
+        MirrorPreferencePayload: {
+            /** @description 选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像） */
+            choice: string;
+            /** @description mirror 前缀（choice=mirror 时必填，须在镜像名单内） */
+            mirror?: string | null;
+        };
+        /** @description POST /api/environment/mirror-probe 响应载荷 */
+        MirrorProbeData: {
+            /** @description 逐源实测吞吐结果 */
+            results: components["schemas"]["MirrorProbeEntryData"][];
+            /** @description 当前选源偏好（与测速结果一并返回，弹窗打开即选中对应行） */
+            selected: components["schemas"]["MirrorSelectionData"];
+        };
+        /** @description 单个下载源的测速结果（`environment::MirrorProbeEntry` 线格式镜像） */
+        MirrorProbeEntryData: {
+            /**
+             * Format: int64
+             * @description 已测字节数
+             */
+            bytes: number;
+            /**
+             * Format: int64
+             * @description 总耗时（毫秒）
+             */
+            elapsed_ms: number;
+            /** @description 源类型：direct（GitHub 直连）/ mirror（代理镜像） */
+            kind: string;
+            /** @description 展示名（host，如 github.com / gh-proxy.com） */
+            label: string;
+            /** @description 是否测得数据（false = 超时/失败/零字节，UI 显示「不可用」） */
+            ok: boolean;
+            /** @description 镜像前缀（直连为空串；选中偏好即存该值） */
+            prefix: string;
+            /**
+             * Format: int64
+             * @description 实测吞吐（字节/秒，失败为 0）
+             */
+            throughput: number;
+        };
+        /**
+         * @description 下载源选择偏好线格式（`environment::MirrorChoice` 的镜像：`{"choice":"auto"}` /
+         *     `{"choice":"direct"}` / `{"choice":"mirror","mirror":"<前缀>"}`）
+         */
+        MirrorSelectionData: {
+            /** @description 选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像） */
+            choice: string;
+            /** @description 镜像前缀（choice=mirror 时必在镜像名单内；其余选择无该字段） */
+            mirror?: string | null;
         };
         /** @description 连通性解释（`ConnectivityAssessment` 线格式镜像） */
         MonitorConnectivityData: {
@@ -4354,6 +4528,26 @@ export interface components {
             /** @description 该步是否成功 */
             success: boolean;
         };
+        /**
+         * @description 上次更新检查状态载荷（`updater::LastCheckState` 的线格式镜像，字段一一对应；
+         *     漂移由 `update_state_data_matches_last_check_state_wire_shape` 守卫钉住）
+         */
+        UpdateStateData: {
+            /** @description 上次检查失败原因（成功时为空串） */
+            error: string;
+            /** @description 是否发现更新（检查失败时为 false） */
+            has_update: boolean;
+            /** @description `highest_seen_version` 对应的更新通道键（"stable"/"prerelease"/"all"） */
+            highest_seen_channel: string;
+            /** @description 已见过的最高清单版本（版本回滚保护记忆；空串 = 尚无记录） */
+            highest_seen_version: string;
+            /** @description 上次检查时间（UTC RFC3339；从未检查过为空串） */
+            last_check_at: string;
+            /** @description 远程最新版本号（检查失败或从未检查为空串） */
+            latest_version: string;
+            /** @description 远程发布是否缺少当前平台的安装包（区分"已是最新"与"无本平台包"） */
+            platform_unavailable: boolean;
+        };
         /** @description POST /api/worker/stop 响应载荷 */
         WorkerStopData: {
             /** @description 是否已触发停止 */
@@ -4834,6 +5028,35 @@ export interface operations {
             };
         };
     };
+    get___api_auth_local_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     post_api_autostart_disable: {
         parameters: {
             query?: never;
@@ -5051,7 +5274,7 @@ export interface operations {
                     "image/x-icon": components["schemas"]["BackgroundImageBody"];
                 };
             };
-            /** @description 文件名非法或 SVG 背景图 */
+            /** @description 文件名非法、SVG 背景图、超出大小上限、符号链接或不是有效位图 */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5953,6 +6176,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    put_api_environment_mirror_preference: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 下载源选择偏好（choice=mirror 时 mirror 必填且须在镜像名单内） */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MirrorPreferencePayload"];
+            };
+        };
+        responses: {
+            /** @description 保存后的选源偏好（回显） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_MirrorPreferenceData"];
+                };
+            };
+            /** @description choice 未知或 mirror 前缀不在名单内 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 偏好落盘或序列化失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    post_api_environment_mirror_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 逐源实测吞吐结果与当前选源偏好 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataEnvelope_MirrorProbeData"];
+                };
+            };
+            /** @description 偏好序列化失败 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -8814,7 +9109,7 @@ export interface operations {
             };
         };
     };
-    "get___api_update-state": {
+    get_api_update_state: {
         parameters: {
             query?: never;
             header?: never;
@@ -8823,22 +9118,22 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
+            /** @description 上次更新检查状态（从未检查过时字段为默认空值） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["DataEnvelope_UpdateStateData"];
                 };
             };
-            /** @description Bad Request */
-            400: {
+            /** @description 状态序列化失败 */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

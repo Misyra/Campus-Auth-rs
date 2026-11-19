@@ -10,8 +10,9 @@
 //!    （根目录 `openapi.json` 的未注解域条目）按路径合并，产出最终文档。
 //!
 //! T5-1 挂载进度：system 样板 + T5-1a 三域 + T5-1b 五域 + 批三九域 +
-//! T5-1 收口 notification/diagnostics 两域均已接入生成源；system 域尚有
-//! 日志导出 / 更新 / 浏览器列表等零散 handler 与 events、browsers 等
+//! T5-1 收口 notification/diagnostics 两域均已接入生成源；2026-11-19
+//! 契约批次补齐 system 域 update-state 与 mirror-probe / mirror-preference 三端点；system 域尚有
+//! 日志导出 / 浏览器列表等零散 handler 与 events、browsers 等
 //! 维持手写条目。
 //!
 //! 过渡期共存策略：**已注解域的路径条目以生成源为准**（整体替换手写条目），
@@ -98,6 +99,9 @@ pub mod schemas {
         crate::web::routes::system::init_status,
         crate::web::routes::system::stop_worker,
         crate::web::routes::system::install_playwright,
+        crate::web::routes::system::update_state,
+        crate::web::routes::system::probe_environment_mirrors,
+        crate::web::routes::system::set_mirror_preference,
         // ---- config 域（T5-1a）----
         crate::web::routes::config::get_settings,
         crate::web::routes::config::patch_settings,
@@ -228,6 +232,15 @@ pub mod schemas {
         crate::web::routes::system::MetricsSummary,
         crate::web::routes::system::WorkerStopData,
         crate::web::routes::system::InstallPlaywrightData,
+        schemas::DataEnvelope<crate::web::routes::system::UpdateStateData>,
+        schemas::DataEnvelope<crate::web::routes::system::MirrorProbeData>,
+        schemas::DataEnvelope<crate::web::routes::system::MirrorPreferenceData>,
+        crate::web::routes::system::UpdateStateData,
+        crate::web::routes::system::MirrorSelectionData,
+        crate::web::routes::system::MirrorProbeEntryData,
+        crate::web::routes::system::MirrorProbeData,
+        crate::web::routes::system::MirrorPreferenceData,
+        crate::web::routes::system::MirrorPreferencePayload,
         // ---- config 域（T5-1a）----
         schemas::DataEnvelope<crate::web::routes::config::LogLevelData>,
         schemas::DataEnvelope<crate::web::routes::config::DefaultStealthScriptData>,

@@ -914,6 +914,58 @@
     ],
     "type": "object"
    },
+   "DataEnvelope_MirrorPreferenceData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "PUT /api/environment/mirror-preference 响应载荷",
+      "properties": {
+       "selected": {
+        "$ref": "#/components/schemas/MirrorSelectionData",
+        "description": "保存后的选源偏好（回显）"
+       }
+      },
+      "required": [
+       "selected"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_MirrorProbeData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "POST /api/environment/mirror-probe 响应载荷",
+      "properties": {
+       "results": {
+        "description": "逐源实测吞吐结果",
+        "items": {
+         "$ref": "#/components/schemas/MirrorProbeEntryData"
+        },
+        "type": "array"
+       },
+       "selected": {
+        "$ref": "#/components/schemas/MirrorSelectionData",
+        "description": "当前选源偏好（与测速结果一并返回，弹窗打开即选中对应行）"
+       }
+      },
+      "required": [
+       "selected",
+       "results"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
    "DataEnvelope_MonitorStatusData": {
     "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
     "properties": {
@@ -1915,6 +1967,58 @@
        "program",
        "helper",
        "data"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "data"
+    ],
+    "type": "object"
+   },
+   "DataEnvelope_UpdateStateData": {
+    "description": "统一成功响应包装 `{ \"data\": T }`（禁止 `success` 字段）",
+    "properties": {
+     "data": {
+      "description": "上次更新检查状态载荷（`updater::LastCheckState` 的线格式镜像，字段一一对应；\n漂移由 `update_state_data_matches_last_check_state_wire_shape` 守卫钉住）",
+      "properties": {
+       "error": {
+        "description": "上次检查失败原因（成功时为空串）",
+        "type": "string"
+       },
+       "has_update": {
+        "description": "是否发现更新（检查失败时为 false）",
+        "type": "boolean"
+       },
+       "highest_seen_channel": {
+        "description": "`highest_seen_version` 对应的更新通道键（\"stable\"/\"prerelease\"/\"all\"）",
+        "type": "string"
+       },
+       "highest_seen_version": {
+        "description": "已见过的最高清单版本（版本回滚保护记忆；空串 = 尚无记录）",
+        "type": "string"
+       },
+       "last_check_at": {
+        "description": "上次检查时间（UTC RFC3339；从未检查过为空串）",
+        "type": "string"
+       },
+       "latest_version": {
+        "description": "远程最新版本号（检查失败或从未检查为空串）",
+        "type": "string"
+       },
+       "platform_unavailable": {
+        "description": "远程发布是否缺少当前平台的安装包（区分\"已是最新\"与\"无本平台包\"）",
+        "type": "boolean"
+       }
+      },
+      "required": [
+       "last_check_at",
+       "has_update",
+       "latest_version",
+       "error",
+       "platform_unavailable",
+       "highest_seen_version",
+       "highest_seen_channel"
       ],
       "type": "object"
      }
@@ -3410,6 +3514,129 @@
      "worker_crash_total",
      "file_log_dropped_lines",
      "uptime_seconds"
+    ],
+    "type": "object"
+   },
+   "MirrorPreferenceData": {
+    "description": "PUT /api/environment/mirror-preference 响应载荷",
+    "properties": {
+     "selected": {
+      "$ref": "#/components/schemas/MirrorSelectionData",
+      "description": "保存后的选源偏好（回显）"
+     }
+    },
+    "required": [
+     "selected"
+    ],
+    "type": "object"
+   },
+   "MirrorPreferencePayload": {
+    "description": "PUT /api/environment/mirror-preference 载荷：下载源选择偏好",
+    "properties": {
+     "choice": {
+      "description": "选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像）",
+      "type": "string"
+     },
+     "mirror": {
+      "description": "mirror 前缀（choice=mirror 时必填，须在镜像名单内）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "choice"
+    ],
+    "type": "object"
+   },
+   "MirrorProbeData": {
+    "description": "POST /api/environment/mirror-probe 响应载荷",
+    "properties": {
+     "results": {
+      "description": "逐源实测吞吐结果",
+      "items": {
+       "$ref": "#/components/schemas/MirrorProbeEntryData"
+      },
+      "type": "array"
+     },
+     "selected": {
+      "$ref": "#/components/schemas/MirrorSelectionData",
+      "description": "当前选源偏好（与测速结果一并返回，弹窗打开即选中对应行）"
+     }
+    },
+    "required": [
+     "selected",
+     "results"
+    ],
+    "type": "object"
+   },
+   "MirrorProbeEntryData": {
+    "description": "单个下载源的测速结果（`environment::MirrorProbeEntry` 线格式镜像）",
+    "properties": {
+     "bytes": {
+      "description": "已测字节数",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "elapsed_ms": {
+      "description": "总耗时（毫秒）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "kind": {
+      "description": "源类型：direct（GitHub 直连）/ mirror（代理镜像）",
+      "type": "string"
+     },
+     "label": {
+      "description": "展示名（host，如 github.com / gh-proxy.com）",
+      "type": "string"
+     },
+     "ok": {
+      "description": "是否测得数据（false = 超时/失败/零字节，UI 显示「不可用」）",
+      "type": "boolean"
+     },
+     "prefix": {
+      "description": "镜像前缀（直连为空串；选中偏好即存该值）",
+      "type": "string"
+     },
+     "throughput": {
+      "description": "实测吞吐（字节/秒，失败为 0）",
+      "format": "int64",
+      "minimum": 0,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "kind",
+     "prefix",
+     "label",
+     "ok",
+     "bytes",
+     "elapsed_ms",
+     "throughput"
+    ],
+    "type": "object"
+   },
+   "MirrorSelectionData": {
+    "description": "下载源选择偏好线格式（`environment::MirrorChoice` 的镜像：`{\"choice\":\"auto\"}` /\n`{\"choice\":\"direct\"}` / `{\"choice\":\"mirror\",\"mirror\":\"<前缀>\"}`）",
+    "properties": {
+     "choice": {
+      "description": "选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像）",
+      "type": "string"
+     },
+     "mirror": {
+      "description": "镜像前缀（choice=mirror 时必在镜像名单内；其余选择无该字段）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "choice"
     ],
     "type": "object"
    },
@@ -5282,6 +5509,49 @@
     ],
     "type": "object"
    },
+   "UpdateStateData": {
+    "description": "上次更新检查状态载荷（`updater::LastCheckState` 的线格式镜像，字段一一对应；\n漂移由 `update_state_data_matches_last_check_state_wire_shape` 守卫钉住）",
+    "properties": {
+     "error": {
+      "description": "上次检查失败原因（成功时为空串）",
+      "type": "string"
+     },
+     "has_update": {
+      "description": "是否发现更新（检查失败时为 false）",
+      "type": "boolean"
+     },
+     "highest_seen_channel": {
+      "description": "`highest_seen_version` 对应的更新通道键（\"stable\"/\"prerelease\"/\"all\"）",
+      "type": "string"
+     },
+     "highest_seen_version": {
+      "description": "已见过的最高清单版本（版本回滚保护记忆；空串 = 尚无记录）",
+      "type": "string"
+     },
+     "last_check_at": {
+      "description": "上次检查时间（UTC RFC3339；从未检查过为空串）",
+      "type": "string"
+     },
+     "latest_version": {
+      "description": "远程最新版本号（检查失败或从未检查为空串）",
+      "type": "string"
+     },
+     "platform_unavailable": {
+      "description": "远程发布是否缺少当前平台的安装包（区分\"已是最新\"与\"无本平台包\"）",
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "last_check_at",
+     "has_update",
+     "latest_version",
+     "error",
+     "platform_unavailable",
+     "highest_seen_version",
+     "highest_seen_channel"
+    ],
+    "type": "object"
+   },
    "WorkerStopData": {
     "description": "POST /api/worker/stop 响应载荷",
     "properties": {
@@ -5883,6 +6153,30 @@
     "summary": "以 bootstrap 握手秘钥（界面 URL fragment 携带）或管理密码（仅非回环绑定接受）换取鉴权 token；请求体恰含其一，成功 200 返回 data.token，失败 401（管理密码未配置时 error.code=AUTH_NOT_CONFIGURED）"
    }
   },
+  "/api/auth/local-token": {
+   "get": {
+    "operationId": "get___api_auth_local_token",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "OK"
+     },
+     "404": {
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      },
+      "description": "Not Found"
+     }
+    },
+    "summary": "GET /api/auth/local-token — 回环监听（或显式豁免）下直接下发鉴权 token"
+   }
+  },
   "/api/autostart/disable": {
    "post": {
     "operationId": "post_api_autostart_disable",
@@ -6223,7 +6517,7 @@
         }
        }
       },
-      "description": "文件名非法或 SVG 背景图"
+      "description": "文件名非法、SVG 背景图、超出大小上限、符号链接或不是有效位图"
      },
      "404": {
       "content": {
@@ -7134,6 +7428,91 @@
     }
    }
   },
+  "/api/environment/mirror-preference": {
+   "put": {
+    "description": "偏好落盘 `environment/mirror.json`，随后的 uv 下载 / Python 解释器下载 /\n镜像测速排序均按该偏好执行（显式选源跳过测速）。",
+    "operationId": "put_api_environment_mirror_preference",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/MirrorPreferencePayload"
+       }
+      }
+     },
+     "description": "下载源选择偏好（choice=mirror 时 mirror 必填且须在镜像名单内）",
+     "required": true
+    },
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_MirrorPreferenceData"
+        }
+       }
+      },
+      "description": "保存后的选源偏好（回显）"
+     },
+     "400": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "choice 未知或 mirror 前缀不在名单内"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "偏好落盘或序列化失败"
+     }
+    },
+    "summary": "PUT /api/environment/mirror-preference — 保存下载源选择偏好",
+    "tags": [
+     "system"
+    ]
+   }
+  },
+  "/api/environment/mirror-probe": {
+   "post": {
+    "description": "初始化弹窗镜像选择行的数据源：每次调用都实测（对 uv 发布资产 Range 拉取\n256KiB），返回逐源吞吐结果与当前选源偏好（auto/direct/mirror）。",
+    "operationId": "post_api_environment_mirror_probe",
+    "responses": {
+     "200": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_MirrorProbeData"
+        }
+       }
+      },
+      "description": "逐源实测吞吐结果与当前选源偏好"
+     },
+     "500": {
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
+       }
+      },
+      "description": "偏好序列化失败"
+     }
+    },
+    "summary": "POST /api/environment/mirror-probe — 并发测速 GitHub 直连与各镜像源",
+    "tags": [
+     "system"
+    ]
+   }
+  },
   "/api/events": {
    "get": {
     "description": "手写占位条目（T8-6a 预置，待集成批切生成源）：近 N 天事件流读回，days 钳制 1..=30",
@@ -7934,7 +8313,7 @@
   },
   "/api/ocr/recognize": {
    "post": {
-    "description": "Worker 返回的是 IpcResponse `{ id, result: { success, data, error } }`，\n而前端契约只认 `{ data: <负载> }` / `{ error: {...} }` 两种信封：\n- success=true：提取 `result.data`（形如 `{\"text\": \"...\"}`）作为业务负载返回；\n- success=false：把 worker 的 error 消息转为 HTTP 错误（否则错误被埋在 200\n  响应体里，前端既不显示识别结果也不提示失败）。",
+    "description": "Worker 返回的是 IpcResponse `{ id, result: { success, data, error } }`，\n而前端契约只认 `{ data: <负载> }` / `{ error: {...} }` 两种信封：\n- success=true：提取 `result.data`（形如 `{\"text\": \"...\"}`）作为业务负载返回；\n- success=false：把 worker 的 error 消息转为 HTTP 错误（否则错误被埋在 200\n  响应体里，前端既不显示识别结果也不提示失败）。\n\n超时回执时延注记（不适用）：OCR 是轻量旁路命令，从不占会话槽位——\n命令预算（[`OCR_REQUEST_TIMEOUT`]）耗尽后直接返回超时，不附加\n`GRACE_WAIT_DURATION` 槽位宽限等待（见 `crate::bridge::GRACE_WAIT_DURATION`\n常量处说明的归属校验条件）。",
     "operationId": "post_api_ocr_recognize",
     "requestBody": {
      "content": {
@@ -8538,7 +8917,7 @@
   },
   "/api/profiles/{id}/config-session/start": {
    "post": {
-    "description": "编排口径与登录编排的持久自动登录装配同源：\n- `user_data_dir`：按方案 id 拼接的持久目录（browser_profiles/<id>/），\n  派发前 ensure 创建（持久目录按需创建口径）；\n- `portal_url`：方案浏览器导航有效地址（认证地址回退链，留空时落触发\n  地址，恒非空）；\n- `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth\n  口径对齐 Worker 启动逻辑）。\n\n占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化\n错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，\n在途登录 / 调试 / 重定向检测期间快速失败（409）。\n\n归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属\n注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的\n录制写进 B 方案」。",
+    "description": "编排口径与登录编排的持久自动登录装配同源：\n- `user_data_dir`：按方案 id 拼接的持久目录（browser_profiles/<id>/），\n  派发前 ensure 创建（持久目录按需创建口径）；\n- `portal_url`：方案浏览器导航有效地址（认证地址回退链，留空时落触发\n  地址，恒非空）；\n- `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth\n  口径对齐 Worker 启动逻辑）。\n\n占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化\n错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，\n在途登录 / 调试 / 重定向检测期间快速失败（409）。\n\n归属记录：start 成功后把 (session_id, profile_id) 记入 Bridge 的归属\n注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案会话的\n录制写进 B 方案」。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）——超时判定成立且槽位由本请求持有时，Bridge 先等 Worker\n自愈释放槽位再返回超时。",
     "operationId": "post_api_profiles_id_config_session_start",
     "parameters": [
      {
@@ -8621,7 +9000,7 @@
   },
   "/api/profiles/{id}/config-session/stop": {
    "post": {
-    "description": "非 discard：解析 Worker 回传的 `recorded_actions`，经方案更新事务（与 PUT\n同一 profiles_lock 临界区）一次性写回\n`recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：\n并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。\n\ndiscard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。",
+    "description": "非 discard：解析 Worker 回传的 `recorded_actions`，经方案更新事务（与 PUT\n同一 profiles_lock 临界区）一次性写回\n`recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：\n并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。\n\ndiscard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）。",
     "operationId": "post_api_profiles_id_config_session_stop",
     "parameters": [
      {
@@ -10567,25 +10946,34 @@
   },
   "/api/update-state": {
    "get": {
-    "operationId": "get___api_update-state",
+    "description": "只读回放 `update/last_check.json`：手动\"立即检查\"与后台自动检查成功/失败\n都会刷新；文件缺失（从未检查过）时各字段为默认空值，由前端显示\"从未检查\"。",
+    "operationId": "get_api_update_state",
     "responses": {
      "200": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/DataEnvelope_UpdateStateData"
+        }
        }
       },
-      "description": "OK"
+      "description": "上次更新检查状态（从未检查过时字段为默认空值）"
      },
-     "400": {
+     "500": {
       "content": {
        "application/json": {
-        "schema": {}
+        "schema": {
+         "$ref": "#/components/schemas/ErrorResponse"
+        }
        }
       },
-      "description": "Bad Request"
+      "description": "状态序列化失败"
      }
-    }
+    },
+    "summary": "GET /api/update-state — 上次更新检查状态（设置页\"上次检查时间\"数据源）",
+    "tags": [
+     "system"
+    ]
    }
   },
   "/api/worker/stop": {
