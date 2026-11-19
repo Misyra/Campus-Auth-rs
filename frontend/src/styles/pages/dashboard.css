@@ -102,43 +102,63 @@
   flex: none;
 }
 
-/* 诊断 + 登录历史双栏行：等宽并排、顶对齐（两卡内容高度相近，逐张全宽浪费一倍
-   纵向空间）；内部卡片各自的下边距交给网格 gap，≤1100px 折回单列逐张全宽 */
+/* 诊断 + 实时日志双栏行：等宽并排、grid 默认 stretch 等高——右列日志卡固定高度
+   主导行高（--dash-split-h），左列诊断卡上限钉在同一变量上（内容超出转卡内滚动，
+   行高不被撑破），两卡上下缘零偏差；间距交给网格 gap，≤1100px 折回单列恢复自然
+   高度（见文件尾媒体查询） */
 .dashboard-split {
+  --dash-split-h: 420px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-md);
-  align-items: start;
   margin-bottom: var(--space-md);
+}
+
+/* 诊断卡：stretch 吃满行高（与右列日志卡同高）；min-height:0 压掉内容最小高度，
+   超高由卡内滚动兜底——这是双卡上下缘严格对齐的另一半保证 */
+.dashboard-split > .diag-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: var(--dash-split-h);
+}
+
+/* 诊断卡 body：flex column 吃满卡内剩余高度（头部/贴底 footer 之外的区间全部归
+   它）；常规内容不溢出、溢出（展开检查细节等）时整体就地滚动，footer 恒贴卡底。
+   min-height:0 是卡内对齐的另一半保证——body 可收缩到行高以内，行高不被内容撑破 */
+.diag-card .card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.diag-card .card-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.diag-card .card-body::-webkit-scrollbar-thumb {
+  background: rgba(var(--slate-rgb), 0.15);
+  border-radius: var(--radius-xs);
 }
 
 .history-card {
   display: flex;
   flex-direction: column;
-  margin-bottom: var(--space-md);
 }
 
-/* 双栏内的历史卡不带自身下边距（间距由网格 gap 承担）；升序特异度置后 */
-.dashboard-split > .history-card {
-  margin-bottom: 0;
-}
-
-.history-card .card-body {
-  max-height: 520px;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-/* 实时日志：整行区块，固定高度内部滚动 */
+/* 实时日志：诊断/日志双栏行的右列，固定高度内部滚动（高度与诊断卡上限共用
+   --dash-split-h，保证行内两卡上下缘严格对齐） */
 .log-card {
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
-.dashboard-page > .log-card {
-  height: 420px;
-  margin-bottom: var(--space-md);
+.dashboard-split > .log-card {
+  height: var(--dash-split-h);
 }
 
 .log-card .card-body {
@@ -257,12 +277,14 @@
   box-shadow: var(--shadow-hover);
 }
 
-/* 登录历史卡片 */
+/* 登录历史列表：全宽卡下唯一的滚动容器，单一限高（与上方日志卡同 420px 视距节
+   奏，宽卡面下单条记录更矮、可见条数更多），旧的 card-body 520px 双重限高已随
+   双栏布局移除 */
 .history-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 400px;
+  max-height: 420px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -568,6 +590,8 @@
 @media (max-width: 1100px) {
   .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
   .dashboard-split { grid-template-columns: 1fr; }
+  /* 单列恢复自然高度：诊断卡解除行高上限与 stretch，只留空态下限（不至于塌成一条） */
+  .dashboard-split > .diag-card { max-height: none; min-height: 300px; }
   .dashboard-page .history-card,
   .dashboard-page .log-card { min-height: 300px; }
   .dashboard-page .log-card { min-height: 420px; }

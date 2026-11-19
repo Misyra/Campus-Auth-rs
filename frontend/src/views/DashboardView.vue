@@ -335,7 +335,9 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
 </script>
 
 <template>
-  <div class="page-content dashboard-page">
+  <!-- page-in：消费 motion.css 的 Catmail 页面入场基元（与 layout.css 的 pageEnter
+       收口关系见报告；动画口径不在此重抄） -->
+  <div class="page-content dashboard-page page-in">
     <!-- 主状态行：网络结论 + 主操作（启动/停止检测）。
          启动检测自顶栏迁入首页：它是页面的主行为，放在状态旁语义更近。 -->
     <div class="network-status-banner network-status-hero" :class="s.networkStatus.value">
@@ -382,8 +384,8 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
       <button class="btn btn-sm btn-link env-banner-detail" @click.stop="router.push({ name: 'settings-tasks' })" aria-label="查看任务与环境设置"><span class="env-action-full">前往设置查看</span><span class="env-action-compact">设置</span></button>
     </div>
 
-    <!-- 统计卡片 -->
-    <div class="stats-grid">
+    <!-- 统计卡片：stagger-children 让四张卡 40ms 步进级联浮起（motion.css 基元） -->
+    <div class="stats-grid stagger-children">
       <div class="stat-card">
         <div class="stat-icon green">
           <IconApp name="clock" />
@@ -426,11 +428,18 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
       </div>
     </div>
 
-    <!-- 实时日志：用户指定置于诊断/历史之上——日志是排障时最先看的信息流，
-         双栏（诊断+历史）降到下方 -->
-    <div class="card log-card">
-      <div class="card-header">
-        <h2>实时日志</h2>
+    <!-- 一键网络诊断 + 实时日志双栏行：左诊断右日志，grid 默认 stretch 等高——
+         右列日志卡固定高度主导行高，左列诊断卡吃满同行高度（上限钉在同一变量，
+         内容超出转卡内滚动），两卡上下缘严格对齐；≤1100px 折回单列
+         （见 dashboard.css 的 .dashboard-split） -->
+    <div class="dashboard-split">
+      <NetworkDiagnosticsPanel ref="diagPanelRef" />
+
+      <!-- 实时日志：排障时最先看的信息流，与诊断卡同行占右列；
+           固定高度（行高主导者），内部 .log-viewer 滚动 -->
+      <div class="card log-card">
+        <div class="card-header">
+          <h2>实时日志</h2>
           <div class="flex-row gap-sm">
             <button class="btn btn-icon-only" :class="{ 'btn-active': logs.autoScroll.value }" @click="logs.autoScroll.value = !logs.autoScroll.value" :title="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'" :aria-label="logs.autoScroll.value ? '自动滚动：开' : '自动滚动：关'">
               <IconApp :name="logs.autoScroll.value ? 'arrow-up' : 'arrow-down'" />
@@ -478,14 +487,12 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           </div>
         </div>
       </div>
+    </div>
+    <!-- /.dashboard-split -->
 
-    <!-- 一键网络诊断 + 登录历史：左右双栏并排（两卡内容高度相近，逐张全宽浪费
-         一倍纵向空间）；≤1100px 折回单列（见 dashboard.css 的 .dashboard-split） -->
-    <div class="dashboard-split">
-      <NetworkDiagnosticsPanel ref="diagPanelRef" />
-
-      <!-- 登录历史 -->
-      <div class="card history-card">
+    <!-- 登录历史：双栏下方全宽卡收尾（列表单一限高滚动，取值见 dashboard.css 的
+         .history-list） -->
+    <div class="card history-card">
       <div class="card-header">
         <h2>登录历史</h2>
         <div class="history-actions">
@@ -497,38 +504,36 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           </button>
         </div>
       </div>
-          <div class="card-body">
-            <div v-if="!loginHistory.length" class="empty-state">
-              <IconApp name="clock" />
-              <span>暂无登录记录</span>
-              <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
-              <div class="empty-actions">
-                <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'profiles' })">去配置账号</button>
-              </div>
+      <div class="card-body">
+        <div v-if="!loginHistory.length" class="empty-state">
+          <IconApp name="clock" />
+          <span>暂无登录记录</span>
+          <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
+          <div class="empty-actions">
+            <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'profiles' })">去配置账号</button>
+          </div>
+        </div>
+        <div v-else class="history-list">
+          <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">
+            <div class="history-status">
+              <IconApp name="check" v-if="item.result === 'success'" />
+              <IconApp name="x-circle" v-else />
             </div>
-            <div v-else class="history-list">
-              <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">
-                <div class="history-status">
-                  <IconApp name="check" v-if="item.result === 'success'" />
-                  <IconApp name="x-circle" v-else />
-                </div>
-                <div class="history-info">
-                  <div class="history-row">
-                    <span class="history-time">{{ formatTimestamp(item.timestamp) }}</span>
-                    <span class="history-duration">{{ item.duration_secs.toFixed(1) }}s</span>
-                  </div>
-                  <div class="history-row history-row--meta">
-                    <span class="history-profile">{{ item.profile_id || '默认方案' }} · {{ historySourceLabels[item.source] || item.source }}</span>
-                    <span v-if="item.channel" class="badge badge--sm" :class="{ 'badge-browser': item.channel === 'browser', 'badge--info': item.channel === 'http', 'badge-script': item.channel === 'script' }">{{ historyChannelLabels[item.channel] }}</span>
-                  </div>
-                  <span v-if="item.result !== 'success'" class="history-error">{{ item.message }}</span>
-                </div>
+            <div class="history-info">
+              <div class="history-row">
+                <span class="history-time">{{ formatTimestamp(item.timestamp) }}</span>
+                <span class="history-duration">{{ item.duration_secs.toFixed(1) }}s</span>
               </div>
+              <div class="history-row history-row--meta">
+                <span class="history-profile">{{ item.profile_id || '默认方案' }} · {{ historySourceLabels[item.source] || item.source }}</span>
+                <span v-if="item.channel" class="badge badge--sm" :class="{ 'badge-browser': item.channel === 'browser', 'badge--info': item.channel === 'http', 'badge-script': item.channel === 'script' }">{{ historyChannelLabels[item.channel] }}</span>
+              </div>
+              <span v-if="item.result !== 'success'" class="history-error">{{ item.message }}</span>
             </div>
           </div>
         </div>
       </div>
-      <!-- /.dashboard-split -->
+    </div>
 
     <!-- 悬浮工具条（speed dial）：默认收起为主色闪电球，点开自球体上方展开一条
          连体展开条（48px 动作钮与球同尺寸、细分隔线分行，悬停左侧浮出说明），

@@ -164,26 +164,6 @@ defineExpose({ startDiagnostics });
   <div class="card diag-card">
     <div class="card-header">
       <h2>网络诊断</h2>
-      <div class="diag-actions">
-        <button
-          class="btn btn-sm btn-secondary"
-          :disabled="exporting"
-          data-testid="diag-export"
-          @click="exportBundle"
-        >
-          <IconApp :name="exporting ? 'refresh' : 'download'" :class="{ spin: exporting }" />
-          {{ exporting ? "导出中..." : "导出诊断包" }}
-        </button>
-        <button
-          class="btn btn-sm btn-secondary"
-          :disabled="running"
-          data-testid="diag-start"
-          @click="startDiagnostics"
-        >
-          <IconApp :name="running ? 'refresh' : 'activity'" :class="{ spin: running }" />
-          {{ running ? "诊断中..." : "开始诊断" }}
-        </button>
-      </div>
     </div>
     <div class="card-body">
       <p v-if="!report && !errorText && !running" class="diag-hint">
@@ -237,17 +217,33 @@ defineExpose({ startDiagnostics });
         </ol>
       </template>
     </div>
+    <!-- 操作区贴底：卡片在仪表盘双栏被拉伸等高时，多余高度由 body 的检查列表吸收，
+         footer 恒贴卡底（card 为 flex column，见 dashboard.css 的 .diag-card） -->
+    <div class="card-footer">
+      <button
+        class="btn btn-sm btn-secondary"
+        :disabled="exporting"
+        data-testid="diag-export"
+        @click="exportBundle"
+      >
+        <IconApp :name="exporting ? 'refresh' : 'download'" :class="{ spin: exporting }" />
+        {{ exporting ? "导出中..." : "导出诊断包" }}
+      </button>
+      <button
+        class="btn btn-sm btn-secondary"
+        :disabled="running"
+        data-testid="diag-start"
+        @click="startDiagnostics"
+      >
+        <IconApp :name="running ? 'refresh' : 'activity'" :class="{ spin: running }" />
+        {{ running ? "诊断中..." : "开始诊断" }}
+      </button>
+    </div>
   </div>
 </template>
 
 <style scoped>
 /* 全部走 token，无 [data-theme] 分支：深浅主题由变量定义自动生效 */
-.diag-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
 .diag-hint {
   margin: 0;
   color: var(--text-muted);
@@ -303,10 +299,14 @@ defineExpose({ startDiagnostics });
   color: var(--text-secondary);
 }
 
+/* 检查列表：body（flex column）里唯一的弹性子项——仪表盘双栏把卡片拉伸等高时
+   就地吸收多余高度（grow 只长不缩，常规报告量不产生滚动）；内容整体超高时由
+   card-body 滚动兜底，总结论与贴底操作区保持可见 */
 .diag-checks {
   list-style: none;
   margin: 0;
   padding: 0;
+  flex: 1 0 auto;
 }
 
 .diag-check {

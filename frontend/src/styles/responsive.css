@@ -17,9 +17,9 @@
     grid-template-columns: repeat(2, 1fr);
   }
 
-  /* 单列看板按内容滚动，避免历史记录把下方实时日志挤出可见区域。 */
+  /* 单列看板按内容自然滚动：诊断/日志折单列后，历史卡已是页面末位全宽卡，
+     其列表限高由 dashboard.css 的 .history-list 统一承担，无需窄屏再加码 */
   .content-wrapper > .page-content:has(.stats-grid) { height: auto; min-height: 100%; overflow: visible; }
-  .history-card .card-body { max-height: 300px; }
   .dashboard-page .log-card { height: 440px; min-height: 320px; }
 }
 
