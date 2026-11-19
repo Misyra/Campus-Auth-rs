@@ -10,7 +10,7 @@ import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import { aiApi, configApi, tasksApi } from "@/api";
 import { extractApiError } from "@/api/client";
-import type { AiCaptureResult, AiGenerateResult } from "@/api/types";
+import type { AiCaptureResult, AiGenerateResult, AiStreamEvent } from "@/api/types";
 import { computed, onMounted, onUnmounted, ref, unref } from "vue";
 import { useRouter } from "vue-router";
 import { useToast } from "@/composables/useToast";
@@ -394,7 +394,7 @@ const taskJson = ref("");
 const jsonError = ref("");
 const savingTask = ref(false);
 const streamText = ref("");
-const streamEvents = ref<Array<Record<string, unknown>>>([]);
+const streamEvents = ref<AiStreamEvent[]>([]);
 const streamPhase = ref("");
 const streamIdleMs = ref(600_000);
 const streamIdleOptions: SelectOption[] = [
@@ -411,25 +411,22 @@ let streamAbort: AbortController | null = null;
 // 底部进度条的自动收起计时器（done/error 后延迟清空，避免 sticky 条永久残留）
 let streamPhaseTimer: ReturnType<typeof setTimeout> | null = null;
 
-function pushStreamEvent(ev: Record<string, unknown>): void {
+function pushStreamEvent(ev: AiStreamEvent): void {
   // 芯片行只保留有意义的状态，去重连续 delta
-  const typ = String(ev.type ?? "");
   const last = streamEvents.value[streamEvents.value.length - 1];
-  if (typ === "delta" && last && String(last.type) === "delta") return;
+  if (ev.type === "delta" && last && last.type === "delta") return;
   streamEvents.value.push(ev);
   if (streamEvents.value.length > 40) streamEvents.value.splice(0, streamEvents.value.length - 40);
-  if (typ === "started") streamPhase.value = "模型已开始输出…";
-  else if (typ === "attempt_start") {
+  if (ev.type === "started") streamPhase.value = "模型已开始输出…";
+  else if (ev.type === "attempt_start") {
     // 新一轮尝试 = 上一轮残文不再属于最终结果，清空预览避免多轮输出拼接
     streamText.value = "";
-    const a = ev.attempt as number | undefined;
-    const m = ev.max as number | undefined;
-    streamPhase.value = a ? `第 ${a}/${m ?? 2} 轮生成中…` : "生成中…";
-  } else if (typ === "validation_failed") streamPhase.value = "校验未通过，准备重试…";
-  else if (typ === "retrying") streamPhase.value = "正在重试…";
-  else if (typ === "validated") streamPhase.value = "校验通过，收尾中…";
-  else if (typ === "done") dismissStreamPhaseLater("生成完成");
-  else if (typ === "error") dismissStreamPhaseLater("生成失败");
+    streamPhase.value = ev.attempt ? `第 ${ev.attempt}/${ev.max} 轮生成中…` : "生成中…";
+  } else if (ev.type === "validation_failed") streamPhase.value = "校验未通过，准备重试…";
+  else if (ev.type === "retrying") streamPhase.value = "正在重试…";
+  else if (ev.type === "validated") streamPhase.value = "校验通过，收尾中…";
+  else if (ev.type === "done") dismissStreamPhaseLater("生成完成");
+  else if (ev.type === "error") dismissStreamPhaseLater("生成失败");
   requestAnimationFrame(() => {
     const el = document.getElementById("ai-stream-preview");
     if (el) el.scrollTop = el.scrollHeight;
@@ -474,38 +471,37 @@ async function generate(): Promise<void> {
         signal: abort.signal,
         idleTimeoutMs: streamIdleMs.value,
         onEvent: (ev) => {
-          const typ = String((ev as Record<string, unknown>).type ?? "");
-          if (typ === "started") {
-            startedModel = String(ev.model ?? startedModel);
-            startedBaseUrl = String(ev.base_url ?? startedBaseUrl);
+          // 帧形态见 AiStreamEvent 判别联合（types.ts）：按 type 收窄后直读字段
+          if (ev.type === "started") {
+            startedModel = ev.model;
+            startedBaseUrl = ev.base_url;
           }
-          if (typ === "delta") {
-            const delta = String((ev as Record<string, unknown>).text ?? "");
-            streamText.value += delta;
+          if (ev.type === "delta") {
+            streamText.value += ev.text;
             // 轻量心跳，不堆芯片，仅在需要时更新阶段提示
-            if (streamText.value.length % 400 < delta.length) {
+            if (streamText.value.length % 400 < ev.text.length) {
               streamPhase.value = `生成中… ${streamText.value.length} 字符`;
             }
             return;
           }
-          if (typ === "done") {
+          if (ev.type === "done") {
             generateResult.value = {
-              task: (ev.task as Record<string, unknown>) ?? {},
-              attempts: (ev.attempts as number) ?? 1,
-              warnings: (ev.warnings as string[]) ?? [],
+              task: ev.task,
+              attempts: ev.attempts,
+              warnings: ev.warnings,
               model: startedModel,
               base_url: startedBaseUrl,
-            } as AiGenerateResult;
+            };
             taskJson.value = JSON.stringify(generateResult.value.task, null, 2);
-            pushStreamEvent(ev as Record<string, unknown>);
+            pushStreamEvent(ev);
             return;
           }
-          if (typ === "error") {
-            lastError = String((ev as Record<string, unknown>).message ?? "生成失败");
-            pushStreamEvent(ev as Record<string, unknown>);
+          if (ev.type === "error") {
+            lastError = ev.message;
+            pushStreamEvent(ev);
             return;
           }
-          pushStreamEvent(ev as Record<string, unknown>);
+          pushStreamEvent(ev);
         },
       },
     );
@@ -697,7 +693,7 @@ async function restoreCapture(): Promise<void> {
         <span class="ai-step-label">捕获页面</span>
       </div>
       <span class="ai-step-sep" :class="{ done: isCaptureDone }"></span>
-      <div class="ai-step" :class="{ done: isGenerateDone, active: isCaptureDone && !isGenerateDone }">
+      <div class="ai-step" :class="{ done: isGenerateDone, active: isConfigDone && isCaptureDone && !isGenerateDone }">
         <span class="ai-step-dot">{{ isGenerateDone ? "✓" : "3" }}</span>
         <span class="ai-step-label">生成任务</span>
       </div>
