@@ -112,7 +112,7 @@
   flex: 1 1 180px;
   min-width: 140px;
   max-width: 260px;
-  padding: 7px 11px;
+  padding: var(--space-sm) 11px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-glass-light);
@@ -183,7 +183,7 @@
 
 .tsk-table td {
   /* 行高加大：列表是页面主体，行距太密显得单薄 */
-  padding: 18px var(--space-md);
+  padding: var(--space-md);
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
   /* 悬停过渡跟随底色（底色画在单元格上，见下） */
@@ -343,7 +343,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  padding: 9px var(--space-md);
+  padding: var(--space-sm) var(--space-md);
   font-size: var(--text-sm);
   color: var(--text-muted);
   border-top: 1px solid var(--border);
@@ -379,7 +379,7 @@
 }
 
 .tsk-menu button {
-  padding: 6px 10px;
+  padding: 6px var(--space-sm);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -422,8 +422,8 @@
 .tsk-crumb-back {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 12px 4px 8px;
+  gap: var(--space-xs);
+  padding: var(--space-xs) 12px var(--space-xs) var(--space-sm);
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
   background: var(--bg-card);
@@ -538,7 +538,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-sm);
-  padding: 10px 12px;
+  padding: var(--space-sm) 12px;
   margin-bottom: var(--space-md);
   border: 1px solid rgba(var(--warning-rgb), 0.25);
   border-radius: var(--radius-md);
@@ -589,7 +589,7 @@
   background: var(--bg-glass);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
-  padding: 0 4px;
+  padding: 0 var(--space-xs);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
@@ -603,7 +603,7 @@
 .tsk-kv {
   display: grid;
   grid-template-columns: 76px minmax(0, 1fr);
-  gap: 6px 10px;
+  gap: 6px var(--space-sm);
   margin: 0;
   font-size: var(--text-md);
 }
@@ -683,7 +683,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 3px;
+  padding: var(--space-xs);
   border: none;
   border-radius: var(--radius-xs);
   background: transparent;
@@ -734,7 +734,7 @@
   background: var(--bg-glass);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: var(--space-xs) 10px;
+  padding: var(--space-xs) var(--space-sm);
   max-width: 60%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -791,7 +791,7 @@
   font-size: var(--text-md);
   color: var(--accent-text, var(--accent));
   background: rgba(var(--accent-rgb), 0.1);
-  padding: var(--space-xs) 10px;
+  padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
 }
 
@@ -801,7 +801,7 @@
      给它 30% 已是宽裕；剩余宽度让给截图——截图才是调试时真正要看的东西。
      窄屏由 responsive.css 折为纵排。 */
   grid-template-columns: clamp(240px, 30%, 360px) minmax(0, 1fr);
-  gap: 16px;
+  gap: var(--space-md);
   flex: 1;
   min-height: min(460px, 52vh);
 }
@@ -823,7 +823,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-sm);
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm);
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   border-left-width: 3px;
@@ -904,7 +904,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-xs);
 }
 
 .debug-step-line {
@@ -1026,7 +1026,7 @@
   position: absolute;
   right: 8px;
   bottom: 8px;
-  padding: 2px 8px;
+  padding: 2px var(--space-sm);
   border-radius: var(--radius-xs);
   font-size: var(--text-xs);
   color: var(--text-secondary);
