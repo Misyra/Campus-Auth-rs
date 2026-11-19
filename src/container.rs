@@ -356,7 +356,7 @@ impl ServiceContainer {
             // 触发，而 .trash 此前无任何清理点（含 ENC: 密文方案文件）；30 天
             // mtime 门槛保证首启清理同样安全。日志/历史/事件流的启动清理另有
             // 入口（init_logging / sink 任务），此处只补 .trash 这一块
-            Self::cleanup_trash_entries(&config_for_task.base_path());
+            Self::cleanup_trash_entries(&config_for_task.base_path()).await;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(86_400));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // 首个 tick 立即完成：启动时的清理已在 init_logging 做过，跳过
@@ -368,9 +368,19 @@ impl ServiceContainer {
                     _ = interval.tick() => {
                         // .trash 回滚区按 mtime 轮转 30 天（启动已执行一次，
                         // 这里管长驻实例的跨日兜底）
-                        Self::cleanup_trash_entries(&config_for_task.base_path());
+                        Self::cleanup_trash_entries(&config_for_task.base_path()).await;
                         let retention = config_for_task.runtime().load().logging.retention_days;
-                        crate::logging::cleanup_expired_logs(&config_for_task.base_path(), retention);
+                        // 日志目录的扫描+删除为同步 IO：包 spawn_blocking，
+                        // 避免在每日 async tick 内阻塞 tokio worker（文件量随
+                        // 运行天数累积，单次可达数百个）
+                        let base_for_logs = config_for_task.base_path();
+                        if let Err(e) = tokio::task::spawn_blocking(move || {
+                            crate::logging::cleanup_expired_logs(&base_for_logs, retention)
+                        })
+                        .await
+                        {
+                            tracing::warn!("过期日志清理任务异常: {e}");
+                        }
                         // LOG-2：登录历史保留固定 30 天（与 Web 查询窗口对齐），
                         // 更早的 JSONL 无消费路径，随每日 housekeeping 删除
                         match history_for_task
@@ -384,11 +394,20 @@ impl ServiceContainer {
                             Err(e) => tracing::debug!("清理登录历史失败: {e}"),
                         }
                         // 事件流与登录历史同口径固定 30 天（EVENT_RETENTION_DAYS）：
-                        // 启动清理已在 sink 任务内做过，这里只管跨日兜底
-                        let expired_events = crate::events::sink::cleanup_expired_event_files(
-                            &crate::utils::paths::events_dir(&config_for_task.base_path()),
-                            crate::events::sink::EVENT_RETENTION_DAYS,
-                        );
+                        // 启动清理已在 sink 任务内做过，这里只管跨日兜底；扫描
+                        // 删除同为同步 IO，同包 spawn_blocking
+                        let base_for_events = config_for_task.base_path();
+                        let expired_events = tokio::task::spawn_blocking(move || {
+                            crate::events::sink::cleanup_expired_event_files(
+                                &crate::utils::paths::events_dir(&base_for_events),
+                                crate::events::sink::EVENT_RETENTION_DAYS,
+                            )
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("过期事件流清理任务异常: {e}");
+                            0
+                        });
                         if expired_events > 0 {
                             tracing::info!("清理过期事件流文件 {expired_events} 个");
                         }
@@ -404,13 +423,24 @@ impl ServiceContainer {
     /// 点，长驻实例无限累积；现按文件 mtime 墙钟轮转 30 天
     /// （`config::service::TRASH_RETENTION_DAYS`）。卸载口径随 `config/` 整目录
     /// 继承：purge 时一并删除、`keep_user_data` 时一并保留。
-    fn cleanup_trash_entries(base_path: &std::path::Path) -> usize {
-        let trash_dir = crate::utils::paths::config_dir(base_path).join(crate::config::TRASH_DIR);
-        let removed = crate::config::service::cleanup_expired_trash_entries(
-            &trash_dir,
-            crate::config::service::TRASH_RETENTION_DAYS,
-            std::time::SystemTime::now(),
-        );
+    /// 目录扫描+删除为同步 IO，整体包 `spawn_blocking`（闭包拿 `base_path`
+    /// 克隆），避免在 async tick 内阻塞 tokio worker。
+    async fn cleanup_trash_entries(base_path: &std::path::Path) -> usize {
+        let base = base_path.to_path_buf();
+        let removed = tokio::task::spawn_blocking(move || {
+            let trash_dir = crate::utils::paths::config_dir(&base).join(crate::config::TRASH_DIR);
+            crate::config::service::cleanup_expired_trash_entries(
+                &trash_dir,
+                crate::config::service::TRASH_RETENTION_DAYS,
+                std::time::SystemTime::now(),
+            )
+        })
+        .await
+        .unwrap_or_else(|e| {
+            // JoinError 仅内部 panic 可达：清理为兜底任务，失败留待下一轮重试
+            tracing::warn!("清理 .trash 任务异常: {e}");
+            0
+        });
         if removed > 0 {
             tracing::info!("清理 .trash 过期回滚条目 {removed} 个");
         }

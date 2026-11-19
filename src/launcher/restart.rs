@@ -30,6 +30,10 @@ pub(super) fn spawn_auto_restart_timer(state: &LauncherState) {
                 _ = token.cancelled() => return,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
             }
+            // load_settings 保持同步现状：内部有 mtime 缓存，常态命中仅一次
+            // `std::fs::metadata`（微秒级），只有配置文件变更后才真正读盘+
+            // 解析；60s 一查的最坏成本即每分钟至多一次磁盘读，权衡后不值得
+            // 为它引入 spawn_blocking 的额外间接层
             let hours = container
                 .config
                 .load_settings()

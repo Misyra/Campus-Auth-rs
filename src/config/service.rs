@@ -465,6 +465,59 @@ impl ConfigService {
         }
     }
 
+    /// 加载单个 Profile 的异步版本（供 async 调用方使用）
+    ///
+    /// 与 [`Self::load_settings_async`] 同模式：[`Self::load_profile`] 内含
+    /// `std::fs::metadata` + 文件读取同步 IO（未命中 mtime 缓存时还有凭据
+    /// 相关字段待后续解密），async 上下文直接调用会阻塞 tokio worker；经
+    /// `self_weak` 升级自身 Arc 后把同步实现移入 `spawn_blocking`。
+    /// profile_cache 为 `std::sync::Mutex`，临界区极短（mtime 比对与缓存
+    /// 替换），在阻塞线程中短暂持锁是安全的。
+    pub async fn load_profile_async(&self, id: &str) -> Result<ProfileData, ConfigError> {
+        let Some(this) = self.self_weak.upgrade() else {
+            // 与 load_settings_async 同款防御分支：容器存活期内不可达
+            tracing::error!("ConfigService 已释放，无法加载 Profile {id}");
+            return Err(ConfigError::ProfileNotFound { id: id.to_string() });
+        };
+        let id = id.to_string();
+        match tokio::task::spawn_blocking(move || this.load_profile(&id)).await {
+            Ok(v) => v,
+            Err(e) => {
+                // JoinError 仅内部 panic 可达：按读取失败上报，调用方已有降级路径
+                tracing::error!("load_profile 阻塞任务失败: {e}");
+                Err(ConfigError::Io(std::io::Error::other(format!(
+                    "加载 Profile 阻塞任务失败: {e}"
+                ))))
+            }
+        }
+    }
+
+    /// 为指定 Profile 构建运行时快照的异步版本（含解密后的密码）
+    ///
+    /// 同 [`Self::load_profile_async`] 口径：同步版内部串联 `load_profile` +
+    /// `load_settings` + `build_runtime_config`（含解密），均为阻塞 IO，整体
+    /// 移入 `spawn_blocking`。多 Profile 定时浏览器任务与登录提交段的 async
+    /// 调用方使用；Web 路由等同步调用方继续用同步版。
+    pub async fn runtime_config_for_profile_async(
+        &self,
+        id: &str,
+    ) -> Result<RuntimeConfig, ConfigError> {
+        let Some(this) = self.self_weak.upgrade() else {
+            tracing::error!("ConfigService 已释放，无法构建 Profile {id} 运行时快照");
+            return Err(ConfigError::ProfileNotFound { id: id.to_string() });
+        };
+        let id = id.to_string();
+        match tokio::task::spawn_blocking(move || this.runtime_config_for_profile(&id)).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("runtime_config_for_profile 阻塞任务失败: {e}");
+                Err(ConfigError::Io(std::io::Error::other(format!(
+                    "构建 Profile 运行时快照阻塞任务失败: {e}"
+                ))))
+            }
+        }
+    }
+
     /// 原子写入 settings.json
     pub async fn save_settings(&self, data: &SettingsData) -> Result<(), ConfigError> {
         let _guard = self.settings_lock.lock().await;

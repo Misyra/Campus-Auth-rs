@@ -55,6 +55,9 @@ pub fn is_chrome_installed() -> bool {
 }
 
 /// 检测系统是否安装了 Google Chrome（Linux）
+///
+/// 内部经 `which` 子进程探测（阻塞）；async 调用方不得直接调用，须经
+/// [`is_channel_available_async`] / [`first_available_channel_async`] 间接执行。
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn is_chrome_installed() -> bool {
     for bin in ["google-chrome", "google-chrome-stable"] {
@@ -112,6 +115,9 @@ pub fn is_edge_installed() -> bool {
 }
 
 /// 检测系统是否安装了 Microsoft Edge（Linux）
+///
+/// 内部经 `which` 子进程探测（阻塞）；async 调用方不得直接调用，须经
+/// [`is_channel_available_async`] / [`first_available_channel_async`] 间接执行。
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn is_edge_installed() -> bool {
     for bin in ["microsoft-edge", "microsoft-edge-stable"] {
@@ -177,6 +183,27 @@ fn is_channel_available_with(
     }
 }
 
+/// [`is_channel_available`] 的异步变体：探测整体移入阻塞线程池
+///
+/// 同步版在 Linux 上需 spawn `which` 子进程（Edge/Chrome 同口径），托管渠道
+/// 判定含 `ms-playwright` 缓存目录扫描，均为阻塞 IO；Web 路由等同步调用方
+/// 继续用同步版，async 调用方（登录渠道预检/终验，经 login 模块 60s TTL
+/// 缓存）改走本变体，TTL 未命中时不再阻塞 tokio worker。`EnvironmentApi`
+/// 已要求 Send + Sync，`Arc<dyn>` 可整体移入阻塞闭包独占持有。
+pub async fn is_channel_available_async(
+    env: std::sync::Arc<dyn crate::environment::EnvironmentApi>,
+    channel: &str,
+    custom_path: &str,
+) -> bool {
+    let channel = channel.to_string();
+    let custom_path = custom_path.to_string();
+    tokio::task::spawn_blocking(move || is_channel_available(env.as_ref(), &channel, &custom_path))
+        .await
+        // JoinError 仅探测任务 panic 可达（阻塞任务不会被动取消）：探测为纯
+        // 查询，保守取「不可用」，让登录侧走渠道切换/失败兜底而非假阳性放行
+        .unwrap_or(false)
+}
+
 /// 首个可用的浏览器渠道（优先级：Edge → Chrome → Chromium → Firefox → WebKit）
 ///
 /// 系统浏览器优先：免下载、启动快（Windows 出厂即带 Edge，因此绝大多数用户
@@ -191,6 +218,19 @@ pub fn first_available_channel(
 /// 首个可用渠道的核心判定；`managed` 注入以便单测脱离真实环境
 fn first_available_channel_with(managed: impl Fn(&str) -> bool) -> Option<&'static str> {
     first_available_from(system_browser_channel(), managed)
+}
+
+/// [`first_available_channel`] 的异步变体：同 [`is_channel_available_async`]
+/// 口径，系统浏览器探测（Linux 为 `which` 子进程）与托管引擎缓存扫描一并
+/// 移入阻塞线程池，供 async 调用方使用
+pub async fn first_available_channel_async(
+    env: std::sync::Arc<dyn crate::environment::EnvironmentApi>,
+) -> Option<&'static str> {
+    tokio::task::spawn_blocking(move || first_available_channel(env.as_ref()))
+        .await
+        // JoinError 仅探测任务 panic 可达：保守取「全无可用」，与探测本身
+        // 返回 None 的语义一致（调用方据此走 Chromium 下载兜底或失败留痕）
+        .unwrap_or(None)
 }
 
 /// 当前系统浏览器渠道（Edge 优先，其次 Chrome；均无返回 `None`）

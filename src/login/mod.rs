@@ -717,7 +717,9 @@ impl LoginOrchestrator {
         let persistent_login = if effective_channel == LoginChannel::Browser
             && !matches!(source, LoginSource::Browser)
         {
-            match self.config.load_profile(&profile.id) {
+            // 读盘+解密走异步变体（spawn_blocking），避免在 async 提交段阻塞
+            // tokio worker；失败降级语义与原同步路径一致
+            match self.config.load_profile_async(&profile.id).await {
                 Ok(pd)
                     if decide_persistent_login(
                         source,
@@ -1110,14 +1112,18 @@ impl LoginOrchestrator {
         profile_id: &Option<String>,
     ) -> Result<RuntimeConfig, LoginHandle> {
         match profile_id {
-            Some(pid) if !pid.is_empty() => match self.config.runtime_config_for_profile(pid) {
-                Ok(rc) => Ok(rc),
-                Err(e) => {
-                    let msg = format!("指定 Profile {pid} 加载失败，已拒绝登录: {e}");
-                    warn!("{msg}");
-                    Err(self.immediate_handle(source, false, msg, pid.clone()).await)
+            // 内部串联 load_profile + load_settings + 凭据解密，均为阻塞 IO，
+            // 走异步变体（spawn_blocking）避免阻塞 tokio worker
+            Some(pid) if !pid.is_empty() => {
+                match self.config.runtime_config_for_profile_async(pid).await {
+                    Ok(rc) => Ok(rc),
+                    Err(e) => {
+                        let msg = format!("指定 Profile {pid} 加载失败，已拒绝登录: {e}");
+                        warn!("{msg}");
+                        Err(self.immediate_handle(source, false, msg, pid.clone()).await)
+                    }
                 }
-            },
+            }
             _ => Ok(rt.clone()),
         }
     }
@@ -1343,14 +1349,12 @@ impl LoginOrchestrator {
                 .last_error
                 .unwrap_or_else(|| e.to_string());
             warn!("登录环境自动初始化失败: {detail}");
+            let hint = self.no_browser_hint().await;
             return Err(self
                 .immediate_handle(
                     source,
                     false,
-                    format!(
-                        "{msg_unready}: {detail}{}",
-                        Self::no_browser_hint(&*self.environment)
-                    ),
+                    format!("{msg_unready}: {detail}{hint}"),
                     profile.id.clone(),
                 )
                 .await);
@@ -1363,14 +1367,12 @@ impl LoginOrchestrator {
                 .unwrap_or_else(|| "未知原因".to_string());
             // 环境初始化完成后仍未就绪直接失败，需留痕（原两分支告警口径一致）
             warn!("环境初始化完成但仍未就绪: {detail}");
+            let hint = self.no_browser_hint().await;
             return Err(self
                 .immediate_handle(
                     source,
                     false,
-                    format!(
-                        "{msg_still_unready}: {detail}{}",
-                        Self::no_browser_hint(&*self.environment)
-                    ),
+                    format!("{msg_still_unready}: {detail}{hint}"),
                     profile.id.clone(),
                 )
                 .await);
@@ -1435,16 +1437,23 @@ impl LoginOrchestrator {
             .await?;
         }
 
-        // 1c. 浏览器可用性终验（环境引导兜底之后）：引导中新装好的 Chromium
-        // 纳入复检，命中则自动切换后继续；仍全无可用则直接失败，前端据文案
-        // 弹窗引导下载 Chromium，不再把缺浏览器误报成登录失败深埋日志。
-        if !browser::is_channel_available(
-            &*self.environment,
-            browser_override
-                .as_deref()
-                .unwrap_or(&rt.browser.browser_channel),
-            &rt.browser.browser_custom_path,
-        ) {
+        // 1c. 浏览器可用性终验（环境引导兜底之后）：与 1b 同走 60s TTL 缓存方法，
+        // 不再直查绕过缓存——引导中新装好的 Chromium 由缓存键内的
+        // playwright_ready / system_browser_ready 就绪标志自然失效（引导收尾
+        // `refresh_browser_and_capability_status` 重算标志，标志翻转即键变、
+        // 必触发新探测，见 environment::bootstrap），无需另设失效入口；引导
+        // 未运行时键不变，1b 结论在同请求内复用、条件等价。命中则自动切换后
+        // 继续；仍全无可用则直接失败，前端据文案弹窗引导下载 Chromium，不再把
+        // 缺浏览器误报成登录失败深埋日志。
+        if !self
+            .channel_available_cached(
+                browser_override
+                    .as_deref()
+                    .unwrap_or(&rt.browser.browser_channel),
+                &rt.browser.browser_custom_path,
+            )
+            .await
+        {
             browser_override = self
                 .resolve_browser_channel(
                     browser_override
@@ -1768,8 +1777,10 @@ impl LoginOrchestrator {
     }
     /// 无浏览器兜底提示：环境引导失败时若当前无任何可用浏览器，把文案指向
     /// Chromium 安装（前端据"无可用浏览器"子串弹窗）；有可用浏览器时为空串。
-    fn no_browser_hint(env: &dyn crate::environment::EnvironmentApi) -> &'static str {
-        if browser::first_available_channel(env).is_none() {
+    /// 探测走 [`Self::first_available_channel_cached`]（60s TTL + 键含就绪
+    /// 标志，引导收尾重算标志后自动失效），失败路径不再单独发起同步探测。
+    async fn no_browser_hint(&self) -> &'static str {
+        if self.first_available_channel_cached().await.is_none() {
             "；当前无可用浏览器，请下载 Chromium（设置 · 浏览器页可一键安装）"
         } else {
             ""
@@ -1781,7 +1792,10 @@ impl LoginOrchestrator {
     /// 缓存键含自定义路径与**环境就绪标志**：路径变更、或浏览器被安装/卸载导致
     /// `playwright_ready` / `system_browser_ready` 变化时键随之改变，旧结论自然失效，
     /// 无需 environment 模块反向通知 login（避免模块间耦合）。
-    fn channel_available_cached(&self, channel: &str, custom_path: &str) -> bool {
+    /// 未命中时的探测走 `browser::is_channel_available_async`（整体移入阻塞
+    /// 线程池）：Linux 上 `which` 子进程与托管引擎缓存扫描不再阻塞 tokio
+    /// worker，TTL 只降频、不再消除的阻塞点就此收敛。
+    async fn channel_available_cached(&self, channel: &str, custom_path: &str) -> bool {
         let key = self.channel_probe_key(channel, custom_path);
         {
             let cache = self
@@ -1794,7 +1808,9 @@ impl LoginOrchestrator {
                 return *available;
             }
         }
-        let available = browser::is_channel_available(&*self.environment, channel, custom_path);
+        let available =
+            browser::is_channel_available_async(self.environment.clone(), channel, custom_path)
+                .await;
         self.channel_probe_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1814,7 +1830,10 @@ impl LoginOrchestrator {
     }
 
     /// 首个可用渠道（60s TTL 缓存；键含环境就绪标志，安装后自动失效）
-    fn first_available_channel_cached(&self) -> Option<&'static str> {
+    ///
+    /// 未命中时的探测同走异步变体（阻塞线程池），口径见
+    /// [`Self::channel_available_cached`]。
+    async fn first_available_channel_cached(&self) -> Option<&'static str> {
         let status = self.environment.status();
         let key = format!(
             "{}|{}",
@@ -1832,7 +1851,7 @@ impl LoginOrchestrator {
                 return *cached;
             }
         }
-        let probed = browser::first_available_channel(&*self.environment);
+        let probed = browser::first_available_channel_async(self.environment.clone()).await;
         let mut guard = self
             .first_available_cache
             .lock()
@@ -1849,8 +1868,8 @@ impl LoginOrchestrator {
     /// 避免登录重试连打时逐轮扫盘。全无可用返回 `None`，由调用方走环境引导
     /// 兜底或报无浏览器可用。
     async fn resolve_browser_channel(&self, channel: &str, custom_path: &str) -> Option<String> {
-        let available = self.channel_available_cached(channel, custom_path);
-        let next = decide_browser_override(available, self.first_available_channel_cached())?;
+        let available = self.channel_available_cached(channel, custom_path).await;
+        let next = decide_browser_override(available, self.first_available_channel_cached().await)?;
         // 预期内的正常自愈（不落盘、下次自动切回），降 info 控制告警噪声；
         // 全无可用浏览器的最终失败仍由调用方以更高级别留痕
         tracing::info!(
