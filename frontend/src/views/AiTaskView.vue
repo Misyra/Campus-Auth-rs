@@ -7,7 +7,7 @@
  */
 import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
-import { onMounted, onUnmounted } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { TUTORIAL_VIDEO_AI_URL } from "@/utils/constants";
 import { useToast } from "@/composables/useToast";
@@ -45,6 +45,10 @@ const {
   captureUrl, capturing, captureResult, screenshotUrl, savingBundle, isCaptureDone,
   captureChannelDegraded, browserChannel, capture, saveBundle,
 } = aiCapture;
+// 截图文件可能已被清理（restoreCapture 恢复的会话跨了清理周期）：加载失败时隐藏
+// <img>，避免留下空框 + alt 文本的破图观感（RepoImportModals.markImageBroken 同款守卫）
+const screenshotBroken = ref(false);
+watch(screenshotUrl, () => { screenshotBroken.value = false; });
 const {
   extraPrompt, generating, generateResult, taskJson, jsonError, savingTask, streamText, streamEvents,
   streamPhase, streamIdleMs, streamIdleValue, streamIdleOptions, isGenerateDone,
@@ -218,7 +222,7 @@ const {
                 <IconApp name="download" class="icon-sm" /> {{ savingBundle ? "打包中…" : "保存页面文件" }}
               </button>
             </div>
-            <img v-if="screenshotUrl" class="ai-screenshot" :src="screenshotUrl" alt="登录页截图" />
+            <img v-if="screenshotUrl && !screenshotBroken" class="ai-screenshot" :src="screenshotUrl" alt="登录页截图" @error="screenshotBroken = true" />
           </template>
         </div>
       </div>
