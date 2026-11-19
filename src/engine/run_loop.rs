@@ -4,7 +4,11 @@
 //! 数秒到数十秒（多目标超时叠加），内联执行期间命令通道（Shutdown/Stop 等）
 //! 只能排队。探测统一移入独立 tokio 任务，结果经 mpsc channel 回传主循环
 //! 处理（模式与登录结果 `LoginResult` channel 一致），命令保持即时响应。
+//! Profile 切换检测的网关/SSID 探测同此决策（两者各为子进程探测、各 10s 超时，
+//! 见 `network::detect::SUBPROCESS_TIMEOUT_SECS`）：探测段同样后台化，匹配与
+//! 切换留在主循环执行（见 `check_profile_switch` / `handle_profile_probe_message`）。
 
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
@@ -130,6 +134,21 @@ impl ProbeMessage {
     }
 }
 
+/// Profile 切换探测任务的回传消息（模式同 [`ProbeMessage`]，F5 同构）
+///
+/// 成败均须回传：主循环靠它复位 `profile_probe_in_flight` 在途标记，
+/// 只回传成功会导致标记永不复位、切换检测从此被防重入永久吞掉。
+///
+/// 不携带配置版本：与登录决策不同，匹配读取的是**回传时刻**的 Profile 列表
+///（`detect_matching_profile` 即时求值），不存在基于旧配置决策的问题；
+/// 停止/暂停/开关关闭的迟到门控在 [`handle_profile_probe_message`] 重查。
+enum ProfileProbeMessage {
+    /// 探测完成：默认网关列表与当前 SSID
+    Completed(Vec<Ipv4Addr>, Option<String>),
+    /// 探测执行失败（网关或 SSID 子进程探测的错误描述）
+    Failed(String),
+}
+
 /// Engine 内部栈上状态（单 task 独占，不跨 Arc）
 struct EngineInner {
     /// 监测循环是否启用
@@ -196,6 +215,14 @@ struct EngineInner {
     probe_pending: bool,
     /// 探测结果回传 sender（后台探测任务完成后通知主循环）
     probe_result_tx: mpsc::Sender<ProbeMessage>,
+    /// 是否有 Profile 切换探测任务在途（网关/SSID 子进程探测，F5 同构）
+    ///
+    /// 切换检测为低频周期触发（无用户主动即时路径），在途时到期触发直接
+    /// 忽略——无须网络探测的 `probe_pending` 排队语义，被忽略的到期由下一轮
+    /// 空转唤醒（≤MAX_IDLE_SLEEP_SECS）重估补检。
+    profile_probe_in_flight: bool,
+    /// Profile 切换探测结果回传 sender（后台探测任务完成后通知主循环）
+    profile_probe_result_tx: mpsc::Sender<ProfileProbeMessage>,
     /// 登录结果回传 sender（后台 spawn 的登录任务完成后通知主循环）
     login_result_tx: mpsc::Sender<LoginResult>,
     /// TestNetwork 并发名额（A23）：诊断探测耗时数十秒，无上限时 Web 端高频
@@ -229,6 +256,7 @@ impl EngineInner {
 
     fn new(
         probe_result_tx: mpsc::Sender<ProbeMessage>,
+        profile_probe_result_tx: mpsc::Sender<ProfileProbeMessage>,
         login_result_tx: mpsc::Sender<LoginResult>,
         clock: WallClock,
     ) -> Self {
@@ -254,6 +282,8 @@ impl EngineInner {
             probe_in_flight: false,
             probe_pending: false,
             probe_result_tx,
+            profile_probe_in_flight: false,
+            profile_probe_result_tx,
             login_result_tx,
             test_network_in_flight: Arc::new(AtomicUsize::new(0)),
             notifier: Notifier::new(),
@@ -313,9 +343,11 @@ pub(crate) async fn run_loop(
 ) {
     // 探测结果回传 channel（后台探测任务 → 主循环，F5）
     let (probe_result_tx, mut probe_result_rx) = mpsc::channel::<ProbeMessage>(8);
+    // Profile 切换探测结果回传 channel（后台网关/SSID 探测任务 → 主循环，F5 同构）
+    let (profile_probe_tx, mut profile_probe_rx) = mpsc::channel::<ProfileProbeMessage>(8);
     // 登录结果回传 channel（后台 spawn 的登录任务完成后通知主循环，携带完整结果以区分来源）
     let (login_result_tx, mut login_result_rx) = mpsc::channel::<LoginResult>(16);
-    let mut inner = EngineInner::new(probe_result_tx, login_result_tx, clock);
+    let mut inner = EngineInner::new(probe_result_tx, profile_probe_tx, login_result_tx, clock);
     // 配置版本订阅：任何入口的配置变更（Web 保存 / 切换 Profile / CLI）都会经
     // ConfigService reload 广播版本号，Engine 据此重建派生状态。此前只有
     // Scheduler 收到 reload 信号，Engine 的检测定时器等派生状态不随保存刷新
@@ -350,6 +382,11 @@ pub(crate) async fn run_loop(
                 // 探测结果回传：更新网络状态并决策是否触发登录（F5）
                 handle_probe_message(msg, &mut inner, &deps);
             }
+            Some(msg) = profile_probe_rx.recv() => {
+                // Profile 切换探测结果回传：匹配与切换留在主循环执行（F5 同构），
+                // 与命令处理保持同一串行顺序语义（handle_apply_profile 不并发重入）
+                handle_profile_probe_message(msg, &mut inner, &deps).await;
+            }
             Ok(()) = config_version_rx.changed() => {
                 // 配置版本变化：RuntimeConfig 已由 ConfigService 原子替换，
                 // Engine 只需重建派生状态（检测周期等），不再二次 reload。
@@ -376,19 +413,24 @@ pub(crate) async fn run_loop(
             _ = tokio::time::sleep(Duration::from_secs(MAX_IDLE_SLEEP_SECS)) => {}
         }
 
-        // 步骤 3：低频 Profile 切换检测
+        // 步骤 3：低频 Profile 切换检测（探测段在后台任务执行，F5 同构）
         if inner.monitoring
             && !is_any_pause_active(&inner, &deps)
             && deps.config_service.runtime().load().auto_switch
             && profile_check_due(&inner, &deps)
         {
-            check_profile_switch(&mut inner, &deps).await;
+            // 只发起探测不 await：网关/SSID 均为子进程探测（各 10s 超时），
+            // 内联 await 会在探测子进程挂起时阻塞命令通道最长 ~20s
+            check_profile_switch(&mut inner, &deps);
+            // 时间戳在「发起探测」时刷新（而非结果回传时）：切换检测节奏以发起
+            // 时刻锚定，探测耗时（子进程各 10s 预算）不推迟下一轮到期点；
+            // 在途期间的重复到期由 profile_probe_in_flight 防重入忽略
             inner.last_profile_check = inner.clock.now();
         }
     }
     // 主循环退出（Shutdown / 命令端全关）后在途探测任务自然终结：
-    // 其持有的 probe_result_tx 克隆指向已 drop 的接收端，send 失败即返回，
-    // 结果被丢弃——关闭后的引擎不再处理任何探测结果。
+    // 其持有的 probe_result_tx / profile_probe_result_tx 克隆指向已 drop 的
+    // 接收端，send 失败即返回，结果被丢弃——关闭后的引擎不再处理任何探测结果。
 }
 
 /// 分发命令到对应处理函数。返回 `true` 表示应退出主循环。
@@ -1184,20 +1226,109 @@ fn assessment_reason_code(reason: &AssessmentReason) -> String {
         .unwrap_or_else(|| format!("{reason:?}"))
 }
 
-/// 低频 Profile 切换检测：网关/SSID 变化 → 自动匹配并切换
-async fn check_profile_switch(inner: &mut EngineInner, deps: &EngineDeps) {
-    let gateways = match deps.network_detect.default_gateways().await {
-        Ok(g) => g,
-        Err(e) => {
-            // 无 WiFi 网卡/受限环境下每轮都会失败，保持 debug 防止刷屏
-            tracing::debug!(error = %e, "网关探测失败");
+/// 低频 Profile 切换检测：只负责「在途检查 + 发起后台探测」（F5 同构）
+///
+/// 原实现内联 await `default_gateways` / `current_ssid`（各为子进程探测、
+/// 各 10s 超时，见 `network::detect::SUBPROCESS_TIMEOUT_SECS`），auto_switch
+/// 开启且探测子进程挂起时 Stop/Pause/Shutdown 命令最长阻塞 ~20s，违背文件头
+/// 「命令保持即时响应」的 F5 决策。探测段移入独立 tokio 任务、结果经 mpsc
+/// 回传主循环；匹配与切换（`handle_apply_profile`）留在主循环的
+/// [`handle_profile_probe_message`] 执行，保持与命令处理的串行顺序语义。
+///
+/// 后台任务只克隆探测所需数据（`network_detect` Arc 与回传 sender），不持有
+/// `EngineInner` 借用——回传 `(gateways, ssid)` 即可，配置与 Profile 列表在
+/// 主循环收到结果时读取。
+fn check_profile_switch(inner: &mut EngineInner, deps: &EngineDeps) {
+    // 防重入（同 probe_in_flight 模式）：探测在途时到期触发直接忽略。
+    // 切换检测本身低频（周期下限 60s）且无用户主动即时路径，无须排队语义
+    if inner.profile_probe_in_flight {
+        tracing::debug!("Profile 切换探测仍在途，忽略本次到期触发");
+        return;
+    }
+    inner.profile_probe_in_flight = true;
+    let detector = deps.network_detect.clone();
+    let tx = inner.profile_probe_result_tx.clone();
+    tokio::spawn(async move {
+        // panic 兜底：`profile_probe_in_flight` 的唯一复位点是结果回传
+        // （handle_profile_probe_message），任务若 panic 未回传 → 此后每轮
+        // 切换检测都被防重入吞掉、auto_switch 静默失效（症状是"永不切换"
+        // 而非崩溃，极难排障）。Drop 在 unwind 中仍执行，故由守卫补发失败消息
+        let mut guard = ProfileProbeReturnGuard::new(tx);
+        // 与原内联实现同语义：网关探测失败即放弃本轮，不再探测 SSID
+        let msg = match detector.default_gateways().await {
+            Ok(gateways) => match detector.current_ssid().await {
+                Ok(ssid) => ProfileProbeMessage::Completed(gateways, ssid),
+                Err(e) => ProfileProbeMessage::Failed(e.to_string()),
+            },
+            Err(e) => ProfileProbeMessage::Failed(e.to_string()),
+        };
+        // 主循环退出后接收端已 drop：send 失败即丢弃（shutdown 弃在途探测）
+        let _ = guard.tx.send(msg).await;
+        guard.sent = true;
+    });
+}
+
+/// Profile 切换探测任务的回传守卫：无论正常退出还是 panic 展开，
+/// 都保证向主循环回传一条消息（模式同 [`ProbeReturnGuard`]）。
+///
+/// 主循环以「收到回传」作为 `profile_probe_in_flight` 的复位条件，任何未
+/// 回传的退出路径都会让切换检测从此被防重入吞掉、auto_switch 永久失效。
+struct ProfileProbeReturnGuard {
+    tx: mpsc::Sender<ProfileProbeMessage>,
+    /// 正常路径是否已自行回传（避免重复补发）
+    sent: bool,
+}
+
+impl ProfileProbeReturnGuard {
+    fn new(tx: mpsc::Sender<ProfileProbeMessage>) -> Self {
+        Self { tx, sent: false }
+    }
+}
+
+impl Drop for ProfileProbeReturnGuard {
+    fn drop(&mut self) {
+        if self.sent {
             return;
         }
-    };
-    let ssid = match deps.network_detect.current_ssid().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(error = %e, "SSID 探测失败");
+        // Drop 不能 await：用 try_send。容量 8（见 profile_probe_tx），而
+        // profile_probe_in_flight 保证同一时刻至多一个探测在途，即至多一条
+        // 未消费消息，故不会因满载而丢。若主循环已退出则发送失败属预期
+        let _ = self.tx.try_send(ProfileProbeMessage::Failed(
+            "Profile 切换探测任务异常退出（panic），已复位在途标记".to_string(),
+        ));
+    }
+}
+
+/// 处理 Profile 切换探测结果回传：网关/SSID 变化 → 自动匹配并切换
+///
+/// 原 `check_profile_switch` 探测后的匹配与切换段整体迁移至此，仍在主循环
+/// 执行：`handle_apply_profile` 与命令处理共用同一串行顺序语义，后台任务只
+/// 负责探测、不碰任何引擎状态。
+///
+/// 迟到结果门控（探测在途可跨越 Stop/Pause/开关变更，口径同
+/// [`handle_probe_message`] 的登录决策三重门）：监测停止 / 暂停生效 /
+/// auto_switch 已关闭时丢弃结果、不触发切换——用户显式停止的自动行为不得
+/// 被探测发起前已定的结果反向驱动。匹配读取回传时刻的 Profile 列表，无
+/// 基于旧配置决策的问题，故不比对配置版本。
+async fn handle_profile_probe_message(
+    msg: ProfileProbeMessage,
+    inner: &mut EngineInner,
+    deps: &EngineDeps,
+) {
+    // 无论成败/门控如何都先复位在途标记，否则后续切换检测被永久忽略
+    inner.profile_probe_in_flight = false;
+    if !inner.monitoring
+        || is_any_pause_active(inner, deps)
+        || !deps.config_service.runtime().load().auto_switch
+    {
+        tracing::debug!("Profile 切换探测结果迟到（已停止/暂停/开关关闭），丢弃");
+        return;
+    }
+    let (gateways, ssid) = match msg {
+        ProfileProbeMessage::Completed(g, s) => (g, s),
+        ProfileProbeMessage::Failed(e) => {
+            // 无 WiFi 网卡/受限环境下每轮都会失败，保持 debug 防止刷屏
+            tracing::debug!(error = %e, "网关/SSID 探测失败");
             return;
         }
     };
@@ -1379,7 +1510,7 @@ mod tests {
     use chrono::Local;
     use chrono::TimeZone;
     use std::net::Ipv4Addr;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::bridge::BridgeSupervisor;
     use crate::config::{ConfigService, ProfileService};
@@ -1413,9 +1544,10 @@ mod tests {
     #[test]
     fn test_cooling_down_expiry_resets_failure_count() {
         let (tx, _rx) = mpsc::channel(1);
+        let (ptx, _prx) = mpsc::channel(1);
         let (ltx, _lrx) = mpsc::channel(1);
         let (clock, fake) = WallClock::fake();
-        let mut inner = EngineInner::new(tx, ltx, clock);
+        let mut inner = EngineInner::new(tx, ptx, ltx, clock);
 
         // 进入冷却期：3 次失败后置位（模拟 handle_login_result 的冷却分支）
         inner.consecutive_failures = COOLING_DOWN_THRESHOLD;
@@ -1448,9 +1580,10 @@ mod tests {
     #[test]
     fn cautious_network_failure_recovers_without_configuration_change() {
         let (probe_tx, _) = mpsc::channel(1);
+        let (pprobe_tx, _) = mpsc::channel(1);
         let (login_tx, _) = mpsc::channel(1);
         let (clock, fake) = WallClock::fake();
-        let mut inner = EngineInner::new(probe_tx, login_tx, clock);
+        let mut inner = EngineInner::new(probe_tx, pprobe_tx, login_tx, clock);
         inner.cautious_attempted_config_version = Some(7);
         let mut result = LoginResult {
             network_retryable: true,
@@ -1482,9 +1615,10 @@ mod tests {
     #[test]
     fn test_probe_deadline_due_immediately_after_clock_jump() {
         let (tx, _rx) = mpsc::channel(1);
+        let (ptx, _prx) = mpsc::channel(1);
         let (ltx, _lrx) = mpsc::channel(1);
         let (clock, fake) = WallClock::fake();
-        let mut inner = EngineInner::new(tx, ltx, clock);
+        let mut inner = EngineInner::new(tx, ptx, ltx, clock);
         // 模拟刚完成一轮探测（Offline）：自适应短周期后再探
         inner.check_period_secs = PROBE_ONLINE_BACKOFF_BASE_SECS;
         inner.next_check_at =
@@ -1523,8 +1657,9 @@ mod tests {
     #[tokio::test]
     async fn test_network_slot_limit_and_guard_release() {
         let (tx, _rx) = mpsc::channel(1);
+        let (ptx, _prx) = mpsc::channel(1);
         let (ltx, _lrx) = mpsc::channel(1);
-        let inner = EngineInner::new(tx, ltx, WallClock::system());
+        let inner = EngineInner::new(tx, ptx, ltx, WallClock::system());
 
         for _ in 0..TEST_NETWORK_MAX_IN_FLIGHT {
             assert!(try_acquire_test_network_slot(&inner), "上限内应放行");
@@ -1597,6 +1732,25 @@ mod tests {
         let result = rx.recv().await.expect("panic 后守卫应补发登录结果");
         assert_eq!(result.source, LoginSource::Auto);
         assert_eq!(result.terminal, LoginTerminal::Failed);
+    }
+
+    /// F5 同构（P2-5 口径）：Profile 切换探测任务 panic 时守卫补发失败消息
+    /// （否则 `profile_probe_in_flight` 永久卡住、切换检测从此被防重入吞掉）
+    #[tokio::test]
+    async fn test_profile_probe_return_guard_sends_on_panic() {
+        let (tx, mut rx) = mpsc::channel::<ProfileProbeMessage>(8);
+        // 模拟切换探测任务 panic：守卫在 unwind 中 drop
+        let task = tokio::spawn(async move {
+            let _guard = ProfileProbeReturnGuard::new(tx);
+            panic!("模拟 Profile 切换探测任务 panic");
+        });
+        assert!(task.await.is_err(), "任务应 panic");
+
+        // 守卫补发的失败消息必须到达（主循环据此复位在途标记）
+        assert!(
+            matches!(rx.recv().await, Some(ProfileProbeMessage::Failed(_))),
+            "panic 后守卫应补发一条失败消息"
+        );
     }
 
     #[test]
@@ -1807,15 +1961,41 @@ mod tests {
         }
     }
 
-    /// 构造完整 EngineDeps 并启动 run_loop（真实服务 + 挂起检测器）
+    /// 挂起的网关检测器：`default_gateways` 永不回返——模拟 Profile 切换探测
+    /// 子进程挂起（生产各 10s 超时），构造「切换探测在途」状态；
+    /// `gateways_called` 标记探测已被发起，供用例断言命令下发时探测确在途
+    /// （否则「Stop 即时处理」可能是探测尚未开始而 vacuously 通过）
+    struct HangingGatewayDetect {
+        gateways_called: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl NetworkDetect for HangingGatewayDetect {
+        async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
+            // 返回空而非挂起：网络探测路径不依赖本检测器挂起（由 HTTP 超时
+            // 驱动完成），本检测器只需网关探测挂起
+            Ok(vec![])
+        }
+        async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
+            self.gateways_called.store(true, Ordering::SeqCst);
+            std::future::pending().await
+        }
+        async fn current_ssid(&self) -> Result<Option<String>, NetworkError> {
+            Ok(None)
+        }
+    }
+
+    /// 构造完整 EngineDeps 并启动 run_loop（真实服务 + 可注入检测器）
     ///
     /// 监测配置：HTTP 目标指向只接受连接但不响应的本地服务，使自动探测挂在
     /// HTTP 超时；手动诊断仅等待公网探测，不额外执行本地链路诊断。
     /// `pause_all_day` 为 true 时配置全天定时暂停窗口（start == end）。
     /// `clock` 注入业务周期判定的墙钟时钟源（常规用例传 [`WallClock::system`]，
-    /// 睡眠模拟用例传伪造时钟）。同时返回装配内的事件总线供事件断言订阅。
+    /// 睡眠模拟用例传伪造时钟）。同时返回装配内的事件总线供事件断言订阅，
+    /// 以及 `ConfigService` 供用例在启动后补改设置（如开启 auto_switch）。
     #[allow(clippy::type_complexity)]
-    async fn make_engine_with_hanging_probe(
+    async fn make_engine_with_detector(
+        detector: Arc<dyn NetworkDetect>,
         pause_all_day: bool,
         clock: WallClock,
     ) -> (
@@ -1824,6 +2004,7 @@ mod tests {
         Arc<StatusManager>,
         Arc<Metrics>,
         Arc<EventBus>,
+        Arc<ConfigService>,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let (reload_tx, _reload_rx) = mpsc::channel(8);
@@ -1900,12 +2081,28 @@ mod tests {
         );
 
         let metrics = Metrics::new();
-        let detector: Arc<dyn NetworkDetect> = Arc::new(HangingDetect);
         let (status, bus, deps) =
-            build_test_deps_with_events(tmp.path(), config, detector, metrics.clone());
+            build_test_deps_with_events(tmp.path(), config.clone(), detector, metrics.clone());
         let (cmd_tx, cmd_rx) = mpsc::channel::<EngineCommand>(8);
         let engine = Arc::new(Engine::from_sender(cmd_tx.clone()));
         tokio::spawn(run_loop(engine, deps, cmd_rx, clock));
+        (tmp, cmd_tx, status, metrics, bus, config)
+    }
+
+    /// 默认装配（挂起网卡检测器）：见 [`make_engine_with_detector`]
+    #[allow(clippy::type_complexity)]
+    async fn make_engine_with_hanging_probe(
+        pause_all_day: bool,
+        clock: WallClock,
+    ) -> (
+        tempfile::TempDir,
+        mpsc::Sender<EngineCommand>,
+        Arc<StatusManager>,
+        Arc<Metrics>,
+        Arc<EventBus>,
+    ) {
+        let (tmp, cmd_tx, status, metrics, bus, _config) =
+            make_engine_with_detector(Arc::new(HangingDetect), pause_all_day, clock).await;
         (tmp, cmd_tx, status, metrics, bus)
     }
 
@@ -2164,6 +2361,59 @@ mod tests {
         );
     }
 
+    /// F5 同构（Profile 切换检测）：auto_switch 开启且网关探测子进程挂起时，
+    /// Stop 命令仍须即时处理。原实现在主循环内联 await 网关/SSID 探测
+    /// （各 10s 超时，见 `network::detect::SUBPROCESS_TIMEOUT_SECS`），挂起
+    /// 期间命令通道被阻塞——本用例的探测**永不完成**，内联实现（回归）下
+    /// Stop 永不被处理、`wait_for` 在 1.5s 虚拟预算内超时 panic。
+    #[tokio::test(start_paused = true)]
+    async fn test_profile_switch_hanging_probe_keeps_commands_responsive() {
+        let (clock, fake) = WallClock::fake();
+        let detector = Arc::new(HangingGatewayDetect {
+            gateways_called: AtomicBool::new(false),
+        });
+        let (_tmp, cmd_tx, status, _metrics, _bus, config) =
+            make_engine_with_detector(detector.clone(), false, clock).await;
+        let snap = || status.borrow();
+
+        // auto_switch 默认关闭，显式开启；切换检测周期收到下限（60s），
+        // 伪造墙钟推进一档即可到期。另显式关闭暂停窗口（PauseSettings 默认
+        // 自 2026-09-16 起为 enabled=true，夜间跑测试会落入暂停窗口、
+        // 切换检测被门控拦下——测试不得依赖墙钟时间）
+        let mut settings = config.load_settings();
+        settings.auto_switch = true;
+        settings.global.monitor.profile_check_interval = PROFILE_CHECK_INTERVAL_MIN as u32;
+        settings.global.pause.enabled = false;
+        config.save_settings(&settings).await.unwrap();
+        config.reload().await.unwrap();
+
+        cmd_tx.send(EngineCommand::Start).await.unwrap();
+        wait_for(|| snap().engine_state == EngineState::Running).await;
+
+        // 伪造墙钟前进越过切换检测到期点（last_profile_check 锚定在引擎构造
+        // 时刻），分步推进虚拟时钟唤醒主循环（周期分片睡眠 ≤60s、空转唤醒
+        // ≤5s，且 Start 的首轮探测 ~3s 完成会提前唤醒）：到期 → 发起后台
+        // 探测 → default_gateways 挂起（gateways_called 置位后永不返回）
+        fake.advance(Duration::from_secs(PROFILE_CHECK_INTERVAL_MIN + 5));
+        let mut probe_started = false;
+        for _ in 0..600 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            if detector.gateways_called.load(Ordering::SeqCst) {
+                probe_started = true;
+                break;
+            }
+        }
+        assert!(
+            probe_started,
+            "60s 虚拟时钟内 Profile 切换探测应已发起并挂起（否则 Stop 断言没有意义）"
+        );
+
+        // 探测确已挂起时下发 Stop：后台化后命令通道不受探测影响、
+        // 1.5s 虚拟预算内即时生效（与网络探测同构的判据口径）
+        cmd_tx.send(EngineCommand::Stop).await.unwrap();
+        wait_for(|| snap().engine_state == EngineState::Stopped).await;
+    }
+
     // ================================================================
     // 事件总线接入：网络状态翻转 / Profile 切换的发布断言
     // ================================================================
@@ -2217,9 +2467,10 @@ mod tests {
             build_test_deps_with_events(tmp.path(), config, detector, Metrics::new());
         let mut rx = bus.subscribe();
         let (probe_tx, _probe_rx) = mpsc::channel(1);
+        let (pprobe_tx, _pprobe_rx) = mpsc::channel(1);
         let (login_tx, _login_rx) = mpsc::channel(1);
         let (clock, _fake) = WallClock::fake();
-        let mut inner = EngineInner::new(probe_tx, login_tx, clock);
+        let mut inner = EngineInner::new(probe_tx, pprobe_tx, login_tx, clock);
         let version = deps.config_service.config_version();
 
         // 首探 Online：上一态 Unknown（既非通也非断），不发布
@@ -2328,9 +2579,10 @@ mod tests {
 
         let mut rx = bus.subscribe();
         let (probe_tx, _probe_rx) = mpsc::channel(1);
+        let (pprobe_tx, _pprobe_rx) = mpsc::channel(1);
         let (login_tx, _login_rx) = mpsc::channel(1);
         let (clock, _fake) = WallClock::fake();
-        let mut inner = EngineInner::new(probe_tx, login_tx, clock);
+        let mut inner = EngineInner::new(probe_tx, pprobe_tx, login_tx, clock);
         // 关闭监测：切换分支不触发后续探测（本用例只关注事件发布）
         inner.monitoring = false;
 
@@ -2347,5 +2599,122 @@ mod tests {
             }
             other => panic!("应为 ProfileSwitched，实际: {other:?}"),
         }
+    }
+
+    /// Profile 切换探测结果回传（功能性）：网关匹配 → 自动切换 + 发布事件
+    /// + 复位在途标记（原 `check_profile_switch` 的匹配段迁移至
+    /// `handle_profile_probe_message`）；幂等（匹配结果即当前 Profile）不切换；
+    /// 监测停止 / auto_switch 关闭的迟到结果不触发切换；失败回传不切换但同样
+    /// 复位在途标记
+    #[tokio::test]
+    async fn test_profile_probe_message_matching_and_gates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (reload_tx, _reload_rx) = mpsc::channel(8);
+        let config = ConfigService::new(tmp.path().to_path_buf(), reload_tx)
+            .await
+            .unwrap();
+        let detector: Arc<dyn NetworkDetect> = Arc::new(HangingDetect);
+        let (_status, bus, deps) =
+            build_test_deps_with_events(tmp.path(), config, detector, Metrics::new());
+
+        // 预置两个带网关匹配规则的 Profile（当前活跃为 default）
+        for (id, gateway) in [("dorm", "10.0.0.1"), ("lab", "192.168.5.1")] {
+            let mut data = deps.profile_service.get_profile("default").unwrap();
+            data.name = id.to_string();
+            data.gateway_ip = gateway.to_string();
+            deps.profile_service.create_profile(id, data).await.unwrap();
+        }
+
+        // 执行条件：auto_switch 开启（默认关闭）+ 暂停窗口显式关闭
+        // （PauseSettings 默认 23-6 点，夜间跑测试会落入暂停窗口、结果被
+        // 门控丢弃——测试不得依赖墙钟时间，口径同 make_engine_with_detector）
+        let mut settings = deps.config_service.load_settings();
+        settings.auto_switch = true;
+        settings.global.pause.enabled = false;
+        deps.config_service.save_settings(&settings).await.unwrap();
+        deps.config_service.reload().await.unwrap();
+
+        let mut rx = bus.subscribe();
+        let (probe_tx, _probe_rx) = mpsc::channel(1);
+        let (pprobe_tx, _pprobe_rx) = mpsc::channel(1);
+        let (login_tx, _login_rx) = mpsc::channel(1);
+        let (clock, _fake) = WallClock::fake();
+        let mut inner = EngineInner::new(probe_tx, pprobe_tx, login_tx, clock);
+        // 三重门之一：监测开启（切换会顺带触发一次后台立即探测，
+        // HangingDetect 下挂在 list_interfaces 上永不回传，任务随测试运行时
+        // 结束取消，无断言干扰——本用例只关注切换路径本身）
+        inner.monitoring = true;
+
+        // 网关 10.0.0.1 → 命中 dorm：自动切换 + 发布事件 + 复位在途标记
+        inner.profile_probe_in_flight = true; // 模拟探测在途（回传后必须复位）
+        handle_profile_probe_message(
+            ProfileProbeMessage::Completed(vec![Ipv4Addr::new(10, 0, 0, 1)], Some("Campus".into())),
+            &mut inner,
+            &deps,
+        )
+        .await;
+        assert!(!inner.profile_probe_in_flight, "结果回传后应复位在途标记");
+        assert_eq!(
+            deps.config_service.runtime().load().profile.id,
+            "dorm",
+            "网关匹配应自动切换到 dorm"
+        );
+        match next_event(&mut rx).await {
+            AppEvent::ProfileSwitched(summary) => {
+                assert_eq!(summary.from_profile_id.as_deref(), Some("default"));
+                assert_eq!(summary.to_profile_id, "dorm");
+            }
+            other => panic!("应为 ProfileSwitched，实际: {other:?}"),
+        }
+
+        // 幂等：再次回传同一网关（匹配结果即当前 Profile）不重复切换、不发布
+        handle_profile_probe_message(
+            ProfileProbeMessage::Completed(vec![Ipv4Addr::new(10, 0, 0, 1)], None),
+            &mut inner,
+            &deps,
+        )
+        .await;
+        assert_no_event(&mut rx).await;
+
+        // 门控：监测停止后的迟到结果不得切换（Stop 可能晚于探测发起）
+        inner.monitoring = false;
+        handle_profile_probe_message(
+            ProfileProbeMessage::Completed(vec![Ipv4Addr::new(192, 168, 5, 1)], None),
+            &mut inner,
+            &deps,
+        )
+        .await;
+        assert_eq!(
+            deps.config_service.runtime().load().profile.id,
+            "dorm",
+            "监测停止后到达的结果不得触发切换"
+        );
+        assert_no_event(&mut rx).await;
+
+        // 门控：auto_switch 关闭后的迟到结果不得切换
+        inner.monitoring = true;
+        deps.profile_service.set_auto_switch(false).await.unwrap();
+        handle_profile_probe_message(
+            ProfileProbeMessage::Completed(vec![Ipv4Addr::new(192, 168, 5, 1)], None),
+            &mut inner,
+            &deps,
+        )
+        .await;
+        assert_eq!(
+            deps.config_service.runtime().load().profile.id,
+            "dorm",
+            "auto_switch 关闭后到达的结果不得触发切换"
+        );
+
+        // 失败回传：不切换，但同样复位在途标记
+        inner.profile_probe_in_flight = true;
+        handle_profile_probe_message(
+            ProfileProbeMessage::Failed("模拟网关/SSID 探测失败".into()),
+            &mut inner,
+            &deps,
+        )
+        .await;
+        assert!(!inner.profile_probe_in_flight, "失败回传也应复位在途标记");
+        assert_no_event(&mut rx).await;
     }
 }
