@@ -41,7 +41,17 @@ const NONCE_LEN: usize = 12;
 /// Python 旧版的 `.enc_key`（见 `PasswordCrypto::read_or_create_key`），
 /// 保证新旧版本共用同一密钥、密码互通（历史遗留：两版密钥各自生成导致冲突）。
 pub fn default_key_path() -> PathBuf {
-    let mut dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut dir = dirs::home_dir().unwrap_or_else(|| {
+        // 静默回退 CWD 会让不同工作目录下启动的实例各生成各的密钥：ENC: 密文
+        // 在 A 目录加密后到 B 目录启动就互解失败（症状为全部密码"损坏"），
+        // 必须显式告警让排查能看到根因而非只看到解密失败
+        tracing::warn!(
+            "无法确定用户主目录（HOME 环境变量缺失等），加密密钥路径回退到当前\
+             工作目录；在不同工作目录启动会各生成各的密钥，此前加密的 ENC: 密文\
+             将互相无法解密"
+        );
+        PathBuf::from(".")
+    });
     dir.push(".campus_network_auth");
     dir.push(".enc_key.rs");
     dir
