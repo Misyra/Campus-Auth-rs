@@ -24,6 +24,8 @@ const { busy } = useStatus();
 const { toastOnly } = useToast();
 
 const navigation = useSettingsNavigation();
+// 实际滚动容器是 App.vue 的 .content-wrapper（页面整体滚动），挂载后经 closest 解析
+// 赋值，不是模板 ref
 const scrollContainer = ref<HTMLElement | null>(null);
 const settingsForm = ref<HTMLElement | null>(null);
 const sectionComponents: Record<string, typeof MonitorSettings> = {
@@ -82,11 +84,13 @@ function visibleSection(id: string): HTMLElement | null {
 /** 旧分类深链仍可定位；所有区域保持挂载，目录跳转不会重建输入框。 */
 async function scrollToSection(id: string): Promise<void> {
   await nextTick();
-  const container = scrollContainer.value;
   const section = visibleSection(id);
-  if (!container || !section) return;
+  if (!section) return;
   anchoredSection = id;
-  container.scrollTop += section.getBoundingClientRect().top - container.getBoundingClientRect().top - 16;
+  // 滚动容器是外层 .content-wrapper（页面整体滚动），不再手工换算 scrollTop：
+  // 落点由分区的 scroll-margin-top（list.css）与容器 scroll-padding-block（layout.css）
+  // 经 scrollIntoView 对齐，容器与内边距改动无需回这里重调常数
+  section.scrollIntoView({ block: "start" });
   navigation.setActiveSection(id);
 }
 
@@ -101,7 +105,10 @@ function selectSection(id: string): void {
 function updateActiveSection(): void {
   const container = scrollContainer.value;
   if (!container) return;
-  const top = container.getBoundingClientRect().top + 32;
+  // 判定线（56 = 40 + 16）必须高于锚定落点（content-wrapper scroll-padding 20 + 分区
+  // scroll-margin 20 = 40px）：刚锚定的分区要立即算作「正在阅读」，低于落点会在
+  // 下一次滚动事件里回跳到上一分区
+  const top = container.getBoundingClientRect().top + 56;
   let active = sections[0].id;
   for (const section of sections) {
     const element = visibleSection(section.id);
@@ -115,7 +122,7 @@ function updateActiveSection(): void {
   navigation.setActiveSection(active);
 }
 
-/** scroll 事件按帧合并：一帧最多一次目录高亮计算（监听保持 passive），卸载取消在途帧。 */
+/** scroll 事件按帧合并：一帧最多一次目录高亮计算，卸载取消在途帧。 */
 function scheduleActiveSectionUpdate(): void {
   if (scrollFrame !== null) return;
   scrollFrame = requestAnimationFrame(() => {
@@ -127,11 +134,39 @@ function scheduleActiveSectionUpdate(): void {
 /** 用户开始阅读或编辑后，让浏览器自然保持滚动，不再校准目录定位。 */
 function releaseAnchor(): void { anchoredSection = null; }
 
+// 滚动容器在 App.vue（<main class="content-wrapper">），本组件无法用模板事件绑定，
+// 挂载后经 closest 解析再挂监听：scroll 驱动目录高亮；wheel/touch/pointer/keyboard
+// 任一用户输入即解除锚定。挂在外层容器而非本页根上，列外空白区的滚轮也计入。
+// passive 与旧模板修饰符一致（都不 preventDefault），卸载成对解绑。
+function bindScrollContainer(): void {
+  const container = scrollContainer.value;
+  if (!container) return;
+  container.addEventListener("scroll", scheduleActiveSectionUpdate, { passive: true });
+  container.addEventListener("wheel", releaseAnchor, { passive: true });
+  container.addEventListener("touchstart", releaseAnchor, { passive: true });
+  container.addEventListener("pointerdown", releaseAnchor);
+  container.addEventListener("keydown", releaseAnchor);
+}
+
+function unbindScrollContainer(): void {
+  const container = scrollContainer.value;
+  if (!container) return;
+  container.removeEventListener("scroll", scheduleActiveSectionUpdate);
+  container.removeEventListener("wheel", releaseAnchor);
+  container.removeEventListener("touchstart", releaseAnchor);
+  container.removeEventListener("pointerdown", releaseAnchor);
+  container.removeEventListener("keydown", releaseAnchor);
+}
+
 watch(() => route.name, (name) => {
   void scrollToSection(activeChildId(SETTINGS_NAV_CHILDREN, String(name)) ?? "monitor");
 });
 watch(navigation.scrollRequest, (request) => { if (request) void scrollToSection(request.id); });
 onMounted(() => {
+  // 解析真正的滚动容器（App.vue 的 content-wrapper）：从本页表单向上取最近命中，
+  // 不跨组件传 ref；解析必须先于首次 scrollToSection 与监听绑定
+  scrollContainer.value = settingsForm.value?.closest<HTMLElement>(".content-wrapper") ?? null;
+  bindScrollContainer();
   cacheSectionElements();
   applySearch();
   void scrollToSection(activeChildId(SETTINGS_NAV_CHILDREN, String(route.name)) ?? "monitor");
@@ -144,6 +179,7 @@ onMounted(() => {
   if (scrollContainer.value) resizeObserver.observe(scrollContainer.value);
 });
 onBeforeUnmount(() => {
+  unbindScrollContainer();
   resizeObserver?.disconnect();
   if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
   if (searchFrame !== null) cancelAnimationFrame(searchFrame);
@@ -180,8 +216,9 @@ function handleSave() {
     <!-- 搜索输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，见
          useSettingsSearch）；本页只保留无命中的空态提示。 -->
     <p v-if="searchEmpty" class="settings-search-empty" role="status">无匹配的设置项</p>
-    <div ref="scrollContainer" class="settings-scroll" @scroll.passive="scheduleActiveSectionUpdate"
-      @wheel.passive="releaseAnchor" @touchstart.passive="releaseAnchor" @pointerdown="releaseAnchor" @keydown="releaseAnchor">
+    <!-- 仅为承载水平内缩与表单间距；滚动已交给外层 content-wrapper，
+         scroll/输入监听在 onMounted 里挂到该容器（见 bindScrollContainer） -->
+    <div class="settings-scroll">
       <div v-if="configLoadFailed" class="settings-load-failed">
         <span>配置加载失败，当前显示的是默认值。为避免覆盖服务器配置，保存已禁用。</span>
         <button type="button" class="btn btn-sm" @click="handleRetryLoad">重试</button>
