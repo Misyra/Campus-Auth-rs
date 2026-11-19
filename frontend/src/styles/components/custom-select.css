@@ -11,11 +11,7 @@
   z-index: var(--z-dropdown);
 }
 
-/* 下拉菜单自身需要高层级 */
-.custom-select-dropdown {
-  z-index: var(--z-modal);
-}
-
+/* 下拉菜单自身需要高层级（z-index 与定位/外观合并在文件后段的基础规则里） */
 .custom-select-trigger {
   width: 100%;
   padding: 12px 38px 12px 14px;
@@ -77,6 +73,8 @@
 }
 
 .custom-select-dropdown {
+  /* 下拉菜单自身需要高层级 */
+  z-index: var(--z-modal);
   position: absolute;
   top: calc(100% + 4px);
   left: 0;

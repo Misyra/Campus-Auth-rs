@@ -36,11 +36,6 @@
   border: 0;
 }
 
-.toggle input:focus-visible + .toggle-slider {
-  outline: 2px solid var(--accent-text, var(--accent));
-  outline-offset: 3px;
-}
-
 .toggle-slider {
   width: 44px;
   height: 24px;
@@ -55,6 +50,11 @@
 
 .toggle-slider:hover {
   border-color: var(--accent);
+}
+
+.toggle input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--accent-text, var(--accent));
+  outline-offset: 3px;
 }
 
 .toggle-slider::after {

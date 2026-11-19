@@ -24,7 +24,9 @@
   margin-top: var(--space-xs);
 }
 
-.empty-state .empty-actions svg {
+/* 单类即可命中（empty-actions 只在 empty-state 内使用）：压低具体度与
+   .note svg / .exit-overlay svg 同档（均为 0,1,1），消除跨节的次序约束 */
+.empty-actions svg {
   width: 14px;
   height: 14px;
   opacity: 1;
@@ -109,6 +111,17 @@
 
 /* 变体按需增长：`--danger`（阻断）与 `--flush`（去下边距）当前没有使用者，
    故不预先声明——本仓的教训正是"留着一堆没人用的平行样式"，等真有第二处需求再加。 */
+
+/* ═══ 内联加载旋转 ═══ */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
 
 /* ========== Loading State ========== */
 .loading-state {
@@ -213,17 +226,6 @@
    它服务的是"多标签页单连接、后开的把先进的顶掉"那套限制；该限制已取消
    （见 useWebSocket.ts 文件头："所有页面同时订阅同一广播通道，互不顶替"），
    横幅随之没有宿主。当前的重连提示走 .ws-reconnect-bar（下方）。 */
-
-/* ═══ 内联加载旋转 ═══ */
-.spinner {
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
-}
 
 /* ═══ WS 重连指示器 ═══ */
 .ws-reconnect-bar {

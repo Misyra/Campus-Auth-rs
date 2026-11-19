@@ -22,6 +22,13 @@
   text-decoration: none;
 }
 
+/* :disabled 前置于 hover：no-descending-specificity 要求具体度升序；
+   两态互斥（hover 规则显式排除 :disabled）且无共享声明，换序不影响级联 */
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: var(--border-hover);
@@ -30,11 +37,6 @@
 
 .btn:active:not(:disabled) {
   transform: scale(0.98);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .btn-primary {

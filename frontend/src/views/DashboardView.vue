@@ -642,11 +642,6 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
   flex-direction: column-reverse;
 }
 
-.dash-dock.expand-down .dash-dock-actions {
-  transform: translateY(-10px) scale(0.94);
-  transform-origin: calc(100% - 24px) 0;
-}
-
 /* 展开条：与触发球同宽的连体胶囊，动作钮以细分隔线分行（不是散浮的独立按钮）；
    默认隐藏（pointer-events 与 tab 焦点双保险），open 时自球体方向展开缩放上浮，
    transform 原点取右下 = 球体所在角。注意不能 overflow:hidden——说明标签定位在
@@ -663,6 +658,12 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
   transform: translateY(10px) scale(0.94);
   transform-origin: calc(100% - 24px) 100%;
   transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+
+/* 向下展开的位移/原点覆盖排在基础规则之后（no-descending-specificity） */
+.dash-dock.expand-down .dash-dock-actions {
+  transform: translateY(-10px) scale(0.94);
+  transform-origin: calc(100% - 24px) 0;
 }
 
 .dash-dock.open .dash-dock-actions {
@@ -706,13 +707,13 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
   height: 20px;
 }
 
-.dash-dock-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
 .dash-dock-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.dash-dock-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
 }
 
 /* 说明标签：悬停 / 键盘聚焦时在按钮左侧浮出（黑底白字在深色主题下不可读，

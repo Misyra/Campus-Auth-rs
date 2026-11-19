@@ -537,7 +537,7 @@ onMounted(async () => {
 .http-start-list p { margin: 2px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .http-repo-link { display: inline-flex; align-items: center; gap: 5px; width: fit-content; margin-top: 8px; padding: 5px 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
 .http-repo-link:hover { color: var(--accent); text-decoration: underline; }
-.http-repo-link:focus-visible, .http-ref-functions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.http-repo-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .http-optional-info > summary, .http-writing-help > summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .http-optional-info > summary { padding: 3px 0 12px; }
 .http-optional-info > summary span { margin-left: 8px; font-size: 12px; }
@@ -545,12 +545,12 @@ onMounted(async () => {
 /* 折叠卡展开后首段贴住 summary：只声明 --card-body-pt（消费点在
    styles/pages/tasks.css 的 .tasks-page .card-body），不改写共享类的 padding 值 */
 .http-writing-help > .card-body { --card-body-pt: 0; }
-.http-optional-info summary:focus-visible, .http-writing-help summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .http-ref-functions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .http-ref-functions summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; font-weight: 650; list-style: none; }
 .http-ref-functions summary::-webkit-details-marker { display: none; }
 .http-ref-functions summary span { margin-left: auto; color: var(--text-secondary); font-weight: 400; }
 .http-ref-functions[open] summary svg { transform: rotate(180deg); }
 .http-ref-functions .chip-row { margin-top: 12px; }
+.http-optional-info summary:focus-visible, .http-writing-help summary:focus-visible, .http-ref-functions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 </style>

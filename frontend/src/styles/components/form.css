@@ -30,25 +30,6 @@
   color-scheme: inherit;
 }
 
-.form-group input:hover:not(:disabled),
-.form-group select:hover:not(:disabled),
-.form-group textarea:hover:not(:disabled) {
-  background: var(--bg-glass-heavy);
-}
-
-.form-group input:focus-visible,
-.form-group select:focus-visible,
-.form-group textarea:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
-}
-
-.form-group :is(input, select, textarea):disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
 /* ========== Custom Select Dropdown ==========
  * 原生 select 箭头：默认 slate 灰（两主题可读）；聚焦时跟随强调色（URL-encoded accent 静态值 + 浅色覆盖），
  * 自定义强调色场景箭头不变色为已知取舍——需跟随请换 CustomSelect 组件。 */
@@ -61,6 +42,26 @@
   background-size: 12px;
 }
 
+.form-group textarea {
+  min-height: 140px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+}
+
+.form-group :is(input, select, textarea):disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.form-group input:focus-visible,
+.form-group select:focus-visible,
+.form-group textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
+}
+
 /* 聚焦箭头：内联 SVG 无法引用 CSS 变量，故两处色值需与默认主题色（单色黑白）保持一致 —
    深色主题用白、浅色主题用黑。若用户改用彩色主题色，箭头仍是黑白（可接受：它只是聚焦提示，
    而 data: URL 无法随变量变化；改彩色需 JS 生成或引入 mask，不属本改动范围）。 */
@@ -68,17 +69,13 @@
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3Epolyline points='6 9 12 15 18'%3E/svg%3E");
 }
 
+/* 悬停态（0,3,1）按 no-descending-specificity 排在裸控件与 focus 规则之后；
+   border-color 悬停描边原为重复选择器的独立规则，此处合并进同一条 */
+.form-group input:hover:not(:disabled),
 .form-group select:hover:not(:disabled),
-.form-group textarea:hover:not(:disabled),
-.form-group input:hover:not(:disabled) {
+.form-group textarea:hover:not(:disabled) {
+  background: var(--bg-glass-heavy);
   border-color: var(--border-hover);
-}
-
-.form-group textarea {
-  min-height: 140px;
-  resize: vertical;
-  font-family: var(--font-mono);
-  line-height: 1.5;
 }
 
 .form-row {

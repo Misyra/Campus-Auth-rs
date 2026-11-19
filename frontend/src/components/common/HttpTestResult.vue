@@ -90,7 +90,6 @@ defineProps<{
 .http-test-produced-vars code { padding: 2px 5px; border-radius: 5px; background: rgba(var(--slate-rgb), 0.12); color: var(--text-primary); }
 .http-test-step { margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .http-test-step summary { display: flex; flex-wrap: wrap; gap: 8px; cursor: pointer; }
-.http-test-step summary span { color: var(--text-muted); font-size: var(--text-xs); }
 .http-test-step dl { overflow-wrap: anywhere; }
 .http-test-result {
   margin-top: var(--space-md);
@@ -150,6 +149,12 @@ defineProps<{
 .http-test-result-title span {
   color: var(--text-muted);
   font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+/* 上下文 span 规则排在裸 span 之后（no-descending-specificity）：互不重叠的子树，纯次序约束 */
+.http-test-step summary span {
+  color: var(--text-muted);
   font-size: var(--text-xs);
 }
 
@@ -216,6 +221,17 @@ defineProps<{
   font-size: var(--text-xs);
 }
 
+/* 「下一步该怎么办」备注：code 选择器（0,1,1）须排在 dd code（0,2,1）之前 */
+.http-test-detail-note {
+  margin: var(--space-sm) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.http-test-detail-note code {
+  font-family: var(--font-mono);
+}
+
 .http-test-detail dd {
   min-width: 0;
   margin: 0;
@@ -230,16 +246,6 @@ defineProps<{
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-}
-
-.http-test-detail-note {
-  margin: var(--space-sm) 0 0;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-
-.http-test-detail-note code {
-  font-family: var(--font-mono);
 }
 
 @media (max-width: 768px) {

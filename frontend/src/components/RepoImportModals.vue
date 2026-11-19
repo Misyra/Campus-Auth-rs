@@ -355,7 +355,6 @@ watch(
 /* 默认只留一行提示，详细说明按需展开，给任务列表留出空间。 */
 .repo-ready-hint { margin-bottom: 12px; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.6; }
 .repo-ready-hint summary { cursor: pointer; }
-.repo-ready-hint summary span { margin-left: 8px; color: var(--accent-text, var(--accent)); white-space: nowrap; }
 .repo-ready-hint summary:focus-visible { outline: 2px solid var(--accent-text, var(--accent)); outline-offset: 3px; border-radius: var(--radius-xs); }
 .repo-ready-hint p { margin: 8px 0 0; }
 .repo-kind-badge { display: inline-block; flex: none; padding: 2px 7px; border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text-secondary); background: var(--bg-hover); font-size: var(--text-xs); font-weight: 500; line-height: 1.5; }
@@ -444,6 +443,8 @@ watch(
 .repo-confirm-summary > div { flex: 1; min-width: 0; }
 .repo-confirm-summary strong, .repo-confirm-summary span { display: block; overflow-wrap: anywhere; }
 .repo-confirm-summary span { margin-top: 4px; color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.6; }
+/* 上下文 span 规则统一排在各裸 span 之后（no-descending-specificity）：互不重叠的子树，纯次序约束 */
+.repo-ready-hint summary span { margin-left: 8px; color: var(--accent-text, var(--accent)); white-space: nowrap; }
 /* 空态复用全局 .empty-state--dashed（结构见 misc.css）：虚线框表达"待填充"，
    并为「直接查看仓库」留出可点区域。此处只复位整体透明度与收敛文字宽度，
    不改通用外观——.empty-state 默认 opacity:0.8 会把里面的按钮一起做旧，

@@ -59,7 +59,7 @@
   .nav-item span { display: inline; font-size: var(--text-xs); }
   .nav-item.nav-task-mobile,
   .nav-item.nav-settings-mobile { display: flex; }
-  .nav-item { flex-direction: column; gap: 5px; text-align: center; min-height: 58px; }
+  .nav-item { flex-direction: column; justify-content: center; gap: 5px; text-align: center; min-height: 58px; padding: 8px 2px 5px; }
   .nav-item.active::before { top: 3px; bottom: auto; left: 50%; width: 16px; height: 2px; transform: translateX(-50%); }
   .btn.mobile-quit { display: inline-flex; }
 
@@ -73,11 +73,6 @@
 
   .status-badge .status-dot {
     font-size: var(--text-md);
-  }
-
-  .nav-item {
-    justify-content: center;
-    padding: 8px 2px 5px;
   }
 
   /* 底栏只保留一级导航，任务类别在页内导航中切换。 */

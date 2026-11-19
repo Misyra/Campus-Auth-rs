@@ -8,17 +8,17 @@
 .appearance-card-icon { width: 19px; height: 19px; color: var(--accent-text); flex-shrink: 0; }
 .appearance-card-header h3 { font-size: var(--text-lg); font-weight: 600; margin: 0; color: var(--text-primary); flex: 1; }
 .appearance-reset-btn { background: transparent; border: none; color: var(--text-secondary); font-size: var(--text-sm); padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap; }
-.appearance-reset-btn:hover:not(:disabled) { color: var(--accent-text); background: rgba(var(--accent-rgb), .08); }
 .appearance-reset-btn:disabled { opacity: .4; cursor: default; }
+.appearance-reset-btn:hover:not(:disabled) { color: var(--accent-text); background: rgba(var(--accent-rgb), .08); }
 .appearance-card-body { padding: 20px; }
 .appearance-controls { display: flex; flex-direction: column; gap: 18px; }
 .appearance-field { display: flex; flex-direction: column; gap: 9px; min-width: 0; position: relative; }
 .appearance-field-label { font-size: var(--text-md); color: var(--text-secondary); font-weight: 600; }
 .appearance-segmented button { flex: 1; }
 .appearance-colors { display: grid; grid-template-columns: repeat(7, minmax(0, 32px)); align-items: center; gap: 6px; width: 100%; max-width: 260px; }
-.appearance-colors > .appearance-color-btn { width: 100%; height: auto; aspect-ratio: 1; }
 .appearance-extra-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
 .appearance-color-btn { width: 32px; height: 32px; border-radius: 50%; border: 1px solid rgba(var(--slate-rgb), .25); display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer; position: relative; transition: box-shadow var(--dur-base), transform var(--dur-base); }
+.appearance-colors > .appearance-color-btn { width: 100%; height: auto; aspect-ratio: 1; }
 .appearance-color-btn:hover { transform: scale(1.08); }
 .appearance-color-btn.active { outline: 2px solid var(--text-primary); outline-offset: 3px; }
 .appearance-color-btn.custom::after { content: ''; position: absolute; bottom: -1px; right: -1px; width: 7px; height: 7px; border-radius: 50%; background: var(--text-primary); border: 1px solid var(--bg-card); }

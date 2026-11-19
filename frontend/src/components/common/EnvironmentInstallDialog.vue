@@ -427,15 +427,15 @@ onBeforeUnmount(stopPoll);
   cursor: pointer;
   text-align: left;
 }
+.mirror-opt:disabled {
+  cursor: default;
+}
 .mirror-opt:hover:not(:disabled) {
   border-color: var(--primary);
 }
 .mirror-opt.selected {
   border-color: var(--primary);
   box-shadow: 0 0 0 1px var(--primary);
-}
-.mirror-opt:disabled {
-  cursor: default;
 }
 .mirror-opt-name {
   font-size: var(--text-sm);

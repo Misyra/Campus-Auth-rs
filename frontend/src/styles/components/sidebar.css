@@ -86,8 +86,8 @@
   transition: transform var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
 }
 
-.nav-item--group:hover .nav-caret,
-.nav-group--open .nav-caret {
+.nav-group--open .nav-caret,
+.nav-item--group:hover .nav-caret {
   color: var(--text-secondary);
 }
 

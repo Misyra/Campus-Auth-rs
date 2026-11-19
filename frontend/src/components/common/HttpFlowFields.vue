@@ -384,6 +384,8 @@ function setResultStep(event: Event): void {
 
 <style scoped>
 .flow-editor { display: flex; flex-direction: column; gap: 22px; }
+.flow-connection { border: 0; }
+.flow-connection > summary { padding-top: 0; }
 .flow-editor > .flow-connection { max-width: 1280px; }
 .flow-workspace { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 24px; }
 .flow-sequence { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
@@ -401,6 +403,9 @@ function setResultStep(event: Event): void {
 .flow-step:not(.flow-step--open) .flow-step-head { border-radius: 11px; }
 .flow-step-toggle { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 16px; align-self: stretch; padding: 16px 15px 16px 18px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .flow-step-toggle:hover { background: rgba(var(--accent-rgb), .045); }
+.flow-action { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.flow-action :deep(svg) { width: 17px; height: 17px; }
+.flow-action:disabled { opacity: .35; cursor: not-allowed; }
 .flow-step-toggle:focus-visible, .flow-action:focus-visible, .flow-collapse-all:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .flow-step-number { display: inline-flex; flex: 0 0 38px; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 11px; color: var(--on-accent); background: var(--accent); font-size: 15px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .flow-step-copy { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; gap: 6px; }
@@ -412,10 +417,7 @@ function setResultStep(event: Event): void {
 .flow-step-chevron { flex: none; color: var(--text-secondary); transition: transform .16s ease; }
 .flow-step-chevron--open { transform: rotate(180deg); }
 .flow-step-actions { display: flex; flex: none; align-items: center; gap: 3px; padding: 0 13px 0 6px; }
-.flow-action { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
-.flow-action :deep(svg) { width: 17px; height: 17px; }
 .flow-action:hover:not(:disabled) { color: var(--text-primary); background: rgba(var(--accent-rgb), .1); }
-.flow-action:disabled { opacity: .35; cursor: not-allowed; }
 .flow-action--danger:hover:not(:disabled) { color: var(--danger); background: rgba(239, 68, 68, .09); }
 .flow-action-divider { width: 1px; height: 18px; margin: 0 4px; background: var(--border); }
 .flow-step-body { display: flex; flex-direction: column; gap: 14px; padding: 20px 24px 24px; border-top: 1px solid var(--border); }
@@ -435,15 +437,15 @@ function setResultStep(event: Event): void {
 .flow-result > .form-row, .flow-result > .form-group { max-width: 940px; }
 .flow-result--side { position: static; padding: 20px; }
 .flow-result--side .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.flow-step-body .form-group { margin-bottom: 0; }
 .flow-result--side > .form-group:last-child { margin-bottom: 0; }
 .flow-intro, .flow-help { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .flow-intro { max-width: 75ch; margin-bottom: 4px; }
-.flow-step-body .form-group { margin-bottom: 0; }
 .flow-options { border-top: 1px solid var(--border); }
 .flow-options > summary { padding: 15px 0; cursor: pointer; font-size: 13px; font-weight: 650; }
 .flow-options > summary span { margin-left: 8px; color: var(--text-secondary); font-size: 12px; font-weight: 400; }
-.flow-connection { border: 0; }
-.flow-connection > summary { padding-top: 0; }
+.flow-other-values summary { font-size: 12px; cursor: pointer; color: var(--text-secondary); }
+.flow-other-values[open] { display: flex; flex-direction: column; gap: 8px; }
 .flow-advanced[open] { display: flex; flex-direction: column; gap: 14px; }
 .flow-advanced[open] > summary { padding-bottom: 0; }
 .flow-failure .form-group:last-child { margin-bottom: 0; }
@@ -453,8 +455,6 @@ function setResultStep(event: Event): void {
 .flow-value-button { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 12px; cursor: pointer; }
 .flow-value-button:hover { border-color: var(--accent); }
 .flow-value-button code { font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.flow-other-values summary { font-size: 12px; cursor: pointer; color: var(--text-secondary); }
-.flow-other-values[open] { display: flex; flex-direction: column; gap: 8px; }
 .flow-options > summary:focus-visible, .flow-other-values summary:focus-visible, .flow-value-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .flow-script { font-family: var(--font-mono); }
 .flow-script-hint code { font-family: var(--font-mono); color: var(--text-primary); }

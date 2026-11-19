@@ -124,13 +124,19 @@
   text-align: center;
 }
 
-.docs-hint a {
+/* 向导内的强调色链接（docs-hint / wizard-nomatch-docs 共用一套形态） */
+.docs-hint a,
+.wizard-nomatch-docs a {
   color: var(--accent-text, var(--accent));
-  font-weight: 500;
   text-decoration: none;
 }
 
-.docs-hint a:hover {
+.docs-hint a {
+  font-weight: 500;
+}
+
+.docs-hint a:hover,
+.wizard-nomatch-docs a:hover {
   text-decoration: underline;
 }
 
@@ -331,15 +337,6 @@
   margin: 0;
   font-size: var(--text-sm);
   color: var(--text-secondary);
-}
-
-.wizard-nomatch-docs a {
-  color: var(--accent-text, var(--accent));
-  text-decoration: none;
-}
-
-.wizard-nomatch-docs a:hover {
-  text-decoration: underline;
 }
 
 .wizard-nomatch > .btn {
