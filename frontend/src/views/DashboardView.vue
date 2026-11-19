@@ -7,6 +7,7 @@ import { useEnvironment } from "@/composables/useEnvironment";
 import { useProfiles } from "@/composables/useProfiles";
 import { useLogs } from "@/composables/useLogs";
 import { useUi } from "@/composables/useUi";
+import { useAppearance } from "@/composables/useAppearance";
 import { throttleRaf } from "@/utils/debounce";
 import { LOG_SOURCE_LABELS } from "@/utils/constants";
 import { channelNeedsRuntimeEnvironment } from "@/utils/loginChannel";
@@ -55,7 +56,169 @@ async function initEnvNow() {
 // FE2-8：延迟复查句柄须可清理——组件卸载后触发的 refreshEnv 虽是幂等 GET，
 // 但仍会更新已卸载页面关联的单例状态，提前离开时取消
 let envRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ---- 悬浮工具条：默认收起为闪电球，点开展开动作列（speed dial）----
+const dockOpen = ref(false);
+const dockEl = ref<HTMLElement | null>(null);
+
+// ---- 工具条位置：自由拖动 + localStorage 记忆 ----
+// 存 right/bottom 偏移而非 left/top：换视口尺寸后仍保持「贴哪一角」的语义；
+// 渲染前按当前视口夹取，旧的大屏坐标挪到小屏不会越界。
+const DOCK_POS_KEY = "dash-dock-pos";
+const DEFAULT_DOCK_POS = { right: 16, bottom: 24 };
+/** 展开条需要的安全高度（6 钮 × 48px + 边框分隔线 + 间距余量） */
+const DOCK_BAR_SPACE = 308;
+
+const dockPos = ref({ ...DEFAULT_DOCK_POS });
+const viewport = ref({ w: window.innerWidth, h: window.innerHeight });
+
+const clampedDockPos = computed(() => ({
+  right: Math.min(Math.max(dockPos.value.right, 0), Math.max(0, viewport.value.w - 50)),
+  bottom: Math.min(Math.max(dockPos.value.bottom, 0), Math.max(0, viewport.value.h - 48)),
+}));
+
+// 球体上方 vs 下方的可用空间：上方够放整条展开条就向上弹；不够时选空间更大的一侧
+// （都放不下也选大的，尽量少遮挡）
+const expandUp = computed(() => {
+  const ballTop = viewport.value.h - clampedDockPos.value.bottom - 48;
+  const upSpace = ballTop;
+  const downSpace = viewport.value.h - ballTop - 48;
+  return upSpace >= DOCK_BAR_SPACE || upSpace >= downSpace;
+});
+
+const dockStyle = computed(() => {
+  const style = { right: `${clampedDockPos.value.right}px` };
+  if (expandUp.value) {
+    // 向上展开：bottom 锚定球底边，展开条在容器内向球上方生长，球不动
+    return { ...style, bottom: `${clampedDockPos.value.bottom}px` };
+  }
+  // 向下展开：top 锚定球顶边。容器高度随展开条（含收起态的占位）变化，
+  // 若仍用 bottom 锚定，球会被整段展开条顶高约 300px 甚至顶出视口——
+  // 「拖上去就消失、只有刷新闪一下」即此成因
+  return { ...style, top: `${viewport.value.h - clampedDockPos.value.bottom - 48}px` };
+});
+
+function loadDockPos(): void {
+  try {
+    const raw = localStorage.getItem(DOCK_POS_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as { right?: number; bottom?: number };
+    if (Number.isFinite(parsed.right) && Number.isFinite(parsed.bottom)) {
+      dockPos.value = { right: parsed.right as number, bottom: parsed.bottom as number };
+    }
+  } catch {
+    // 坏数据静默回退默认位置
+  }
+}
+
+function saveDockPos(): void {
+  try {
+    localStorage.setItem(DOCK_POS_KEY, JSON.stringify(clampedDockPos.value));
+  } catch {
+    // 存储不可用则不记忆，本次会话内仍可拖动
+  }
+}
+loadDockPos();
+
+// 拖动：pointermove 累计位移 ≥5px 才算拖动（否则视为点击开合）；拖完抑制紧随的
+// click，防止「拖完顺手开合」；setPointerCapture 让指针移出按钮也持续收到事件
+let dragState: { startX: number; startY: number; baseRight: number; baseBottom: number; moved: boolean } | null = null;
+let suppressToggleClick = false;
+const dockDragging = ref(false);
+
+function onDockTogglePointerDown(e: PointerEvent): void {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  suppressToggleClick = false;
+  dragState = {
+    startX: e.clientX,
+    startY: e.clientY,
+    baseRight: clampedDockPos.value.right,
+    baseBottom: clampedDockPos.value.bottom,
+    moved: false,
+  };
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+}
+
+function onDockTogglePointerMove(e: PointerEvent): void {
+  if (!dragState) return;
+  if (!dragState.moved && Math.abs(e.clientX - dragState.startX) + Math.abs(e.clientY - dragState.startY) < 5) return;
+  dragState.moved = true;
+  dockDragging.value = true;
+  dockPos.value = {
+    right: dragState.baseRight + (dragState.startX - e.clientX),
+    bottom: dragState.baseBottom + (dragState.startY - e.clientY),
+  };
+}
+
+function onDockTogglePointerUp(): void {
+  if (dragState?.moved) {
+    suppressToggleClick = true;
+    saveDockPos();
+  }
+  dragState = null;
+  dockDragging.value = false;
+}
+
+function onDockToggleClick(): void {
+  if (suppressToggleClick) {
+    suppressToggleClick = false;
+    return;
+  }
+  dockOpen.value = !dockOpen.value;
+}
+
+function onDockResize(): void {
+  viewport.value = { w: window.innerWidth, h: window.innerHeight };
+}
+
+/** 收起并执行动作：点动作即执行，不必再手动收起 */
+function runDockAction(action: () => void): void {
+  dockOpen.value = false;
+  action();
+}
+
+// 外部点击 / Esc 收起：监听常驻（开销可忽略），展开态才生效；
+// 触发球与动作列都在 dockEl 内，contains 判定不误收
+function onDocPointerDown(e: PointerEvent): void {
+  if (dockOpen.value && dockEl.value && !dockEl.value.contains(e.target as Node)) {
+    dockOpen.value = false;
+  }
+}
+
+function onDocKeydown(e: KeyboardEvent): void {
+  if (e.key === "Escape" && dockOpen.value) {
+    dockOpen.value = false;
+  }
+}
+
+// ---- 悬浮工具条动作：开始诊断 / 刷新 / 主题切换 ----
+// 诊断报告归面板自身状态，必须经面板实例触发（直接调 API 面板不展示结果）；
+// running 防连点守卫在面板的 startDiagnostics 内，这里不做禁用绑定。
+const diagPanelRef = ref<InstanceType<typeof NetworkDiagnosticsPanel> | null>(null);
+
+function runDiagnostics(): void {
+  void diagPanelRef.value?.startDiagnostics();
+}
+
+/** 一键刷新看板数据：状态快照 + 登录历史 + 实时日志（均为幂等 GET） */
+function refreshDashboard(): void {
+  void s.fetchStatus();
+  void ui.fetchLoginHistory(true);
+  void logs.fetchLogs();
+}
+
+// 与顶栏主题钮同语义：快捷切换写显式明/暗，「跟随系统」仍在外观设置页选择
+const { appearance, getEffectiveTheme } = useAppearance();
+const isDarkTheme = computed(() => getEffectiveTheme() === "dark");
+
+function toggleTheme(): void {
+  appearance.theme = isDarkTheme.value ? "light" : "dark";
+}
+
 onMounted(() => {
+  document.addEventListener("pointerdown", onDocPointerDown);
+  document.addEventListener("keydown", onDocKeydown);
+  window.addEventListener("resize", onDockResize);
   void ui.fetchLoginHistory();
   void logs.fetchLogs();
   void refreshEnv().then(() => {
@@ -69,6 +232,9 @@ onMounted(() => {
   });
 });
 onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocPointerDown);
+  document.removeEventListener("keydown", onDocKeydown);
+  window.removeEventListener("resize", onDockResize);
   if (envRetryTimer != null) clearTimeout(envRetryTimer);
 });
 
@@ -180,8 +346,6 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
       </div>
       <div class="hero-actions">
         <button v-if="s.busy.login" class="btn btn-danger" @click="ui.cancelLogin()" title="取消正在执行的登录"><IconApp name="close" />取消登录</button>
-        <button v-else class="btn btn-secondary" @click="ui.manualLogin()" :disabled="s.busy.action || s.busy.loginCooldown" title="立即执行一次登录认证"><IconApp name="log-in" />手动登录</button>
-        <button class="btn btn-secondary" @click="ui.testNetwork()" :disabled="s.busy.action" title="立即检测当前网络连接"><IconApp name="wifi" />网络测试</button>
         <button
           class="btn"
           :class="s.status.monitoring ? 'btn-secondary' : 'btn-primary'"
@@ -262,54 +426,8 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
       </div>
     </div>
 
-    <!-- 一键网络诊断：五项并发探测 + 结构化结论（轻量内嵌面板，不单独建页） -->
-    <NetworkDiagnosticsPanel />
-
-    <!-- 登录历史 -->
-    <div class="card history-card">
-      <div class="card-header">
-        <h2>登录历史</h2>
-        <div class="history-actions">
-          <button class="btn btn-sm btn-icon-only" @click="fetchLoginHistory(true)" title="刷新" aria-label="刷新登录历史">
-            <IconApp name="refresh" />
-          </button>
-          <button class="btn btn-sm btn-icon-only" @click="clearLoginHistory" title="清空" aria-label="清空登录历史" :disabled="!loginHistory.length">
-            <IconApp name="trash" />
-          </button>
-        </div>
-      </div>
-          <div class="card-body">
-            <div v-if="!loginHistory.length" class="empty-state">
-              <IconApp name="clock" />
-              <span>暂无登录记录</span>
-              <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
-              <div class="empty-actions">
-                <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'profiles' })">去配置账号</button>
-              </div>
-            </div>
-            <div v-else class="history-list">
-              <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">
-                <div class="history-status">
-                  <IconApp name="check" v-if="item.result === 'success'" />
-                  <IconApp name="x-circle" v-else />
-                </div>
-                <div class="history-info">
-                  <div class="history-row">
-                    <span class="history-time">{{ formatTimestamp(item.timestamp) }}</span>
-                    <span class="history-duration">{{ item.duration_secs.toFixed(1) }}s</span>
-                  </div>
-                  <div class="history-row history-row--meta">
-                    <span class="history-profile">{{ item.profile_id || '默认方案' }} · {{ historySourceLabels[item.source] || item.source }}</span>
-                    <span v-if="item.channel" class="badge badge--sm" :class="{ 'badge-browser': item.channel === 'browser', 'badge--info': item.channel === 'http', 'badge-script': item.channel === 'script' }">{{ historyChannelLabels[item.channel] }}</span>
-                  </div>
-                  <span v-if="item.result !== 'success'" class="history-error">{{ item.message }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-    <!-- 实时日志 -->
+    <!-- 实时日志：用户指定置于诊断/历史之上——日志是排障时最先看的信息流，
+         双栏（诊断+历史）降到下方 -->
     <div class="card log-card">
       <div class="card-header">
         <h2>实时日志</h2>
@@ -360,5 +478,308 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
           </div>
         </div>
       </div>
+
+    <!-- 一键网络诊断 + 登录历史：左右双栏并排（两卡内容高度相近，逐张全宽浪费
+         一倍纵向空间）；≤1100px 折回单列（见 dashboard.css 的 .dashboard-split） -->
+    <div class="dashboard-split">
+      <NetworkDiagnosticsPanel ref="diagPanelRef" />
+
+      <!-- 登录历史 -->
+      <div class="card history-card">
+      <div class="card-header">
+        <h2>登录历史</h2>
+        <div class="history-actions">
+          <button class="btn btn-sm btn-icon-only" @click="fetchLoginHistory(true)" title="刷新" aria-label="刷新登录历史">
+            <IconApp name="refresh" />
+          </button>
+          <button class="btn btn-sm btn-icon-only" @click="clearLoginHistory" title="清空" aria-label="清空登录历史" :disabled="!loginHistory.length">
+            <IconApp name="trash" />
+          </button>
+        </div>
+      </div>
+          <div class="card-body">
+            <div v-if="!loginHistory.length" class="empty-state">
+              <IconApp name="clock" />
+              <span>暂无登录记录</span>
+              <span class="empty-desc">配置账号后，可立即尝试一次登录</span>
+              <div class="empty-actions">
+                <button class="btn btn-sm btn-secondary" type="button" @click="router.push({ name: 'profiles' })">去配置账号</button>
+              </div>
+            </div>
+            <div v-else class="history-list">
+              <div v-for="(item, idx) in loginHistory" :key="idx" class="history-item" :class="item.result === 'success' ? 'success' : 'failed'">
+                <div class="history-status">
+                  <IconApp name="check" v-if="item.result === 'success'" />
+                  <IconApp name="x-circle" v-else />
+                </div>
+                <div class="history-info">
+                  <div class="history-row">
+                    <span class="history-time">{{ formatTimestamp(item.timestamp) }}</span>
+                    <span class="history-duration">{{ item.duration_secs.toFixed(1) }}s</span>
+                  </div>
+                  <div class="history-row history-row--meta">
+                    <span class="history-profile">{{ item.profile_id || '默认方案' }} · {{ historySourceLabels[item.source] || item.source }}</span>
+                    <span v-if="item.channel" class="badge badge--sm" :class="{ 'badge-browser': item.channel === 'browser', 'badge--info': item.channel === 'http', 'badge-script': item.channel === 'script' }">{{ historyChannelLabels[item.channel] }}</span>
+                  </div>
+                  <span v-if="item.result !== 'success'" class="history-error">{{ item.message }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- /.dashboard-split -->
+
+    <!-- 悬浮工具条（speed dial）：默认收起为主色闪电球，点开自球体上方展开一条
+         连体展开条（48px 动作钮与球同尺寸、细分隔线分行，悬停左侧浮出说明），
+         点动作直接执行并收起；外部点击 / Esc 收起。fixed 定位不随内容滚动。
+         球体可自由拖动重定位（localStorage 记忆，右/下偏移锚定），拖到顶部区域
+         展开条自动改为向下弹出。 -->
+    <div
+      ref="dockEl"
+      class="dash-dock"
+      :class="{ open: dockOpen, 'expand-down': !expandUp, dragging: dockDragging }"
+      :style="dockStyle"
+    >
+      <div class="dash-dock-actions" role="toolbar" aria-label="快捷操作" :aria-hidden="!dockOpen">
+        <button
+          type="button"
+          class="dash-dock-btn"
+          :data-tip="s.status.monitoring ? '停止监测' : '开始监测'"
+          :aria-label="s.status.monitoring ? '停止监测' : '开始监测'"
+          :tabindex="dockOpen ? 0 : -1"
+          :disabled="s.busy.monitor"
+          @click="runDockAction(() => void ui.toggleMonitor())"
+        >
+          <IconApp :name="s.status.monitoring ? 'pause' : 'play'" />
+        </button>
+        <button
+          type="button"
+          class="dash-dock-btn"
+          data-tip="手动登录"
+          aria-label="手动登录"
+          :tabindex="dockOpen ? 0 : -1"
+          :disabled="s.busy.action || s.busy.loginCooldown || s.busy.login"
+          @click="runDockAction(() => void ui.manualLogin())"
+        >
+          <IconApp name="log-in" />
+        </button>
+        <button
+          type="button"
+          class="dash-dock-btn"
+          data-tip="网络测试"
+          aria-label="网络测试"
+          :tabindex="dockOpen ? 0 : -1"
+          :disabled="s.busy.action"
+          @click="runDockAction(() => void ui.testNetwork())"
+        >
+          <IconApp name="wifi" />
+        </button>
+        <button
+          type="button"
+          class="dash-dock-btn"
+          data-tip="开始诊断"
+          aria-label="开始诊断"
+          :tabindex="dockOpen ? 0 : -1"
+          @click="runDockAction(() => runDiagnostics())"
+        >
+          <IconApp name="activity" />
+        </button>
+        <button
+          type="button"
+          class="dash-dock-btn"
+          data-tip="刷新数据"
+          aria-label="刷新数据"
+          :tabindex="dockOpen ? 0 : -1"
+          @click="runDockAction(() => refreshDashboard())"
+        >
+          <IconApp name="refresh" />
+        </button>
+        <button
+          type="button"
+          class="dash-dock-btn"
+          :data-tip="isDarkTheme ? '切换浅色主题' : '切换深色主题'"
+          :aria-label="isDarkTheme ? '切换浅色主题' : '切换深色主题'"
+          :tabindex="dockOpen ? 0 : -1"
+          @click="runDockAction(() => toggleTheme())"
+        >
+          <IconApp :name="isDarkTheme ? 'sun' : 'moon'" />
+        </button>
+      </div>
+      <button
+        type="button"
+        class="dash-dock-toggle"
+        data-tip="快捷操作"
+        :aria-expanded="dockOpen"
+        aria-label="快捷操作：手动登录、网络测试"
+        @pointerdown="onDockTogglePointerDown"
+        @pointermove="onDockTogglePointerMove"
+        @pointerup="onDockTogglePointerUp"
+        @pointercancel="onDockTogglePointerUp"
+        @click="onDockToggleClick"
+      >
+        <IconApp :name="dockOpen ? 'close' : 'zap'" />
+      </button>
+    </div>
   </div>
 </template>
+
+<style scoped>
+/* 悬浮工具条容器：竖排右对齐，展开条在球体上方展开。
+   right/bottom 由内联样式提供（拖动 + localStorage 记忆），此处不写死 */
+.dash-dock {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  z-index: var(--z-dropdown);
+  user-select: none;
+}
+
+/* 球体被拖到顶部区域时改为向下展开：column-reverse 让球位居条上方 */
+.dash-dock.expand-down {
+  flex-direction: column-reverse;
+}
+
+.dash-dock.expand-down .dash-dock-actions {
+  transform: translateY(-10px) scale(0.94);
+  transform-origin: calc(100% - 24px) 0;
+}
+
+/* 展开条：与触发球同宽的连体胶囊，动作钮以细分隔线分行（不是散浮的独立按钮）；
+   默认隐藏（pointer-events 与 tab 焦点双保险），open 时自球体方向展开缩放上浮，
+   transform 原点取右下 = 球体所在角。注意不能 overflow:hidden——说明标签定位在
+   按钮外侧，会被容器裁掉；首末钮自担圆角即可 */
+.dash-dock-actions {
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  pointer-events: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-modal);
+  box-shadow: var(--shadow-float);
+  transform: translateY(10px) scale(0.94);
+  transform-origin: calc(100% - 24px) 100%;
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+
+.dash-dock.open .dash-dock-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+/* 动作钮：48px 与触发球同尺寸；边框与底色由展开条统一承担，行间用细分隔线；
+   图标用主色，悬停浮浅底（首末钮圆角跟随容器，悬停底色不冒出胶囊外） */
+.dash-dock-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.dash-dock-btn:first-child {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.dash-dock-btn:last-child {
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+.dash-dock-btn + .dash-dock-btn {
+  border-top: 1px solid var(--border);
+}
+
+.dash-dock-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.dash-dock-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.dash-dock-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 说明标签：悬停 / 键盘聚焦时在按钮左侧浮出（黑底白字在深色主题下不可读，
+   用弹层面色 + 边框保证双主题可读）；触发球同样生效 */
+.dash-dock-btn::after,
+.dash-dock-toggle::after {
+  content: attr(data-tip);
+  position: absolute;
+  right: calc(100% + 10px);
+  top: 50%;
+  translate: 0 -50%;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-modal);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.dash-dock-btn:hover::after,
+.dash-dock-btn:focus-visible::after,
+.dash-dock-toggle:hover::after,
+.dash-dock-toggle:focus-visible::after {
+  opacity: 1;
+}
+
+/* 触发球：48px 主色圆钮（与「启动检测」黑钮同一视觉语言），展开后图标换 ✕；
+   position:relative 让说明标签锚到球自身而非整个 dock 容器。
+   可拖动：grab 光标提示可拖，触摸屏需禁掉浏览器滚动手势（touch-action:none）
+   否则拖动会变成滚动页面 */
+.dash-dock-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: grab;
+  touch-action: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+
+.dash-dock.dragging .dash-dock-toggle {
+  cursor: grabbing;
+}
+
+.dash-dock-toggle svg {
+  width: 20px;
+  height: 20px;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+/* 展开时轻微放大 + 收起图标，暗示进入"待命"态 */
+.dash-dock.open .dash-dock-toggle {
+  background: var(--accent-hover);
+  transform: scale(1.06);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+}
+</style>

@@ -91,7 +91,8 @@
   color: var(--warning);
 }
 
-/* 主操作行（手动登录/网络测试/启动检测）：紧邻网络状态结论，自顶栏迁入首页 */
+/* 主操作行（启动检测；登录中为取消登录）：紧邻网络状态结论，自顶栏迁入首页。
+   手动登录/网络测试已移至右下角悬浮工具条（DashboardView 的 .dash-dock） */
 .hero-actions {
   display: flex;
   align-items: center;
@@ -101,8 +102,13 @@
   flex: none;
 }
 
-/* 看板单列自然流：诊断 / 登录历史 / 日志逐张全宽堆叠，右缘一致、无列底参差 */
-.dashboard-page > .diag-card {
+/* 诊断 + 登录历史双栏行：等宽并排、顶对齐（两卡内容高度相近，逐张全宽浪费一倍
+   纵向空间）；内部卡片各自的下边距交给网格 gap，≤1100px 折回单列逐张全宽 */
+.dashboard-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-md);
+  align-items: start;
   margin-bottom: var(--space-md);
 }
 
@@ -110,6 +116,11 @@
   display: flex;
   flex-direction: column;
   margin-bottom: var(--space-md);
+}
+
+/* 双栏内的历史卡不带自身下边距（间距由网格 gap 承担）；升序特异度置后 */
+.dashboard-split > .history-card {
+  margin-bottom: 0;
 }
 
 .history-card .card-body {
@@ -142,6 +153,7 @@
 .log-viewer {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
   font-family: var(--font-mono);
   font-size: var(--text-md);
@@ -252,6 +264,7 @@
   gap: 6px;
   max-height: 400px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .history-item {
@@ -554,6 +567,7 @@
 
 @media (max-width: 1100px) {
   .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
+  .dashboard-split { grid-template-columns: 1fr; }
   .dashboard-page .history-card,
   .dashboard-page .log-card { min-height: 300px; }
   .dashboard-page .log-card { min-height: 420px; }

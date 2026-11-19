@@ -10,11 +10,12 @@
  * 编辑器里没有「调试」——HTTP 登录任务不经 Python Worker，无法单步执行，
  * 验证路径是试运行整个 HTTP 流程（凭据由宿主传入，见 useHttpTaskTest）。
  *
- * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
+ * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（浏览器 / HTTP / 脚本 / 定时四个列表面板同一份）。
  */
 import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
 import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import HttpFlowFields from "@/components/common/HttpFlowFields.vue";
 import HttpTestResult from "@/components/common/HttpTestResult.vue";
@@ -69,17 +70,6 @@ const drag = useDragSort(httpTasks, { tasks: browserTasks, scripts, http: httpTa
 // 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无 HTTP 登录任务」）
 const directory = useTaskDirectory();
 const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
-
-/**
- * 行下标 → 拖拽用的**全量**下标。
- *
- * 模板里 `v-for` 走的是搜索过滤后的 `visibleRows`，而 `useDragSort` 按传入列表
- * （全量 `httpTasks`）的 id 做 splice 与持久化：把过滤后的下标直接喂给它，搜索状态
- * 下拖一行会挪动另一条任务（另两个面板踩过同一个坑）。
- */
-function dragIndex(taskId: string): number {
-  return httpTasks.value.findIndex((t) => t.id === taskId);
-}
 
 /**
  * 测试凭据：任务里不含账号密码（凭据属于方案），而任务页没有方案上下文，
@@ -219,6 +209,7 @@ onMounted(async () => {
         placeholder="搜索名称 / ID / 描述 / 请求地址"
         aria-label="搜索 HTTP 登录任务"
       />
+      <CommunityTasksEntry />
       <button type="button" class="btn btn-sm" title="从文件导入 HTTP 登录任务" @click="importHttpTask">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
@@ -254,13 +245,13 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th class="tsk-drag-cell"></th>
-            <th>名称</th>
-            <th class="tsk-cell-id">任务 ID</th>
-            <th class="tsk-cell-flex">请求</th>
-            <th class="tsk-cell-bind">绑定方案</th>
-            <th class="tsk-cell-mtime">最近修改</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col" class="tsk-drag-cell"></th>
+            <th scope="col">名称</th>
+            <th scope="col" class="tsk-cell-id">任务 ID</th>
+            <th scope="col" class="tsk-cell-flex">请求</th>
+            <th scope="col" class="tsk-cell-bind">绑定方案</th>
+            <th scope="col" class="tsk-cell-mtime">最近修改</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -295,20 +286,42 @@ onMounted(async () => {
             v-for="row in visibleRows"
             :key="row.id"
             data-draggable-list
-            @dragstart="drag.handleDragStart($event, dragIndex(row.id))"
-            @dragover="drag.onDragOver($event, dragIndex(row.id))"
-            @drop="drag.onDrop($event, dragIndex(row.id))"
+            @dragstart="drag.handleDragStart($event, drag.indexOf(row.id))"
+            @dragover="drag.onDragOver($event, drag.indexOf(row.id))"
+            @drop="drag.onDrop($event, drag.indexOf(row.id))"
             @dragend="drag.onDragEnd($event)"
             @click="openEditor(row.id)"
           >
             <td class="tsk-drag-cell" @click.stop>
-              <div
-                class="task-drag-handle"
-                title="拖拽排序"
-                @mousedown="drag.onHandleMouseDown($event)"
-                @mouseup="drag.onHandleMouseUp($event)"
-              >
-                <IconApp name="list" class="icon-sm" />
+              <div class="tsk-order-group">
+                <div
+                  class="task-drag-handle"
+                  title="拖拽排序"
+                  @mousedown="drag.onHandleMouseDown($event)"
+                  @mouseup="drag.onHandleMouseUp($event)"
+                >
+                  <IconApp name="list" class="icon-sm" />
+                </div>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`上移：${row.name || row.id}`"
+                  :aria-label="`上移：${row.name || row.id}`"
+                  :disabled="drag.indexOf(row.id) === 0"
+                  @click="drag.moveBy(row.id, -1)"
+                >
+                  <IconApp name="chevron-up" class="icon-sm" />
+                </button>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`下移：${row.name || row.id}`"
+                  :aria-label="`下移：${row.name || row.id}`"
+                  :disabled="drag.indexOf(row.id) === httpTasks.length - 1"
+                  @click="drag.moveBy(row.id, 1)"
+                >
+                  <IconApp name="chevron-down" class="icon-sm" />
+                </button>
               </div>
             </td>
             <td>
@@ -357,7 +370,7 @@ onMounted(async () => {
         <span>共 {{ httpTasks.length }} 个任务</span>
         <span v-if="searchQuery.trim()">· {{ visibleRows.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>拖拽行首或用 ↑↓ 调整顺序 · 点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
@@ -529,7 +542,9 @@ onMounted(async () => {
 .http-optional-info > summary { padding: 3px 0 12px; }
 .http-optional-info > summary span { margin-left: 8px; font-size: 12px; }
 .http-writing-help > summary { padding: 16px 20px; }
-.http-writing-help > .card-body { padding-top: 0; }
+/* 折叠卡展开后首段贴住 summary：只声明 --card-body-pt（消费点在
+   styles/pages/tasks.css 的 .tasks-page .card-body），不改写共享类的 padding 值 */
+.http-writing-help > .card-body { --card-body-pt: 0; }
 .http-optional-info summary:focus-visible, .http-writing-help summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .http-ref-functions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .http-ref-functions summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; font-weight: 650; list-style: none; }

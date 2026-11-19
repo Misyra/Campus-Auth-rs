@@ -15,6 +15,7 @@
 import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
 import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import { computed, onMounted, ref, watch } from "vue";
@@ -62,17 +63,6 @@ const drag = useDragSort(scripts, { tasks: browserTasks, scripts, http: httpTask
 // 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无自定义脚本」）
 const directory = useTaskDirectory();
 const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
-
-/**
- * 行下标 → 拖拽用的**全量**下标。
- *
- * 模板里 `v-for` 走的是搜索过滤后的 `visibleScripts`，而 `useDragSort` 按传入
- * 列表（全量 `scripts`）的 id 做 splice 与持久化：直接把过滤后的下标喂给它，
- * 搜索状态下拖一行会挪动另一个脚本，并把错的顺序写进后端（刷新才暴露）。
- */
-function dragIndex(scriptId: string): number {
-  return scripts.value.findIndex((s) => s.id === scriptId);
-}
 
 // ===== 列表态 / 编辑态：两态由「草稿是否为空」表达，`?task=<id>` 只是意图 =====
 const currentId = computed(() => editingTask.value?.id ?? "");
@@ -185,6 +175,7 @@ onMounted(async () => {
         placeholder="搜索名称 / 脚本 ID / 描述"
         aria-label="搜索脚本"
       />
+      <CommunityTasksEntry />
       <button type="button" class="btn btn-sm" title="从文件导入脚本（.py / .sh / .bat / .cmd / .txt）" @click="onImportScript">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
@@ -207,12 +198,12 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th class="tsk-drag-cell"></th>
-            <th>名称</th>
-            <th class="tsk-cell-id">脚本 ID</th>
-            <th class="tsk-cell-binary">执行程序</th>
-            <th class="tsk-cell-mtime">最近修改</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col" class="tsk-drag-cell"></th>
+            <th scope="col">名称</th>
+            <th scope="col" class="tsk-cell-id">脚本 ID</th>
+            <th scope="col" class="tsk-cell-binary">执行程序</th>
+            <th scope="col" class="tsk-cell-mtime">最近修改</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -253,20 +244,42 @@ onMounted(async () => {
             v-for="script in visibleScripts"
             :key="script.id"
             data-draggable-list
-            @dragstart="drag.handleDragStart($event, dragIndex(script.id))"
-            @dragover="drag.onDragOver($event, dragIndex(script.id))"
-            @drop="drag.onDrop($event, dragIndex(script.id))"
+            @dragstart="drag.handleDragStart($event, drag.indexOf(script.id))"
+            @dragover="drag.onDragOver($event, drag.indexOf(script.id))"
+            @drop="drag.onDrop($event, drag.indexOf(script.id))"
             @dragend="drag.onDragEnd($event)"
             @click="openEditor(script.id)"
           >
             <td class="tsk-drag-cell" @click.stop>
-              <div
-                class="task-drag-handle"
-                title="拖拽排序"
-                @mousedown="drag.onHandleMouseDown($event)"
-                @mouseup="drag.onHandleMouseUp($event)"
-              >
-                <IconApp name="list" class="icon-sm" />
+              <div class="tsk-order-group">
+                <div
+                  class="task-drag-handle"
+                  title="拖拽排序"
+                  @mousedown="drag.onHandleMouseDown($event)"
+                  @mouseup="drag.onHandleMouseUp($event)"
+                >
+                  <IconApp name="list" class="icon-sm" />
+                </div>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`上移：${script.name || script.id}`"
+                  :aria-label="`上移：${script.name || script.id}`"
+                  :disabled="drag.indexOf(script.id) === 0"
+                  @click="drag.moveBy(script.id, -1)"
+                >
+                  <IconApp name="chevron-up" class="icon-sm" />
+                </button>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`下移：${script.name || script.id}`"
+                  :aria-label="`下移：${script.name || script.id}`"
+                  :disabled="drag.indexOf(script.id) === scripts.length - 1"
+                  @click="drag.moveBy(script.id, 1)"
+                >
+                  <IconApp name="chevron-down" class="icon-sm" />
+                </button>
               </div>
             </td>
             <td>
@@ -305,7 +318,7 @@ onMounted(async () => {
         <span>共 {{ scripts.length }} 个脚本</span>
         <span v-if="searchQuery.trim()">· {{ visibleScripts.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>拖拽行首或用 ↑↓ 调整顺序 · 点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>

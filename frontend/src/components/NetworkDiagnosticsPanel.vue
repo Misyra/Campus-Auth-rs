@@ -154,6 +154,10 @@ async function exportBundle(): Promise<void> {
     exporting.value = false;
   }
 }
+
+// 仪表盘悬浮工具条的「开始诊断」经模板 ref 调到这里：诊断报告归面板自身状态，
+// 从入口处直接调 API 面板不会展示结果。running 的防连点守卫在 startDiagnostics 内。
+defineExpose({ startDiagnostics });
 </script>
 
 <template>

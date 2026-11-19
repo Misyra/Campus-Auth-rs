@@ -15,6 +15,7 @@ import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
 import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
+import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import { computed, onMounted, ref, watch } from "vue";
 import { useTasks } from "@/composables/useTasks";
 import { useScripts } from "@/composables/useScripts";
@@ -47,17 +48,6 @@ const browserTasks = computed(() => t.tasks.value);
 // 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无任务配置」）
 const directory = useTaskDirectory();
 const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
-
-/**
- * 行下标 → 拖拽用的**全量**下标。
- *
- * 模板里 `v-for` 走的是搜索过滤后的 `visibleTasks`，而 `useDragSort` 按传入列表
- * （全量 `t.tasks`）的 id 做 splice 与持久化：把过滤后的下标直接喂给它，搜索状态
- * 下拖一行会挪动另一条任务，并把错的顺序写进后端（刷新后才暴露）。
- */
-function dragIndex(taskId: string): number {
-  return t.tasks.value.findIndex((task) => task.id === taskId);
-}
 
 // ===== 二级编辑页路由语义：?task=<id> =====
 /** 编辑态判据只有一个：草稿非空（query 只是"意图"，见 useTaskEditorQuery） */
@@ -212,6 +202,7 @@ onMounted(async () => {
         placeholder="搜索名称 / ID / 描述"
         aria-label="搜索浏览器任务"
       />
+      <CommunityTasksEntry />
       <button type="button" class="btn btn-sm" title="从文件导入任务" @click="t.importTask()">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
@@ -241,12 +232,12 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th class="tsk-drag-cell"></th>
-            <th>名称</th>
-            <th class="tsk-cell-id">任务 ID</th>
-            <th class="tsk-cell-bind">绑定方案</th>
-            <th class="tsk-cell-mtime">最近修改</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col" class="tsk-drag-cell"></th>
+            <th scope="col">名称</th>
+            <th scope="col" class="tsk-cell-id">任务 ID</th>
+            <th scope="col" class="tsk-cell-bind">绑定方案</th>
+            <th scope="col" class="tsk-cell-mtime">最近修改</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -260,7 +251,7 @@ onMounted(async () => {
               <div class="empty-state">
                 <IconApp name="layout" :stroke-width="1.5" />
                 <span>暂无任务配置</span>
-                <span class="empty-desc">点击上方「选择现成任务」使用已有登录流程，或新建任务</span>
+                <span class="empty-desc">点击上方「社区任务」使用已有登录流程，或新建任务</span>
                 <div class="empty-actions">
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
                     <IconApp name="plus" />新建任务
@@ -281,20 +272,42 @@ onMounted(async () => {
             v-for="task in visibleTasks"
             :key="task.id"
             data-draggable-list
-            @dragstart="drag.handleDragStart($event, dragIndex(task.id))"
-            @dragover="drag.onDragOver($event, dragIndex(task.id))"
-            @drop="drag.onDrop($event, dragIndex(task.id))"
+            @dragstart="drag.handleDragStart($event, drag.indexOf(task.id))"
+            @dragover="drag.onDragOver($event, drag.indexOf(task.id))"
+            @drop="drag.onDrop($event, drag.indexOf(task.id))"
             @dragend="drag.onDragEnd($event)"
             @click="openEditor(task.id)"
           >
             <td class="tsk-drag-cell" @click.stop>
-              <div
-                class="task-drag-handle"
-                title="拖拽排序"
-                @mousedown="drag.onHandleMouseDown($event)"
-                @mouseup="drag.onHandleMouseUp($event)"
-              >
-                <IconApp name="list" class="icon-sm" />
+              <div class="tsk-order-group">
+                <div
+                  class="task-drag-handle"
+                  title="拖拽排序"
+                  @mousedown="drag.onHandleMouseDown($event)"
+                  @mouseup="drag.onHandleMouseUp($event)"
+                >
+                  <IconApp name="list" class="icon-sm" />
+                </div>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`上移：${task.name || task.id}`"
+                  :aria-label="`上移：${task.name || task.id}`"
+                  :disabled="drag.indexOf(task.id) === 0"
+                  @click="drag.moveBy(task.id, -1)"
+                >
+                  <IconApp name="chevron-up" class="icon-sm" />
+                </button>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`下移：${task.name || task.id}`"
+                  :aria-label="`下移：${task.name || task.id}`"
+                  :disabled="drag.indexOf(task.id) === t.tasks.value.length - 1"
+                  @click="drag.moveBy(task.id, 1)"
+                >
+                  <IconApp name="chevron-down" class="icon-sm" />
+                </button>
               </div>
             </td>
             <td>
@@ -353,7 +366,7 @@ onMounted(async () => {
         <span>共 {{ browserTasks.length }} 个任务</span>
         <span v-if="searchQuery.trim()">· {{ visibleTasks.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>拖拽行首或用 ↑↓ 调整顺序 · 点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
