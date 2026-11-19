@@ -35,7 +35,7 @@
   - ③ token 逃逸清零：68 行等值回填，±2px 归并 47 值列目检清单（10f92ca）
   - ④ `badge--mono`：核实 T8-3 已迁移、无需动作
   - ⑤ stylelint 42 条警告全清零 + `--max-warnings 0` 门禁钉死（dec4803）；1c 建议的 12/6/2px 档位已由 V2 地基批落定义
-- [ ] **阶段 2 组件层升级 + 页面外壳（2-3 天，为手机铺路）**：`styles/components/*.css` 共享类与 `components/common/` 对齐成正式 base 组件目录（组件自带响应式行为，页面不再写媒体查询微调）；`.page-content` 升级真布局契约（flex/gap/最大宽度单一出处，5 页面只声明差异）；scoped 只声明 `--xxx` 变量（照 `--tsk-col-name-w` 先例）
+- [x] **阶段 2 组件层升级 + 页面外壳**（a1223d2，2026-11-20：`.page-content` 布局契约单一出处（七页重复声明收敛为差异块）；pageEnter 退役、`.page-in` 唯一入场出处；EmptyState 基础组件落地 13 处（CardHeader/banner/Chip 评估后不落地避免新双轨）；scoped 变量通道新增 4 文件）
 - [ ] **阶段 3 清债转正（2026-11-20「不留技术债」拍板，原「可选增量」全部转正）**：AiTaskView 拆分 **[x] 已完成**（953→299 行，三 composable + 60 单测，模板编译产物逐字节一致证等价，覆盖率不降反升，8f03cae）；F12 content-visibility（IntersectionObserver 前置已随 V4 scrollspy 落地，V4 落库后评估主体）/ F13 a11y lint 守门（eslint-plugin-vuejs-accessibility）/ F14 aria-describedby 系统化（78 处 hint 优先挂校验错误与危险操作）/ 密度模式（容器 style queries，Baseline 2026-05）
 - [ ] **阶段 4 视觉重构（2026-11-20 用户三拍板并入：顶部 tab 替代左侧子导航 / 拆 8 区 / 先地基后视觉）**：
   - ① **[x] 滚动快修**（6c177a07：删 `:has()` 强制 hidden 回归 `.content-wrapper` 整体滚动，scrollIntoView 声明式定位 + save-bar sticky 吸附 + 监听迁移 wrapper + sr-only 守卫随迁）
