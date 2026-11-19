@@ -112,7 +112,11 @@
   font-weight: 500;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   min-height: 36px;
+  /* 短名（uv 两字符）配 radius-full 会缩成近圆形气泡；统一最小宽度让所有
+     徽标保持胶囊读感，宽徽标不受影响 */
+  min-width: 72px;
   transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   /* color-mix 不支持时的兜底（旧浏览器显示半透明灰）：
      下方那条带 color-mix 的声明会整条失效，于是回落到这两行 */
@@ -139,8 +143,11 @@
 .tech-badge.uv,
 .tech-badge.python {
   background: color-mix(in srgb, var(--tech) 20%, transparent);
-  border-color: color-mix(in srgb, var(--tech) 30%, transparent);
-  color: var(--tech);
+  border-color: color-mix(in srgb, var(--tech) 40%, transparent);
+  /* 文字 = 品牌色 45% ⊕ 主题正文色：直接用品牌色当文字在浅色底上大面积不达 AA
+     （vue 1.8 / websockets 2.2 / playwright 2.2…），混入正文色后保色相且深浅两
+     主题实测均 ≥7.3:1；描边同步加浓到 40% 保住"品牌色描边"的辨识度 */
+  color: color-mix(in srgb, var(--tech) 45%, var(--text-primary));
 }
 
 .tech-badge.rust { --tech: var(--tech-rust); }

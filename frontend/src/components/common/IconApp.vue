@@ -26,6 +26,7 @@ const ICONS = {
   upload:
     '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
   "chevron-down": '<polyline points="6 9 12 15 18 9" />',
+  "chevron-up": '<polyline points="18 15 12 9 6 15" />',
   image:
     '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',
   wifi: '<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>',
@@ -114,6 +115,8 @@ const ICONS = {
     '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
   heart:
     '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>',
+  /** 仪表盘悬浮工具条收起态：闪电示意「快捷动作」（手动登录 / 网络测试） */
+  zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
   /** B 站：电视机身 + 顶部天线 + 两只眼睛，示意品牌轮廓 */
   bilibili:
     '<rect x="3" y="7" width="18" height="12" rx="3"/><path d="M7 3l2.5 4M17 3l-2.5 4"/><path d="M9 12v2M15 12v2"/>',

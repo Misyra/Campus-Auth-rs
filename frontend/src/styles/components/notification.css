@@ -75,6 +75,7 @@
   width: 320px;
   max-height: 400px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);

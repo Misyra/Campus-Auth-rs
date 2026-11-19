@@ -146,6 +146,33 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
     }
   }
 
+  /**
+   * 行内「上移/下移」（F11，触屏与键盘的排序入口）：与拖拽同一份顺序语义——
+   * 相对**全量列表**当前位置移动一格（过滤视图里按钮位置不等于全量位置，
+   * 与 indexOf 同口径），持久化与拖拽共用同一载荷。
+   */
+  async function moveBy(id: string, delta: -1 | 1): Promise<void> {
+    const items = list.value;
+    const from = items.findIndex((t) => t.id === id);
+    const to = from + delta;
+    if (from === -1 || to < 0 || to >= items.length) return;
+    const [item] = items.splice(from, 1);
+    items.splice(to, 0, item);
+    await persistOrder();
+  }
+
+  /**
+   * 行 id → 本列表（**全量**）下标。
+   *
+   * 三个任务面板的模板 `v-for` 走的是搜索过滤后的可见列表，而 useDragSort 的
+   * 拖拽与上移/下移都按传入列表（全量）的 id 做 splice 与持久化：把过滤后的
+   * 下标直接喂给它，搜索状态下拖一行会挪动另一条任务，并把错的顺序写进后端
+   * （刷新后才暴露）。下标换算收口在此，面板内不得各自复刻。
+   */
+  function indexOf(id: string): number {
+    return list.value.findIndex((t) => t.id === id);
+  }
+
   return {
     onHandleMouseDown,
     onHandleMouseUp,
@@ -153,5 +180,7 @@ export function useDragSort(list: Ref<TaskItem[]>, order: DragSortOptions) {
     onDragOver,
     onDrop,
     onDragEnd,
+    moveBy,
+    indexOf,
   };
 }

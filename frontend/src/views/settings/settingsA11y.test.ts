@@ -48,6 +48,29 @@ describe("系统设置页控件可访问性", () => {
   });
 });
 
+describe("ToggleSwitch 可访问名（F4）", () => {
+  const toggleSwitch = readFileSync(new URL("../../components/common/ToggleSwitch.vue", import.meta.url), "utf8");
+
+  it("role=switch 的可访问名落在按钮上：有 label 走 aria-labelledby，无 label 透传 aria-label", () => {
+    const button = toggleSwitch.match(/<button[\s\S]*?role="switch"[\s\S]*?<\/button>/);
+    expect(button, "ToggleSwitch.vue 缺少 role=\"switch\" 按钮").not.toBeNull();
+    expect(button![0]).toContain(":aria-labelledby");
+    expect(button![0]).toContain(":aria-label");
+    // label span 必须挂 id，aria-labelledby 才有指向目标
+    expect(toggleSwitch).toContain(':id="labelId"');
+    // useId 保证同页多实例 id 唯一
+    expect(toggleSwitch).toContain("useId()");
+  });
+
+  it("行内用法（无 label）必须显式传 aria-label（定时任务列表启停列）", () => {
+    const scheduled = readFileSync(new URL("../tasks/ScheduledTasksPanel.vue", import.meta.url), "utf8");
+    const inline = scheduled.match(/<ToggleSwitch[\s\S]*?\/>/g) ?? [];
+    const rowUsage = inline.find((tag) => tag.includes("toggleScheduledTask"));
+    expect(rowUsage, "找不到定时任务列表行的 ToggleSwitch 用法").toBeTruthy();
+    expect(rowUsage!).toContain(":aria-label=");
+  });
+});
+
 describe("设置页搜索可访问性（输入框已合并进顶栏）", () => {
   const topbar = readFileSync(new URL("../../components/common/AppTopbar.vue", import.meta.url), "utf8");
 

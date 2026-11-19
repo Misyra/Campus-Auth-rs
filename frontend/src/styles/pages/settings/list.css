@@ -17,7 +17,7 @@
    容器限定隐藏类的行为一致（守卫测试位于 styles/utility.test.ts）。 */
 /* 设置滚动区：滚动条自占 6px（auto，不再预留空槽），右内边距归零——
    卡片右缘与顶栏动作区/其它页内容右缘对齐（layout.css 顶栏 +6px 补偿同理） */
-.settings-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: auto; scroll-padding-block: 16px; padding-inline: 2px 0; }
+.settings-scroll { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-x: hidden; scrollbar-gutter: auto; scroll-padding-block: 16px; padding-inline: 2px 0; }
 .settings-scroll > .settings-form { margin-top: 0; padding-bottom: 16px; gap: 48px; }
 .settings-category { min-width: 0; scroll-margin-top: 16px; }
 .settings-category + .settings-category { padding-top: 28px; border-top: 1px solid var(--border); }

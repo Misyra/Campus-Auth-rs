@@ -196,7 +196,8 @@
   padding: 0;
   margin: -1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  /* clip 已废弃：clip-path inset(50%) 视觉等价（1px 盒各边内缩 50% 即全隐） */
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }
@@ -263,6 +264,16 @@ textarea {
 :focus-visible {
   outline: 2px solid var(--accent-text, var(--accent));
   outline-offset: 2px;
+}
+
+/* Firefox 滚动条兜底：Chromium/Safari 走上面的 ::-webkit-scrollbar（6px 细条），
+   Firefox 不认识伪元素，系统默认粗滚动条观感突兀。标准属性必须用 supports 护栏
+   ——无条件声明会让支持它的 Chrome 接管为 thin（≈11px），日志区 4px 细条会变粗。 */
+@supports not selector(::-webkit-scrollbar) {
+  html {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(var(--slate-rgb), 0.2) transparent;
+  }
 }
 
 ::-webkit-scrollbar {
@@ -420,7 +431,15 @@ html.reduce-motion .btn { transform: none !important; }
   /* 警示文字色按浅色底（#eef2f7）测算：#b45309 为 4.47:1，差一线不过 AA 正文线
      （4.5:1）；加深到 #a34a08 约 5.3:1 达标，色相不变仅压暗 */
   --warning-text: #a34a08;
-  --danger: #dc2626;
+  /* success / error 原色按浅色主题 --warning 的同一先例直接加深（#10b981 / #ef4444
+     在浅底上仅 1.9~3.4:1）：#047857 约 4.9~5.5:1、#b91c1c 约 5.8~6.5:1（页面底
+     #eef2f7 与卡片白底两种场景），色相不变仅压暗；状态圆点与实底按钮的白字对比
+     度随之达标。--warning 不在此列：亮琥珀是圆点/加载指示的视觉签名，文字对比
+     由上面的 --warning-text 单独承担。背景淡色调走 --success-rgb/--error-rgb，
+     不受本重映射影响。 */
+  --success: #047857;
+  --error: #b91c1c;
+  --danger: var(--error);
   --danger-bg: #fef2f2;
   --danger-border: #fecaca;
   --navigation-bg: rgba(238, 243, 251, 0.95);

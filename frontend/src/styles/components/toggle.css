@@ -30,7 +30,8 @@
   padding: 0;
   margin: -1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  /* clip 已废弃：clip-path inset(50%) 视觉等价（与 base.css .sr-only 同步） */
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }

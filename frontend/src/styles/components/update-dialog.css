@@ -93,7 +93,9 @@
    加一层比弹窗底色略深的底与描边，让"可滚动区域"的边界一眼可见 */
 .update-dialog-notes {
   max-height: min(52vh, 460px);
+  max-height: min(52dvh, 460px);
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

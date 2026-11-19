@@ -1,7 +1,8 @@
 /* form.css — 表单（form-group / select 美化 / form-row / hint / field-help / radio-group） */
 .form-group {
   min-width: 0;
-  margin-bottom: var(--space-md);
+  /* 分叉通道：组件内嵌网格/行内布局不需要下边距时只在 scoped 声明 --form-group-margin */
+  margin-bottom: var(--form-group-margin, var(--space-md));
 }
 
 /* 地址与模板变量也要在窄屏换行，不能撑开表单网格。 */
@@ -270,6 +271,7 @@
 
 .field-help-tip--pinned .field-help-tip-body {
   max-height: min(60vh, 420px);
+  max-height: min(60dvh, 420px);
   overflow-y: auto;
 }
 

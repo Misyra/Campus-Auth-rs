@@ -37,7 +37,9 @@
   border-radius: var(--radius-xl);
   width: 90%;
   max-width: 560px;
+  /* 移动端浏览器工具栏收放会吃掉 vh 高度，dvh 兜底（vh 在前作回退），下同 */
   max-height: 85vh;
+  max-height: 85dvh;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-xl);
@@ -59,6 +61,7 @@
   max-width: 1200px;
   width: 96%;
   max-height: 92vh;
+  max-height: 92dvh;
 }
 
 .modal-header {
@@ -78,6 +81,7 @@
 .modal-body {
   padding: var(--space-lg);
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1;
 }
 
@@ -133,7 +137,7 @@
 .confirm-section + .confirm-section { border-top: 1px solid var(--border); }
 .confirm-section h4 { margin: 0 0 4px; font-size: var(--text-base); font-weight: 500; color: var(--text-primary); }
 .confirm-section p { margin: 0; color: var(--text-secondary); font-size: var(--text-md); line-height: 1.6; overflow-wrap: anywhere; white-space: pre-line; }
-.confirm-dialog:has(.confirm-sections) { max-height: 85vh; overflow-y: auto; }
+.confirm-dialog:has(.confirm-sections) { max-height: 85vh; max-height: 85dvh; overflow-y: auto; }
 
 .confirm-message {
   font-size: var(--text-base);

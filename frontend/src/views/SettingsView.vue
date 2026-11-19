@@ -33,6 +33,8 @@ const sectionComponents: Record<string, typeof MonitorSettings> = {
 const sections = SETTINGS_NAV_CHILDREN.map((child) => ({ ...child, component: sectionComponents[child.id] }));
 let resizeObserver: ResizeObserver | null = null;
 let anchoredSection: string | null = null;
+let scrollFrame: number | null = null;
+let searchFrame: number | null = null;
 
 // ===== 设置搜索（纯前端过滤，见 utils/settingsSearch.ts） =====
 // 输入框在顶栏（useSettingsSearch 单例），本页只消费查询词并应用过滤
@@ -41,16 +43,39 @@ const searchStats = ref<SettingsSearchResult>({ totalSections: 0, matchedSection
 /** 关键词非空且没有任何分区命中时提示空态 */
 const searchEmpty = computed(() => searchQuery.value.trim() !== "" && searchStats.value.matchedSections === 0);
 
-/** 关键词变化后等 DOM 稳定再扫分区可见性；空关键词即恢复完整列表。 */
+/** 关键词变化后扫分区可见性；空关键词即恢复完整列表。扫描只切换静态表单上的
+ *  class（applySettingsSearch 先清后标、幂等），无需等 Vue flush。 */
 function applySearch(): void {
   searchStats.value = applySettingsSearch(settingsForm.value, searchQuery.value);
 }
 
-watch(searchQuery, () => { void nextTick(applySearch); });
+// 快速连击按帧合并：一帧最多全量扫一次（6 分区 textContent + 12 组选择器），
+// 打字时的按键延迟由此收口；卸载取消在途帧
+watch(searchQuery, () => {
+  if (searchFrame !== null) cancelAnimationFrame(searchFrame);
+  searchFrame = requestAnimationFrame(() => {
+    searchFrame = null;
+    applySearch();
+  });
+});
 
-/** 分区元素；被搜索隐藏的分区视同不存在（display:none 时 offsetParent 为 null）。 */
+/** 分区元素缓存：分区列表静态且全程挂载，挂载后各查一次，滚动/定位不再反复
+ *  querySelector；搜索隐藏的分区视同不存在（display:none 时 offsetParent 为 null），
+ *  可见性每次现判，不进缓存。 */
+const sectionElements = new Map<string, HTMLElement>();
+
+function cacheSectionElements(): void {
+  sectionElements.clear();
+  const form = settingsForm.value;
+  if (!form) return;
+  for (const section of sections) {
+    const element = form.querySelector<HTMLElement>(`#settings-section-${section.id}`);
+    if (element) sectionElements.set(section.id, element);
+  }
+}
+
 function visibleSection(id: string): HTMLElement | null {
-  const element = settingsForm.value?.querySelector<HTMLElement>(`#settings-section-${id}`) ?? null;
+  const element = sectionElements.get(id) ?? null;
   return element && element.offsetParent === null ? null : element;
 }
 
@@ -90,6 +115,15 @@ function updateActiveSection(): void {
   navigation.setActiveSection(active);
 }
 
+/** scroll 事件按帧合并：一帧最多一次目录高亮计算（监听保持 passive），卸载取消在途帧。 */
+function scheduleActiveSectionUpdate(): void {
+  if (scrollFrame !== null) return;
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = null;
+    updateActiveSection();
+  });
+}
+
 /** 用户开始阅读或编辑后，让浏览器自然保持滚动，不再校准目录定位。 */
 function releaseAnchor(): void { anchoredSection = null; }
 
@@ -98,6 +132,7 @@ watch(() => route.name, (name) => {
 });
 watch(navigation.scrollRequest, (request) => { if (request) void scrollToSection(request.id); });
 onMounted(() => {
+  cacheSectionElements();
   applySearch();
   void scrollToSection(activeChildId(SETTINGS_NAV_CHILDREN, String(route.name)) ?? "monitor");
   // 环境状态和默认配置异步加载会改变前面区域的高度，首次定位随之校准。
@@ -110,6 +145,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
+  if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
+  if (searchFrame !== null) cancelAnimationFrame(searchFrame);
   // 离开设置页即清空共享查询词：顶栏输入框只在设置路由渲染，
   // 残留过滤会让下次进入时表单缺分区且无输入框可清
   searchQuery.value = "";
@@ -143,7 +180,7 @@ function handleSave() {
     <!-- 搜索输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，见
          useSettingsSearch）；本页只保留无命中的空态提示。 -->
     <p v-if="searchEmpty" class="settings-search-empty" role="status">无匹配的设置项</p>
-    <div ref="scrollContainer" class="settings-scroll" @scroll.passive="updateActiveSection"
+    <div ref="scrollContainer" class="settings-scroll" @scroll.passive="scheduleActiveSectionUpdate"
       @wheel.passive="releaseAnchor" @touchstart.passive="releaseAnchor" @pointerdown="releaseAnchor" @keydown="releaseAnchor">
       <div v-if="configLoadFailed" class="settings-load-failed">
         <span>配置加载失败，当前显示的是默认值。为避免覆盖服务器配置，保存已禁用。</span>

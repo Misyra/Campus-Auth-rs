@@ -66,7 +66,7 @@ for (const url of vueUrls) {
   }
 }
 
-/** ④ 第三方运行时注入的 token：Reka UI tooltip 按碰撞实测写入（form.css 注释有说明） */
+/** ④ 第三方运行时注入的 token：Reka UI 定位变量按碰撞实测写入（form.css 注释有说明） */
 const THIRD_PARTY_TOKENS = new Set(["--reka-tooltip-content-available-width"]);
 
 const knownTokens = new Set([...styleTokens, ...runtimeTokens, ...vueLocalTokens, ...THIRD_PARTY_TOKENS]);

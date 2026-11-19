@@ -23,7 +23,9 @@
   width: 100%;
   max-width: 760px;
   max-height: 90vh;
+  max-height: 90dvh;
   overflow-y: auto;
+  overscroll-behavior: contain;
   box-shadow: var(--shadow-xl);
   backdrop-filter: var(--blur-lg) saturate(1.2);
 }

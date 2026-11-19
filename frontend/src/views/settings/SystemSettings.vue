@@ -14,6 +14,7 @@ import { useUpdateDialog } from "@/composables/useUpdateDialog";
 import { RUN_MODE_PRESETS } from "@/utils/runMode";
 import type { RunModeId } from "@/utils/runMode";
 import { pickFile, downloadBlob } from "@/utils/file";
+import { formatLocalDateTime } from "@/utils/formatters";
 import { systemApi, configApi } from "@/api";
 import { extractApiError } from "@/api/client";
 import type { UpdateState, UpdateInfo } from "@/api/types";
@@ -188,8 +189,7 @@ async function refreshUpdateState() {
 const lastCheckLabel = computed(() => {
   const s = updateState.value;
   if (!s?.last_check_at) return "从未检查";
-  const d = new Date(s.last_check_at);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString();
+  return formatLocalDateTime(s.last_check_at);
 });
 const updateCheckHint = computed(() => {
   const s = updateState.value;

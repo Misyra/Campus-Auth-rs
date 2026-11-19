@@ -224,14 +224,14 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th>名称</th>
-            <th class="sch-cell-type">类型</th>
-            <th class="sch-cell-trigger">触发</th>
-            <th class="sch-cell-target">目标</th>
-            <th class="sch-cell-timeout">超时</th>
-            <th class="sch-cell-result">最近结果</th>
-            <th class="sch-cell-enabled">启用</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col">名称</th>
+            <th scope="col" class="sch-cell-type">类型</th>
+            <th scope="col" class="sch-cell-trigger">触发</th>
+            <th scope="col" class="sch-cell-target">目标</th>
+            <th scope="col" class="sch-cell-timeout">超时</th>
+            <th scope="col" class="sch-cell-result">最近结果</th>
+            <th scope="col" class="sch-cell-enabled">启用</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -291,6 +291,7 @@ onMounted(async () => {
               <ToggleSwitch
                 :model-value="task.enabled !== false"
                 :disabled="st.togglingIds.has(task.id)"
+                :aria-label="`启用或停用定时任务 ${task.name || task.id}`"
                 @update:model-value="st.toggleScheduledTask(task.id)"
               />
             </td>

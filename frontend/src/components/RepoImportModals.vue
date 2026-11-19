@@ -386,7 +386,7 @@ watch(
 .repo-search-field input::-webkit-search-cancel-button { display: none; }
 .repo-result-count { flex: none; font-size: var(--text-xs); color: var(--text-secondary); }
 .repo-import-body { display: flex; gap: 12px; min-height: 0; }
-.repo-import-list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; }
+.repo-import-list { flex: 1; min-width: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; }
 .repo-import-item { display: flex; width: 100%; gap: 12px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
 .repo-import-item:hover { background: var(--bg-hover); }
 .repo-import-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -402,7 +402,7 @@ watch(
 .repo-item-desc { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.5; margin-top: 3px; }
 .repo-item-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 7px; font-size: var(--text-xs); color: var(--text-tertiary); }
 .repo-item-tags { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
+.repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; overscroll-behavior: contain; }
 .repo-detail-name { margin: 0; font-size: var(--text-lg); font-weight: 600; line-height: 1.4; }
 .repo-detail-desc { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.6; }
 .repo-detail-next { margin: 2px 0; font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.6; }

@@ -65,6 +65,14 @@
   }
 }
 
+/* 卡片体上内边距的分叉点：默认 20px = card.css 共享 .card-body 的 padding 顶边值。
+   需要「首段贴住卡头」的面板（HttpTasksPanel 的 http-writing-help 折叠卡）在组件
+   scoped 里只声明 --card-body-pt 变量，不得改写共享类的声明值；未声明变量的卡片
+   计算值不变。 */
+.tasks-page .card-body {
+  padding-top: var(--card-body-pt, 20px);
+}
+
 /* ==================== 共享版式：列表页 + 二级编辑页（tsk-*） ====================
    三个列表型面板（浏览器任务 / 直连任务 / 脚本）共用同一骨架：**列表态整页表格 +
    编辑态独占全宽的二级页**（方案 G），两态由 `?task=<id>` 表达。
@@ -347,6 +355,12 @@
 
 .tsk-spacer {
   flex: 1;
+}
+
+/* 计数与匹配数不折行：窄屏下「共 1 个任务」被压成两行（实测高 33px）很难看 */
+.tsk-foot > span:first-child,
+.tsk-foot > span:nth-child(2) {
+  white-space: nowrap;
 }
 
 /* 行尾 ⋯ 菜单（AppDropdownMenu 的 Content）。E6 起菜单由 Reka portal 出表格、
@@ -656,6 +670,38 @@
   background: var(--bg-hover);
 }
 
+/* 行内上移/下移（F11）：触屏上 HTML5 DnD 不可用，这是排序的第二入口；
+   真实 button 键盘可达，与拖拽柄同组放行首。列表数据由 useDragSort.moveBy 移动，
+   与拖拽共用同一份顺序语义与持久化载荷。 */
+.tsk-order-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tsk-order-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
+}
+
+.tsk-order-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tsk-order-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
 /* 拖拽中的那一行：整行弱化，作为"正在被移动"的反馈
    （原 `.task-item.dragging` 的等价物；列表从卡片改成表格后一度丢失了这个反馈）。
    刻意不做"落点指示线"：本列表是**实时交换**模型（拖过中线即换位），行本身已经在动，
@@ -765,9 +811,11 @@
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   /* 与截图列共用同一份竖向预算（见 .debug-screenshot）：步骤再长也只在列表内滚动，
      不会把整个面板顶出滚动条 */
   max-height: calc(92vh - 295px);
+  max-height: calc(92dvh - 295px);
   padding-right: 2px;
 }
 
@@ -967,6 +1015,7 @@
      间距（36px）− 截图头（32px）− 余量。两条路都不会把面板顶出滚动条。
      上下界：超宽屏最多 680px，极矮窗口至少 300px（此时面板体滚动）。 */
   max-height: max(300px, min(680px, calc(92vh - 295px)));
+  max-height: max(300px, min(680px, calc(92dvh - 295px)));
   object-fit: contain;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-hover);
@@ -989,7 +1038,9 @@
 /* 放大预览：宽度铺满弹窗即接近原图分辨率，超出高度时滚动查看整页 */
 .debug-zoom-body {
   max-height: 76vh;
+  max-height: 76dvh;
   overflow: auto;
+  overscroll-behavior: contain;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
 }

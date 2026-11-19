@@ -106,6 +106,14 @@
     gap: 4px;
   }
 
+  /* 设置路由的顶栏搜索是真输入框（≤1100px 下 min-width:180px），窄屏会把页面
+     标题挤没（390px 实测 .top-title-area 仅剩 16px，标题只露出半个字）：
+     改按视口宽度收缩，为紧凑标题（page-title-compact）留出可读宽度 */
+  .topbar-search--input {
+    min-width: 0;
+    width: clamp(110px, 30vw, 180px);
+  }
+
   .top-bar > .ws-reconnect-inline {
     grid-column: 1 / -1;
     grid-row: 2;
@@ -127,6 +135,12 @@
   .content-wrapper {
     padding: var(--space-md);
     scrollbar-gutter: auto;
+  }
+
+  /* 任务表脚部的操作提示在窄屏折成两行（与计数挤在一起），只留计数一行 */
+  .tsk-foot > .tsk-spacer,
+  .tsk-foot > span:last-child {
+    display: none;
   }
 
   /* 日志行四列在窄屏下折为两行：时间+徽章一行，消息独占一行，避免挤出视口 */

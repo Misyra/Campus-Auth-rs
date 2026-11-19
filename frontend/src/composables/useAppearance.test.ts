@@ -21,7 +21,7 @@ beforeEach(async () => {
   const attributes = new Map();
   const classList = { add: (name: string) => classes.add(name), remove: (name: string) => classes.delete(name), toggle: (name: string, on: boolean) => on ? classes.add(name) : classes.delete(name) };
   const style = { setProperty: (name: string, value: string) => styles.set(name, value), removeProperty: (name: string) => styles.delete(name) };
-  vi.stubGlobal("document", { documentElement: { style, classList, setAttribute: (name: string, value: string) => attributes.set(name, value), getAttribute: (name: string) => attributes.get(name) }, body: { style, classList } });
+  vi.stubGlobal("document", { documentElement: { style, classList, setAttribute: (name: string, value: string) => attributes.set(name, value), getAttribute: (name: string) => attributes.get(name), removeAttribute: (name: string) => attributes.delete(name) }, body: { style, classList } });
   system = { matches: false, addEventListener: vi.fn() };
   vi.stubGlobal("window", { matchMedia: (query: string) => query.includes("color-scheme") ? system : { matches: false } });
   storage = { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() };
