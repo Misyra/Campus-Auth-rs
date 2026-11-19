@@ -118,7 +118,15 @@ fn is_restricted_ipv4(v4: std::net::Ipv4Addr) -> bool {
 ///
 /// IP 字面量直接校验；域名解析失败或任一结果命中私网段即拒绝。
 async fn resolve_public(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // IPv6 字面量：`url::Url::host_str()` 返回带方括号形式（如 `[::1]`），而
+    // `IpAddr` 解析不认方括号——先剥一层方括号再按字面量解析，否则 IPv6 直连
+    // 地址会被误当域名、落进 DNS 解析失败分支被一律拒绝。剥括号后仍非法的
+    // 输入照旧走域名解析（fail-closed 语义不变，不因剥括号放行任何目标）
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
         if is_restricted_ip(ip) {
             return Err(format!("禁止访问内网/保留地址: {host}"));
         }
@@ -144,6 +152,10 @@ async fn resolve_public(host: &str, port: u16) -> Result<Vec<SocketAddr>, String
 /// `proxy` 为可选的代理 URL（如 `http://127.0.0.1:7890`）：设置后请求经代理
 /// 转发。注意此场景下实际连接目标是代理地址（本机），目标主机的公网校验
 /// 仍由 [`resolve_public`] 在发起前完成——代理侧的出口 IP 由代理自身决定。
+///
+/// IPv6 字面量 URL：hyper-util 解析时剥方括号后查 DNS 覆盖表，此处传入的
+/// `host` 带方括号，钉扎键不命中——但字面量经 getaddrinfo 恒解析回同一地址
+/// （无 DNS 查询，不存在权威 DNS 二次切换的 TOCTOU），钉扎失效不产生缺口。
 fn pinned_client(
     host: &str,
     addr: SocketAddr,
@@ -386,6 +398,27 @@ mod tests {
         assert!(!is_restricted_ip(IpAddr::V6(
             "2001:4860:4860::8888".parse().unwrap()
         )));
+    }
+
+    /// IPv6 字面量直连：`url::Url::host_str()` 带方括号（如 `[::1]`），剥一层
+    /// 方括号后应按字面量解析成功并返回钉扎地址（此前被误当域名、一律报
+    /// 「DNS 解析失败」）；受限 IPv6 字面量仍拒绝（fail-closed 语义不变）
+    #[tokio::test]
+    async fn test_ipv6_literal_resolves_as_address_not_dns() {
+        // 公网 IPv6 字面量：返回字面量钉扎地址而非 DNS 解析失败
+        let addrs = resolve_public("[2606:4700:4700::1111]", 443)
+            .await
+            .expect("公网 IPv6 字面量应按字面量解析");
+        assert_eq!(
+            addrs,
+            vec!["[2606:4700:4700::1111]:443".parse::<SocketAddr>().unwrap()]
+        );
+        // 受限 IPv6 字面量：剥括号后命中保留段，拒绝而非走 DNS
+        let err = resolve_public("[::1]", 80).await.unwrap_err();
+        assert!(err.contains("禁止访问内网"), "{err}");
+        // 剥括号后仍非法的输入照旧走域名解析（fail-closed 不变）
+        let err = resolve_public("[not-an-ip]", 80).await.unwrap_err();
+        assert!(err.contains("DNS 解析失败"), "{err}");
     }
 }
 
