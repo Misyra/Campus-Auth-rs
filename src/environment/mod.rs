@@ -3,11 +3,13 @@
 pub mod bootstrap;
 pub mod browser_registry;
 pub mod health;
+pub mod mirror;
 pub mod python;
 pub mod uv;
 
 pub use bootstrap::{bootstrap_capability, check_environment, retry_install};
 pub use browser_registry::{missing_components, site_packages_candidates};
+pub use mirror::{MirrorChoice, MirrorProbeEntry};
 pub use python::{ensure_venv, install_playwright, install_playwright_browser};
 pub use uv::{check_uv_on_path, download_uv, run_uv_sync, uv_exe_path, verify_sha256};
 
@@ -25,19 +27,14 @@ use crate::status::{InstallProgress, PartialSnapshot, StatusManager};
 
 /// uv GitHub Releases 基础 URL（主站）
 pub const UV_RELEASES_BASE: &str = "https://github.com/astral-sh/uv/releases/download";
-/// GitHub 代理镜像列表（按优先级排序，用于国内网络环境）
-pub const GITHUB_MIRRORS: &[&str] = &[
-    "https://ghfast.top/",
-    "https://gh-proxy.com/",
-    "https://mirror.ghproxy.com/",
-    "https://ghps.cc/",
-];
-/// GitHub API 代理镜像（用于获取版本号）
-pub const GITHUB_API_MIRRORS: &[&str] = &[
-    "https://ghfast.top/",
-    "https://gh-proxy.com/",
-    "https://mirror.ghproxy.com/",
-];
+/// uv 托管 Python 的默认下载源（python-build-standalone GitHub Releases）。
+/// `UV_PYTHON_INSTALL_MIRROR` 以镜像前缀替换该基址——uv sync 首建 venv 时
+/// 下载 CPython 走的就是这里，与 uv 二进制下载同属 GitHub 大文件痛点。
+pub const PYTHON_BUILD_STANDALONE_BASE: &str =
+    "https://github.com/astral-sh/python-build-standalone/releases/download";
+// 镜像清单收敛至 `utils::mirrors`（uv 下载 / Python 解释器下载 / 更新包下载三处共用），
+// re-export 保持调用路径稳定。
+pub use crate::utils::mirrors::{GITHUB_API_MIRRORS, GITHUB_MIRRORS};
 /// uv 下载目标三元组（按操作系统 + 架构）
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const UV_TARGET: &str = "x86_64-pc-windows-msvc";
@@ -63,6 +60,11 @@ pub const UV_TARGET: &str = "aarch64-unknown-linux-musl";
 ))]
 /// 不提供 uv 预编译包的架构；环境引导应在下载前拒绝。
 pub const UV_TARGET: &str = "unsupported";
+// 安卓 target 不在 uv 官方发布名单：安卓版不存在 Python Worker / 浏览器渠道，
+// 环境引导入口应在下载前明确拒绝（与 OpenWrt 的 unsupported 语义一致）。
+#[cfg(target_os = "android")]
+/// 不提供 uv 预编译包的操作系统；环境引导应在下载前拒绝。
+pub const UV_TARGET: &str = "unsupported";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 /// uv 下载目标三元组（按操作系统与 ABI 选择）。
 pub const UV_TARGET: &str = "x86_64-apple-darwin";
@@ -85,8 +87,11 @@ pub const UV_DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const UV_DOWNLOAD_MAX_RETRIES: u32 = 3;
 /// uv 下载重试基础间隔（指数退避：5s、10s、20s）
 pub const UV_DOWNLOAD_RETRY_DELAY: Duration = Duration::from_secs(5);
-/// 镜像测速超时：并发 HEAD/Range 探测的可接受上限，超时镜像直接淘汰
+/// 镜像测速超时：并发 Range GET 探测的单镜像总时限，超时候选按已测吞吐排序
 pub const UV_MIRROR_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 镜像测速字节预算：Range GET 每个候选最多拉取的字节数，以吞吐量（字节/秒）
+/// 而非建连延迟排序——直连 GitHub 常"连得上但跑不动"，延迟探测识别不了这类源
+pub const UV_MIRROR_PROBE_BYTES: usize = 256 * 1024;
 /// GitHub API 不可用时的 uv 版本兜底（避免国内网络下版本探测失败导致整个引导阻断）
 pub const UV_FALLBACK_VERSION: &str = "0.8.14";
 /// uv 最低版本要求
@@ -524,6 +529,22 @@ pub trait EnvironmentApi: Send + Sync {
     /// 供浏览器列表 API 与登录渠道选择共用，判定细节见
     /// [`browser_registry::missing_components`]（registry 精确 revision + 安装完成标记）。
     fn browser_engine_ready(&self, engine: &str) -> bool;
+    /// 并发测速 GitHub 直连与各镜像，逐源返回结果（初始化弹窗手动选源）。
+    ///
+    /// 默认空实现：测试替身无网络语义，真实管理器覆盖为实测。
+    async fn probe_mirrors(&self) -> Vec<MirrorProbeEntry> {
+        Vec::new()
+    }
+    /// 当前下载源选择偏好（auto/direct/mirror）。
+    ///
+    /// 默认 Auto：替身实现不落盘，行为与默认测速一致。
+    fn mirror_choice(&self) -> MirrorChoice {
+        MirrorChoice::Auto
+    }
+    /// 保存下载源选择偏好（默认静默成功，替身实现无磁盘语义）。
+    async fn set_mirror_choice(&self, _choice: MirrorChoice) -> Result<(), EnvironmentError> {
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -542,6 +563,18 @@ impl EnvironmentApi for EnvironmentManager {
 
     async fn ensure_worker_ready(&self) -> Result<(), EnvironmentError> {
         EnvironmentManager::ensure_worker_ready(self).await
+    }
+
+    async fn probe_mirrors(&self) -> Vec<MirrorProbeEntry> {
+        crate::environment::uv::probe_mirror_entries(self).await
+    }
+
+    fn mirror_choice(&self) -> MirrorChoice {
+        crate::environment::mirror::read_mirror_choice(self)
+    }
+
+    async fn set_mirror_choice(&self, choice: MirrorChoice) -> Result<(), EnvironmentError> {
+        crate::environment::mirror::write_mirror_choice(self, &choice).await
     }
 
     async fn retry_install(&self) -> Result<(), EnvironmentError> {

@@ -329,6 +329,14 @@ pub trait UpdaterApi: Send + Sync {
     ) -> Result<String, UpdaterError>;
     /// 读取上次检查状态（文件缺失或损坏返回 `None`）。
     fn last_check_state(&self) -> Option<LastCheckState>;
+    /// 前端 pin 的版本是否被版本单调闸门放行（回滚保护，T6-4）
+    ///
+    /// `POST /api/system/update` 的 pin 路径不经过清单拉取（「pin 不走清单」
+    /// 取舍），天然绕过清单侧的 [`ensure_manifest_not_rollback`]；本方法把同一
+    /// 闸门单独暴露给 Web 层：版本落在「> 当前 && < 同通道已见最高」区间
+    /// （疑似驱动降级安装）返回 `false`，其余情形（无记录 / 通道切换 /
+    /// 记录损坏 / 不高于当前）返回 `true`。
+    fn pinned_version_allowed(&self, version: &str) -> bool;
     /// 是否存在待应用更新标记（`update/pending.json`）
     ///
     /// 重启入口据此决策：有 pending 时必须走纯退出（由更新助手替换后重启），
@@ -370,6 +378,10 @@ impl UpdaterApi for UpdaterService {
 
     fn last_check_state(&self) -> Option<LastCheckState> {
         UpdaterService::last_check_state(self)
+    }
+
+    fn pinned_version_allowed(&self, version: &str) -> bool {
+        UpdaterService::pinned_version_allowed(self, version)
     }
 
     fn has_pending_update(&self) -> bool {
@@ -748,6 +760,24 @@ impl UpdaterService {
         read_last_check_state_file(&self.base_path)
     }
 
+    /// 前端 pin 的版本是否被版本单调闸门放行（Web 层 pin 路径的回滚保护）
+    ///
+    /// pin 不走清单，但 `update/last_check.json` 的 `highest_seen_*` 单调记忆
+    /// 同样适用：复用清单路径的 [`ensure_manifest_not_rollback`] 同一闸门，
+    /// 仅「> 当前 && < 同通道已见最高」区间（疑似驱动降级安装）拒绝，其余
+    /// （无记录 / 通道切换 / 记录损坏 / 不高于当前）放行。
+    pub fn pinned_version_allowed(&self, version: &str) -> bool {
+        // 解析失败：Web 层 into_pinned 已先行拒绝；这里按不放行兜底（fail-closed）
+        let Ok(remote) = Version::parse(version) else {
+            return false;
+        };
+        let settings = self.config.runtime().load().updater.clone();
+        let channel = channel_key(settings.channel);
+        let stored = self.last_check_state();
+        ensure_manifest_not_rollback(stored.as_ref(), channel, &self.current_version, &remote)
+            .is_ok()
+    }
+
     /// 暂存新二进制并触发助手进程
     ///
     /// 流程：已有 pending 则幂等返回 → 并发互斥 → 拒绝登录中 → 下载校验 →
@@ -936,28 +966,56 @@ impl UpdaterService {
     /// 与本地包暂存共用进度上报：下载期间经 Update 通道推送百分比（此前蹭
     /// Environment 通道，与环境安装进度互相覆盖且无消费方）；`available` 置 true
     /// ——正在应用的更新必然可用。
+    ///
+    /// 直连失败时按镜像代理前缀依次重试（仅 GitHub Release 资产 URL）：完整性
+    /// 不依赖传输路径——`download_and_verify` 的 SHA256 增量校验对每次重试同样
+    /// 生效，被污染镜像的产物会被拒。前置校验类错误（URL 白名单/缺摘要）与
+    /// 下载源无关，不重试。
     async fn download_archive(
         &self,
         info: &UpdateInfo,
         staging_dir: &Path,
     ) -> Result<PathBuf, UpdaterError> {
         let client = self.effective_client();
-        download::download_and_verify(
-            &client,
-            info,
-            staging_dir,
-            Some(&|percent| {
-                self.status.merge(PartialSnapshot::Update {
-                    available: true,
-                    progress: Some(InstallProgress {
-                        phase: "downloading_update".into(),
-                        percent,
-                        message: format!("下载更新 {}%", percent),
-                    }),
-                });
-            }),
-        )
-        .await
+        let progress: &(dyn Fn(u8) + Send + Sync) = &|percent| {
+            self.status.merge(PartialSnapshot::Update {
+                available: true,
+                progress: Some(InstallProgress {
+                    phase: "downloading_update".into(),
+                    percent,
+                    message: format!("下载更新 {}%", percent),
+                }),
+            });
+        };
+        match download::download_and_verify(&client, info, staging_dir, Some(progress)).await {
+            Ok(path) => Ok(path),
+            Err(direct_err)
+                if crate::utils::mirrors::is_github_release_asset_url(&info.url)
+                    && download::is_mirror_retryable(&direct_err) =>
+            {
+                tracing::warn!("更新包直连下载失败（{direct_err}），尝试镜像代理回退");
+                let mut last_err = direct_err;
+                for mirror_url in crate::utils::mirrors::github_release_asset_mirror_urls(&info.url)
+                {
+                    let mut alt = info.clone();
+                    alt.url = mirror_url;
+                    match download::download_and_verify(&client, &alt, staging_dir, Some(progress))
+                        .await
+                    {
+                        Ok(path) => {
+                            tracing::info!("经镜像代理下载更新包成功: {}", alt.url);
+                            return Ok(path);
+                        }
+                        Err(e) => {
+                            tracing::debug!("镜像代理下载失败 {}: {e}", alt.url);
+                            last_err = e;
+                        }
+                    }
+                }
+                Err(last_err)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// 下载 → 校验 → 解压 → 写 pending.json
@@ -1930,6 +1988,77 @@ mod tests {
             events.clone(),
         );
         (service, events)
+    }
+
+    // ============ pin 单调闸门（Web 层 pin 路径的回滚保护，T6-4 补口） ============
+
+    /// 写入一份检查状态文件（构造单调记忆）
+    fn write_last_check_state(base_path: &std::path::Path, state: &LastCheckState) {
+        let state_path = base_path.join(LAST_CHECK_FILE_NAME);
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &state_path,
+            serde_json::to_string(state).expect("序列化状态失败"),
+        )
+        .unwrap();
+    }
+
+    /// 状态文件 highest_seen 高于 pin 版本 → pin 落在「> 当前 && < 同通道已见
+    /// 最高」区间被拒；达到 / 超过已见最高、或不高于当前（Web 层先行拦截）放行
+    #[tokio::test]
+    async fn test_pinned_version_allowed_rejects_rollback_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        write_last_check_state(
+            base,
+            &LastCheckState {
+                highest_seen_version: "9.0.0".into(),
+                highest_seen_channel: "stable".into(),
+                ..Default::default()
+            },
+        );
+        let service = make_service(base).await;
+        // 默认通道 stable：pin 5.3.0（> 当前 && < 9.0.0）疑似驱动降级 → 拒绝
+        assert!(!service.pinned_version_allowed("5.3.0"));
+        // 恰为已见最高 / 更高 → 放行
+        assert!(service.pinned_version_allowed("9.0.0"));
+        assert!(service.pinned_version_allowed("9.1.0"));
+        // 不高于当前：清单闸门不构成拒绝（Web 层 into_pinned 已先行拦截）
+        assert!(service.pinned_version_allowed("1.0.0"));
+    }
+
+    /// 状态文件缺失（无单调记忆）→ 按无保护处理，一律放行
+    #[tokio::test]
+    async fn test_pinned_version_allowed_without_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = make_service(dir.path()).await;
+        assert!(service.pinned_version_allowed("5.3.0"));
+    }
+
+    /// 记录按通道隔离：单调记忆在其他通道时不压制本通道的 pin
+    #[tokio::test]
+    async fn test_pinned_version_allowed_channel_isolated() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        write_last_check_state(
+            base,
+            &LastCheckState {
+                highest_seen_version: "9.0.0".into(),
+                // 非当前通道（默认 stable）
+                highest_seen_channel: "all".into(),
+                ..Default::default()
+            },
+        );
+        let service = make_service(base).await;
+        assert!(service.pinned_version_allowed("5.3.0"));
+    }
+
+    /// 版本串解析失败 → 不放行（fail-closed；Web 层已先行拒绝，此处兜底）
+    #[tokio::test]
+    async fn test_pinned_version_allowed_rejects_unparseable_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = make_service(dir.path()).await;
+        assert!(!service.pinned_version_allowed("not-a-version"));
     }
 
     /// 起一个一次性本地清单服务：接受一次连接、读取请求后返回 `body` 并关闭

@@ -14,6 +14,7 @@ mod process;
 mod sync;
 mod verify;
 
+pub(crate) use download::probe_mirror_entries;
 pub(crate) use process::{CommandOutputError, command_output_streaming, uv_command};
 pub use sync::{install_ocr_dep, reconcile_ocr_preference, remove_ocr_dep, run_uv_sync};
 pub(crate) use verify::uv_executable_works;
@@ -24,14 +25,14 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::environment::{
-    EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
-    UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME,
+    EnvironmentError, EnvironmentManager, PROGRESS_UV_DOWNLOAD, UV_DOWNLOAD_MAX_RETRIES,
+    UV_DOWNLOAD_RETRY_DELAY, UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME,
 };
 use crate::utils::io_human::io_error_reason;
 
 use download::{
     download_file_streaming, download_text_with_mirrors, extract_uv_from_archive,
-    fetch_latest_uv_version, rank_mirror_urls, uv_archive_urls, uv_sha_urls,
+    fetch_latest_uv_version, rank_mirror_urls, uv_archive_url, uv_archive_urls, uv_sha_urls,
 };
 use process::command_output_with_cancel;
 
@@ -60,6 +61,7 @@ pub async fn download_uv(
     };
 
     let mut last_err_msg = String::new();
+    let mut last_ver = String::new();
 
     for attempt in 0..UV_DOWNLOAD_MAX_RETRIES {
         // 检查取消
@@ -76,6 +78,7 @@ pub async fn download_uv(
                 None => fetch_latest_uv_version(mgr).await?,
             }
         };
+        last_ver = ver.clone();
         let sha_urls = uv_sha_urls(&ver);
         let archive_urls = uv_archive_urls(&ver);
 
@@ -116,6 +119,17 @@ pub async fn download_uv(
         let tmp_archive = env_path.join("uv-archive.tmp");
         // 每轮下载前并发测速排序：最快的镜像优先，避免固定顺序下慢镜像拖满 300s 总超时
         let archive_order = rank_mirror_urls(mgr, &archive_urls).await;
+        // 测速结果透出到进度消息：让"先测速选源"对用户可见（host 形如 gh-proxy.com 或 github.com）
+        if let Some(&first) = archive_order.first() {
+            mgr.report_progress(
+                "downloading_uv",
+                PROGRESS_UV_DOWNLOAD.0,
+                &format!(
+                    "镜像测速完成，优先使用 {}",
+                    host_of_url(&archive_urls[first])
+                ),
+            );
+        }
         let mut archive_downloaded = false;
         for idx in archive_order {
             let archive_url = &archive_urls[idx];
@@ -229,12 +243,37 @@ pub async fn download_uv(
     }
 
     // 所有重试均失败：归类原因并给出可操作建议（与 Playwright 安装失败同风格），
-    // 重试次数由 UvDownloadIoFailed 的 Display 前缀（"重试 N 次"）携带，不再重复
+    // 重试次数由 UvDownloadIoFailed 的 Display 前缀（"重试 N 次"）携带，不再重复。
+    // 手动安装提示放在消息末尾——last_error 截断保留尾部（tail_chars），保证
+    // 最可操作的建议在超长详情挤占 600 字符时依然可见
     let (cause, hint) = classify_uv_download_failure(&last_err_msg);
+    let manual = manual_uv_install_hint(mgr.env_path(), &last_ver);
     Err(EnvironmentError::UvDownloadIoFailed {
         retries: UV_DOWNLOAD_MAX_RETRIES,
-        message: format!("原因：{cause}；建议：{hint}；详情：{last_err_msg}"),
+        message: format!("原因：{cause}；建议：{hint}；详情：{last_err_msg}；{manual}"),
     })
+}
+
+/// 手动安装 uv 的可操作提示：给出资产直连 URL、镜像加速 URL 与落盘目标路径。
+///
+/// 引导入口在下载前先探测 `<env>/uv(.exe)`（文件存在且 `--version` 可执行即
+/// 跳过下载，见 bootstrap），因此手动放置二进制与在线下载是等价路径——
+/// 下载链路彻底不可用（防火墙/代理全断）时的最后逃生门。
+fn manual_uv_install_hint(env_path: &std::path::Path, version: &str) -> String {
+    let asset_url = uv_archive_url(version);
+    let mirror_prefix = crate::environment::GITHUB_MIRRORS[0];
+    let dest = env_path.join(UV_EXE_NAME);
+    format!(
+        "手动安装：从 {asset_url} 下载压缩包（镜像加速：{mirror_prefix}{asset_url}），解出 {UV_EXE_NAME} 放到 {}，然后重新执行环境初始化",
+        dest.display()
+    )
+}
+
+/// 从 URL 提取 host 展示（用于进度消息呈现测速选中的下载源；镜像前缀 URL
+/// 如 `https://gh-proxy.com/https://github.com/...` 展示为 gh-proxy.com）
+fn host_of_url(url: &str) -> &str {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    after_scheme.split('/').next().unwrap_or(url)
 }
 
 /// uv 下载失败归类：从聚合错误文本识别超时/连接/HTTP 状态/磁盘等模式，
@@ -313,5 +352,37 @@ mod tests {
         let (cause, hint) = classify_uv_download_failure("boom");
         assert_eq!(cause, "下载失败");
         assert!(hint.contains("重试"));
+    }
+
+    /// 手动安装提示：包含直连资产 URL、镜像加速 URL 与目标落盘路径（含可执行文件名）
+    #[test]
+    fn test_manual_uv_install_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let hint = manual_uv_install_hint(dir.path(), "0.8.14");
+        let asset = uv_archive_url("0.8.14");
+        assert!(hint.contains(&asset), "须包含直连资产 URL: {hint}");
+        assert!(
+            hint.contains(&format!("{}{asset}", crate::environment::GITHUB_MIRRORS[0])),
+            "须包含镜像加速 URL: {hint}"
+        );
+        assert!(hint.contains(UV_EXE_NAME), "须包含可执行文件名: {hint}");
+        assert!(
+            hint.contains(&dir.path().join(UV_EXE_NAME).display().to_string()),
+            "须包含目标路径: {hint}"
+        );
+    }
+
+    /// host 提取：直连 URL 与镜像前缀 URL 都取真实 host
+    #[test]
+    fn test_host_of_url() {
+        assert_eq!(
+            host_of_url("https://github.com/astral-sh/uv/releases/download/x"),
+            "github.com"
+        );
+        assert_eq!(
+            host_of_url("https://gh-proxy.com/https://github.com/a/b"),
+            "gh-proxy.com"
+        );
+        assert_eq!(host_of_url("not-a-url"), "not-a-url");
     }
 }

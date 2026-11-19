@@ -1409,6 +1409,36 @@ export interface EnvironmentStatus {
   last_error: string | null;
 }
 
+/** GitHub 下载源选择偏好：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像） */
+export type MirrorChoice =
+  | { choice: "auto" }
+  | { choice: "direct" }
+  | { choice: "mirror"; mirror: string };
+
+/** 单个下载源的测速结果（初始化弹窗镜像选择行） */
+export interface MirrorProbeEntry {
+  /** 源类型：direct（GitHub 直连）/ mirror（代理镜像） */
+  kind: "direct" | "mirror";
+  /** 镜像前缀（直连为空串；选中偏好即存该值） */
+  prefix: string;
+  /** 展示名（host：github.com / gh-proxy.com 等） */
+  label: string;
+  /** 是否测得数据（false = 超时/失败/零字节） */
+  ok: boolean;
+  /** 已测字节数 */
+  bytes: number;
+  /** 总耗时（毫秒） */
+  elapsed_ms: number;
+  /** 实测吞吐（字节/秒，失败为 0） */
+  throughput: number;
+}
+
+/** POST /api/environment/mirror-probe 响应 */
+export interface MirrorProbeResponse {
+  selected: MirrorChoice;
+  results: MirrorProbeEntry[];
+}
+
 /** 初始化状态 */
 export interface InitStatus {
   agreed: boolean;
@@ -1494,6 +1524,35 @@ export interface AiGenerateResult {
   model: string;
   base_url: string;
 }
+
+/**
+ * AI 流式生成 SSE 事件帧（POST /api/ai/generate/stream 的 `data:` JSON 载荷）。
+ *
+ * 判别字段 `type` 对齐后端 `ai::generate::StreamEvent`（serde tag = "type"、
+ * snake_case）的 8 变体，外加路由层在流首直发的 `started` 帧（回显实际生效的
+ * model / base_url，见 `web/routes/ai.rs`）。各变体字段为 wire 权威契约：
+ * 解析边界一次性收窄（见 `api/index.ts` 的 `generateStream`），消费侧
+ * （AiTaskView）按 type 收窄后直接读字段、不再逐字段断言。
+ */
+export type AiStreamEvent =
+  /** 生成开始（路由层直发）：回显实际生效的模型与接口地址 */
+  | { type: "started"; model: string; base_url: string }
+  /** 开始一次生成尝试 */
+  | { type: "attempt_start"; attempt: number; max: number }
+  /** 收到生成内容增量 */
+  | { type: "delta"; attempt: number; text: string }
+  /** 本次生成内容接收完毕（text_len 为累计 UTF-8 字节数） */
+  | { type: "attempt_delta_done"; attempt: number; text_len: number }
+  /** 本次任务通过校验 */
+  | { type: "validated"; attempt: number }
+  /** 本次任务校验失败（errors 为执行 / 校验错误列表） */
+  | { type: "validation_failed"; attempt: number; errors: string[] }
+  /** 准备重试生成（next 为下一次尝试序号） */
+  | { type: "retrying"; attempt: number; next: number }
+  /** 生成成功并返回完整任务（task 为通过校验的任务 JSON，即动态字段本体） */
+  | { type: "done"; attempts: number; warnings: string[]; task: Record<string, unknown> }
+  /** 生成失败（终态帧） */
+  | { type: "error"; message: string };
 
 /** 应用事件类型标识（后端 `crate::events::AppEvent` 九变体，snake_case） */
 export type AppEventType =

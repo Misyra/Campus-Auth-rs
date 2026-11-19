@@ -13,6 +13,7 @@ mod routes;
 mod ssrf;
 pub mod state;
 mod static_files;
+mod validate;
 mod ws;
 
 use axum::Router;
@@ -290,6 +291,12 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/environment/bootstrap", || {
             post(routes::system::bootstrap_environment)
         }),
+        ("POST", "/api/environment/mirror-probe", || {
+            post(routes::system::probe_environment_mirrors)
+        }),
+        ("PUT", "/api/environment/mirror-preference", || {
+            put(routes::system::set_mirror_preference)
+        }),
         // ---- 卸载（uninstall）----
         ("GET", "/api/uninstall/detect", || {
             get(routes::uninstall::detect_uninstall)
@@ -396,10 +403,14 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         // ---- 鉴权（auth）----
         // bootstrap/管理密码换取端点：请求方必须已持有不经网络发放的凭据
         // （界面 fragment 携带的 bootstrap，或非回环绑定下的管理密码），
-        // 不构成免鉴权绕过，中间件对此路径豁免；旧 GET /api/auth/token 已删除，
-        // 不存在任何免鉴权发放 token 的端点（见 web::auth 模块说明）
+        // 不构成免鉴权绕过，中间件对此路径豁免（见 web::auth 模块说明）
         ("POST", "/api/auth/exchange", || {
             post(auth::exchange_handler)
+        }),
+        // 回环监听下的本地免引导入口：直接下发 token（2026-11-13 本地信任模型，
+        // 非回环绑定 404；取舍与残留风险见 web::auth 模块文档）
+        ("GET", "/api/auth/local-token", || {
+            get(auth::local_token_handler)
         }),
     ]
 }
@@ -636,5 +647,49 @@ mod tests {
             script, "script-src 'self'",
             "script-src 只应限 'self'，不得引入外部脚本源"
         );
+    }
+
+    /// 组合级 rebinding 探针：鉴权豁免端点仍被 Host 校验包裹
+    ///
+    /// 钉住 `web::host` 模块声明的主要防护对象——rebinding 请求打到
+    /// `GET /api/auth/local-token`（auth 层豁免）必须被 host 层拦成 403，
+    /// 而非 401 / 200。auth / host 各自的单测互不感知挂载顺序，本测试把
+    /// 「auth 外层 → host 内层」的组合行为整体锁定：调换挂载顺序、把
+    /// local-token 移出豁免表或 host 层被绕过时直接失败。
+    #[tokio::test]
+    async fn rebinding_request_to_local_token_is_rejected_by_host_layer() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode, header};
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        // 与 build_router 同序：host 先挂（内层）、auth 后挂（外层）
+        let app = Router::new()
+            .route("/api/auth/local-token", get(|| async { "token" }))
+            .layer(middleware::from_fn(move |req, next| {
+                super::host::validate_host(super::host::HostPolicy::LoopbackOnly, req, next)
+            }))
+            .layer(middleware::from_fn_with_state(
+                std::sync::Arc::from("test-token"),
+                super::auth::auth_middleware,
+            ));
+
+        // rebinding 形态：Host 为攻击者域名 → host 层 403（非 401，更非 200）
+        let rebinding = Request::builder()
+            .uri("/api/auth/local-token")
+            .header(header::HOST, "attacker.example.com:50721")
+            .body(Body::empty())
+            .expect("构造请求");
+        let resp = app.clone().oneshot(rebinding).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 对照组：回环 Host 正常穿过豁免路径拿到 token
+        let legit = Request::builder()
+            .uri("/api/auth/local-token")
+            .header(header::HOST, "127.0.0.1:50721")
+            .body(Body::empty())
+            .expect("构造请求");
+        let resp = app.oneshot(legit).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

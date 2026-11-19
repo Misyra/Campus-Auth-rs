@@ -10,6 +10,7 @@ import type { RequestOptions } from "./client";
 import type {
   AiCaptureResult,
   AiLlmConfig,
+  AiStreamEvent,
   AutostartStatus,
   AutostartToggleResult,
   BackgroundUploadResult,
@@ -29,6 +30,8 @@ import type {
   LoginResultResponse,
   LoginHistoryItem,
   LogEntry,
+  MirrorChoice,
+  MirrorProbeResponse,
   MutationResult,
   NetworkDetectResult,
   NetworkTestResult,
@@ -243,27 +246,25 @@ export const systemApi = {
 
 /** 环境初始化（uv sync + Chromium，POST /api/environment/bootstrap） */
 export const environmentApi = {
+  // 响应即环境状态全量回包：与 types.ts 的 EnvironmentStatus 12 字段逐字段
+  // 对质（后端无 message 附加字段），直接复用不再内联复刻
   bootstrap: (opts?: RequestOptions) =>
-    http.post<
-      MutationResult & {
-        capability_ready: boolean;
-        uv_ready: boolean;
-        python_ready: boolean;
-        worker_ready: boolean;
-        manifest_current: boolean;
-        playwright_ready: boolean;
-        system_browser_ready: boolean;
-        ocr_enabled: boolean;
-        ocr_ready: boolean;
-        stage: string;
-        progress: { phase: string; percent: number; message: string } | null;
-        last_error: string | null;
-      }
-    >("/api/environment/bootstrap", null, { timeout: 650000, ...opts }),
+    http.post<EnvironmentStatus>(
+      "/api/environment/bootstrap",
+      null,
+      { timeout: 650000, ...opts },
+    ),
   fetchStatus: async (): Promise<EnvironmentStatus | null> => {
+    // InitStatus 自带可选 environment 字段（types.ts），双重断言已失效
     const data = await http.get<InitStatus>("/api/init-status");
-    return (data as InitStatus & { environment?: EnvironmentStatus }).environment ?? null;
+    return data.environment ?? null;
   },
+  /** 并发测速 GitHub 直连与各镜像（初始化弹窗镜像选择行，≤5s 实测窗口） */
+  probeMirrors: () =>
+    http.post<MirrorProbeResponse>("/api/environment/mirror-probe", null, { timeout: 15000 }),
+  /** 保存下载源选择偏好（auto/direct/mirror），后续 uv 与 Python 下载按此执行 */
+  setMirrorPreference: (choice: MirrorChoice) =>
+    http.put<{ selected: MirrorChoice }>("/api/environment/mirror-preference", choice),
 };
 
 /** 配置方案 */
@@ -435,7 +436,8 @@ export const aiApi = {
   async generateStream(
     payload: { extra_prompt?: string },
     opts: {
-      onEvent: (ev: Record<string, unknown>) => void;
+      /** 每帧回调：帧形态由后端 `ai::generate::StreamEvent` 序列化钉死，见 AiStreamEvent */
+      onEvent: (ev: AiStreamEvent) => void;
       signal?: AbortSignal;
       /** 空闲超时 ms，默认 600_000（10 分钟），有内容即重置，仅无内容连续达阈值才超时 */
       idleTimeoutMs?: number;
@@ -477,9 +479,8 @@ export const aiApi = {
       const decoder = new TextDecoder();
       let buf = "";
       let terminalReceived = false;
-      const deliver = (ev: Record<string, unknown>) => {
-        const type = String(ev.type ?? "");
-        if (type === "done" || type === "error") terminalReceived = true;
+      const deliver = (ev: AiStreamEvent) => {
+        if (ev.type === "done" || ev.type === "error") terminalReceived = true;
         opts.onEvent(ev);
       };
       while (true) {
@@ -499,7 +500,9 @@ export const aiApi = {
             const data = line.slice(5).trim();
             if (!data) continue;
             try {
-              const ev = JSON.parse(data) as Record<string, unknown>;
+              // wire 帧信任边界：帧形态由后端 `ai::generate::StreamEvent` 序列化钉死，
+              // 解析处一次性收窄到 AiStreamEvent 判别联合，消费侧免逐字段断言
+              const ev = JSON.parse(data) as AiStreamEvent;
               // 仅真实数据帧续命空闲计时：后端 ": keepalive" 注释帧只证明连接存活，
               // 不代表有内容——否则任何 ≥ keepalive 间隔的空闲阈值都永远打不到
               resetIdle();
@@ -511,7 +514,7 @@ export const aiApi = {
       // 处理尾部残留
       const tail = buf.trim();
       if (tail.startsWith("data:")) {
-        try { deliver(JSON.parse(tail.slice(5).trim()) as Record<string, unknown>); } catch { /* 尾部残包非完整 JSON，可忽略 */ }
+        try { deliver(JSON.parse(tail.slice(5).trim()) as AiStreamEvent); } catch { /* 尾部残包非完整 JSON，可忽略 */ }
       }
       if (!terminalReceived) throw new Error("生成连接意外结束，未收到完成状态，请重试");
     } catch (e) {

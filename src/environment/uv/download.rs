@@ -2,9 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+use reqwest::Client;
+
 use crate::environment::{
-    EnvironmentError, EnvironmentManager, UV_DOWNLOAD_STALL_TIMEOUT, UV_DOWNLOAD_TIMEOUT,
-    UV_EXE_NAME, UV_FALLBACK_VERSION, UV_MIRROR_PROBE_TIMEOUT, UV_RELEASES_BASE, UV_TARGET,
+    EnvironmentError, EnvironmentManager, MirrorChoice, MirrorProbeEntry,
+    UV_DOWNLOAD_STALL_TIMEOUT, UV_DOWNLOAD_TIMEOUT, UV_EXE_NAME, UV_FALLBACK_VERSION,
+    UV_MIRROR_PROBE_BYTES, UV_MIRROR_PROBE_TIMEOUT, UV_RELEASES_BASE, UV_TARGET,
 };
 use crate::utils::io_human::io_error_reason;
 
@@ -60,14 +63,39 @@ fn github_api_urls() -> Vec<String> {
     urls
 }
 
-/// 并发探测镜像可用性，按首字节到达延迟升序返回 URL 索引。
+/// 并发探测镜像的实测下载吞吐，按吞吐量降序返回 URL 索引。
 ///
-/// - 每个 URL 并发发起 `HEAD`（失败自动回退 `Range: bytes=0-0` 的 GET）；
-/// - 超时（`UV_MIRROR_PROBE_TIMEOUT`）或网络/非 2xx 的镜像直接淘汰；
-/// - 成功镜像按耗时升序排序，作为后续下载的尝试顺序——最快的优先。
+/// 用户在初始化弹窗显式选择下载源（[`MirrorChoice`]）时跳过测速：选中源最前、
+/// 其余保持原序兜底；`Direct` 保持原序（直连本就在首位）；仅 `Auto` 走实测。
+///
+/// 自动路径：每个候选并发发起 `Range: bytes=0-{预算-1}` 的 GET，在总时限
+/// （[`UV_MIRROR_PROBE_TIMEOUT`]）内最多读取 [`UV_MIRROR_PROBE_BYTES`] 字节，
+/// 以"字节/秒"实测吞吐排序——直连 GitHub 常见"建连快但跑不动"，仅测建连
+/// 延迟的旧口径识别不了这类源，会先撞 300s 总超时再换镜像。
+///
+/// 探测失败（超时且零字节 / 非 2xx / 连接错误）的候选不淘汰：追加到序列末尾
+/// 保持原序兜底——探测路径不可用不代表下载路径不可用（部分代理对 Range 请求
+/// 的处理与完整 GET 不一致，如 ghfast.top 曾对 Range 返回 403 而正常下载可用）。
 pub(super) async fn rank_mirror_urls(mgr: &EnvironmentManager, urls: &[String]) -> Vec<usize> {
     if urls.len() <= 1 {
         return (0..urls.len()).collect();
+    }
+    // 显式选源优先于测速：偏好损坏/缺失回退 Auto，不会阻断下载
+    match crate::environment::mirror::read_mirror_choice(mgr) {
+        MirrorChoice::Mirror(prefix) => {
+            tracing::debug!("镜像测速跳过：用户已固定下载源 {prefix}");
+            let mut order: Vec<usize> = urls
+                .iter()
+                .enumerate()
+                .filter(|(_, url)| url.starts_with(prefix.as_str()))
+                .map(|(idx, _)| idx)
+                .collect();
+            let rest: Vec<usize> = (0..urls.len()).filter(|idx| !order.contains(idx)).collect();
+            order.extend(rest);
+            return order;
+        }
+        MirrorChoice::Direct => return (0..urls.len()).collect(),
+        MirrorChoice::Auto => {}
     }
     let client = mgr.http_client().clone();
     let mut handles = Vec::with_capacity(urls.len());
@@ -75,64 +103,145 @@ pub(super) async fn rank_mirror_urls(mgr: &EnvironmentManager, urls: &[String]) 
         let client = client.clone();
         let url = url.clone();
         handles.push(tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            let outcome = tokio::time::timeout(UV_MIRROR_PROBE_TIMEOUT, async {
-                // 优先 HEAD：多数镜像与 GitHub Release 支持；不落地 body
-                let head_ok = client
-                    .head(&url)
-                    .header("User-Agent", "campus-auth")
-                    .send()
-                    .await
-                    .and_then(|r| r.error_for_status().map(|_| ()))
-                    .is_ok();
-                if head_ok {
-                    return Ok(());
-                }
-                // HEAD 不被支持（如部分代理镜像）时回退到 1 字节 Range GET
-                client
-                    .get(&url)
-                    .header("User-Agent", "campus-auth")
-                    .header("Range", "bytes=0-0")
-                    .send()
-                    .await
-                    .and_then(|r| r.error_for_status().map(|_| ()))
-                    .map(|_| ())
-            })
-            .await;
-            let elapsed = started.elapsed();
-            match outcome {
-                Ok(Ok(())) => Some((idx, elapsed)),
-                _ => None,
-            }
+            let outcome = probe_mirror_throughput(&client, &url).await;
+            (idx, outcome)
         }));
     }
-    let mut ranked: Vec<(usize, std::time::Duration)> = Vec::new();
-    let mut failed = 0usize;
+    let mut results = Vec::with_capacity(handles.len());
     for h in handles {
         match h.await {
-            Ok(Some(pair)) => ranked.push(pair),
-            Ok(None) => failed += 1,
-            Err(_) => failed += 1,
+            Ok((idx, outcome)) => results.push((idx, outcome)),
+            // JoinError 仅在探测任务 panic 时出现；idx 无法回收，按失败兜底
+            Err(_) => results.push((usize::MAX, None)),
         }
     }
-    ranked.sort_by_key(|(_, d)| *d);
-    if ranked.is_empty() {
-        tracing::debug!("镜像测速：{} 个全部超时/失败，回退原序逐个尝试", urls.len());
-        return (0..urls.len()).collect();
+    let ok = results.iter().filter(|(_, o)| o.is_some()).count();
+    tracing::debug!(
+        "镜像测速：{ok} 个可用、{} 个零字节/失败，按实测吞吐排序（最快优先）",
+        results.len() - ok
+    );
+    order_from_probe_results(results)
+}
+
+/// 探测结果的纯排序：成功项按吞吐（字节/秒）降序，失败项按原序追加末尾兜底。
+/// 抽成纯函数便于无网络单测。
+fn order_from_probe_results(
+    results: Vec<(usize, Option<(usize, std::time::Duration)>)>,
+) -> Vec<usize> {
+    let mut ok: Vec<(usize, f64)> = Vec::new();
+    let mut failed: Vec<usize> = Vec::new();
+    for (idx, outcome) in results {
+        match outcome {
+            Some((bytes, elapsed)) => {
+                // 微小文件（SHA256 等）瞬时读完，耗时近零时钳到 1ms 防除零
+                let secs = elapsed.as_secs_f64().max(0.001);
+                ok.push((idx, bytes as f64 / secs));
+            }
+            None => failed.push(idx),
+        }
     }
-    if failed > 0 {
-        tracing::debug!(
-            "镜像测速：{} 个可用、{} 个超时/失败，按延迟排序",
-            ranked.len(),
-            failed
-        );
-    } else {
-        tracing::debug!(
-            "镜像测速：{} 个均可用，按延迟排序（最快优先）",
-            ranked.len()
-        );
+    ok.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ok.into_iter().map(|(idx, _)| idx).chain(failed).collect()
+}
+
+/// 单候选探测：Range GET 拉取至多 [`UV_MIRROR_PROBE_BYTES`] 字节，
+/// 返回 (已读字节, 累计耗时)；零字节失败返回 None。
+///
+/// 预算到达 / 流提前结束（小文件）/ 读取错误 / 时限耗尽都以已读字节参与排序——
+/// 半途拿到数据的候选仍是有用样本，只有零字节才视为失败。
+async fn probe_mirror_throughput(
+    client: &Client,
+    url: &str,
+) -> Option<(usize, std::time::Duration)> {
+    let started = std::time::Instant::now();
+    let deadline = started + UV_MIRROR_PROBE_TIMEOUT;
+    let mut resp = client
+        .get(url)
+        .header("User-Agent", "campus-auth")
+        .header("Range", format!("bytes=0-{}", UV_MIRROR_PROBE_BYTES - 1))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let mut bytes = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, resp.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                bytes += chunk.len();
+                if bytes >= UV_MIRROR_PROBE_BYTES {
+                    break;
+                }
+            }
+            // EOF：SHA256 等小文件在预算内完整读完
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+        }
     }
-    ranked.into_iter().map(|(idx, _)| idx).collect()
+    let elapsed = started.elapsed();
+    (bytes > 0).then_some((bytes, elapsed))
+}
+
+/// 直连 + 各镜像前缀构造的 GitHub Release 资产探测 URL 列表（直连在前）。
+///
+/// 测速 URL 复用 uv 的发布资产（兜底版本真实存在）：python-build-standalone
+/// 与 uv 同 host 同 CDN，对 GitHub 大文件链路的路由结论互通。
+pub(crate) fn github_asset_probe_urls() -> Vec<String> {
+    let base = uv_archive_url(UV_FALLBACK_VERSION);
+    let mut urls = Vec::with_capacity(1 + crate::environment::GITHUB_MIRRORS.len());
+    urls.push(base.clone());
+    for mirror in crate::environment::GITHUB_MIRRORS {
+        urls.push(format!("{mirror}{base}"));
+    }
+    urls
+}
+
+/// 并发测速直连与各镜像（初始化弹窗手动选源）：逐源返回
+/// [`MirrorProbeEntry`]，与 [`rank_mirror_urls`] 共用同一探测实现与字节预算。
+pub(crate) async fn probe_mirror_entries(mgr: &EnvironmentManager) -> Vec<MirrorProbeEntry> {
+    let urls = github_asset_probe_urls();
+    let client = mgr.http_client().clone();
+    let mut handles = Vec::with_capacity(urls.len());
+    for url in &urls {
+        let client = client.clone();
+        let url = url.clone();
+        handles.push(tokio::spawn(async move {
+            probe_mirror_throughput(&client, &url).await
+        }));
+    }
+    let mut entries = Vec::with_capacity(urls.len());
+    for (url, handle) in urls.iter().zip(handles) {
+        // 探测任务 panic 按「不可用」呈现（与 rank 的兜底口径一致）
+        let outcome = handle.await.ok().flatten();
+        let (kind, prefix) = match crate::environment::mirror::mirror_prefix_of(url) {
+            Some(m) => ("mirror", m),
+            None => ("direct", ""),
+        };
+        entries.push(match outcome {
+            Some((bytes, elapsed)) => MirrorProbeEntry {
+                kind,
+                prefix: prefix.to_string(),
+                label: super::host_of_url(url).to_string(),
+                ok: true,
+                bytes,
+                elapsed_ms: elapsed.as_millis() as u64,
+                throughput: (bytes as f64 / elapsed.as_secs_f64().max(0.001)) as u64,
+            },
+            None => MirrorProbeEntry {
+                kind,
+                prefix: prefix.to_string(),
+                label: super::host_of_url(url).to_string(),
+                ok: false,
+                bytes: 0,
+                elapsed_ms: 0,
+                throughput: 0,
+            },
+        });
+    }
+    entries
 }
 
 /// 通过 GitHub API 获取 uv 最新版本号（先并发测速选最快镜像，再按序尝试）
@@ -401,6 +510,35 @@ mod tests {
         let shas = uv_sha_urls("0.5.0");
         assert_eq!(shas[0], uv_sha_url("0.5.0"));
         assert_eq!(shas.len(), archives.len());
+    }
+
+    /// 探测排序：成功项按吞吐（字节/秒）降序——同耗时高字节与同字节低耗时都应靠前
+    #[test]
+    fn test_order_from_probe_results_by_throughput() {
+        let dur = |ms: u64| std::time::Duration::from_millis(ms);
+        let results = vec![
+            (0, Some((64, dur(100)))),       // 640 B/s：SHA 小文件秒回
+            (1, Some((262_144, dur(500)))),  // ≈524 KB/s
+            (2, Some((100_000, dur(400)))),  // 250 KB/s
+            (3, Some((262_144, dur(1000)))), // 262 KB/s
+        ];
+        assert_eq!(order_from_probe_results(results), vec![1, 3, 2, 0]);
+    }
+
+    /// 探测排序：失败候选不淘汰，按原序追加到成功项之后兜底
+    #[test]
+    fn test_order_from_probe_results_failed_appended() {
+        let dur = std::time::Duration::from_millis(100);
+        let results = vec![
+            (0, None),
+            (1, Some((262_144, dur))),
+            (2, None),
+            (3, Some((1024, dur))),
+        ];
+        assert_eq!(order_from_probe_results(results), vec![1, 3, 0, 2]);
+        // 全部失败：回退原序
+        let results = vec![(0, None), (1, None), (2, None)];
+        assert_eq!(order_from_probe_results(results), vec![0, 1, 2]);
     }
 
     /// zip 提取：从含 uv.exe 的 zip 中正确提取（Windows 资产格式）

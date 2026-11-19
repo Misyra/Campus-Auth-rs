@@ -173,6 +173,7 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
         "version": env!("CARGO_PKG_VERSION"),
         "base_path": base_path.to_string_lossy(),
         "openwrt": cfg!(feature = "openwrt"),
+        "android": cfg!(feature = "android"),
         // 实际监听端口优先读运行时端口文件：`--port` CLI 覆盖与冲突重试
         // 只体现在该文件；无文件（如轻量模式未启动 Web）时回退配置值。
         "port": crate::utils::paths::read_runtime_port(&base_path).unwrap_or(rt.app.port),
@@ -690,10 +691,40 @@ pub async fn check_update(
     }
 }
 
+/// 上次更新检查状态载荷（`updater::LastCheckState` 的线格式镜像，字段一一对应；
+/// 漂移由 `update_state_data_matches_last_check_state_wire_shape` 守卫钉住）
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct UpdateStateData {
+    /// 上次检查时间（UTC RFC3339；从未检查过为空串）
+    pub last_check_at: String,
+    /// 是否发现更新（检查失败时为 false）
+    pub has_update: bool,
+    /// 远程最新版本号（检查失败或从未检查为空串）
+    pub latest_version: String,
+    /// 上次检查失败原因（成功时为空串）
+    pub error: String,
+    /// 远程发布是否缺少当前平台的安装包（区分"已是最新"与"无本平台包"）
+    pub platform_unavailable: bool,
+    /// 已见过的最高清单版本（版本回滚保护记忆；空串 = 尚无记录）
+    pub highest_seen_version: String,
+    /// `highest_seen_version` 对应的更新通道键（"stable"/"prerelease"/"all"）
+    pub highest_seen_channel: String,
+}
+
 /// GET /api/update-state — 上次更新检查状态（设置页"上次检查时间"数据源）
 ///
 /// 只读回放 `update/last_check.json`：手动"立即检查"与后台自动检查成功/失败
-/// 都会刷新；文件缺失（从未检查过）返回空对象，由前端显示"从未检查"。
+/// 都会刷新；文件缺失（从未检查过）时各字段为默认空值，由前端显示"从未检查"。
+#[utoipa::path(
+    get,
+    path = "/api/update-state",
+    operation_id = "get_api_update_state",
+    tag = "system",
+    responses(
+        (status = 200, description = "上次更新检查状态（从未检查过时字段为默认空值）", body = DataEnvelope<UpdateStateData>),
+        (status = 500, description = "状态序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn update_state(
     State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -721,7 +752,8 @@ impl ApplyUpdateBody {
     /// 三项齐备且通过安全校验时，构造可直接下发的 [`UpdateInfo`]
     ///
     /// 任一校验不通过返回 `None`，调用方回退到服务端重新拉取清单。
-    fn into_pinned(self) -> Option<crate::updater::UpdateInfo> {
+    /// `updater` 用于查询版本单调闸门：pin 不走清单，但回滚保护记忆仍适用。
+    fn into_pinned(self, updater: &dyn UpdaterApi) -> Option<crate::updater::UpdateInfo> {
         let (version, url, sha256) = (self.version?, self.url?, self.sha256?);
         // 与下载路径同一白名单：https 放行，http 仅精确回环。
         // pin 允许任意 https host 并未放宽信任面——release_source_url 本就
@@ -742,6 +774,15 @@ impl ApplyUpdateBody {
         let remote = semver::Version::parse(&version).ok()?;
         if !crate::updater::check::compare_versions(&current, &remote) {
             tracing::warn!(%version, "拒绝固定版本更新：不高于当前版本");
+            return None;
+        }
+        // pin 不走清单（省一次全量清单 + sha 伴随文件拉取），因此天然绕过清单
+        // 路径的版本单调闸门；此处补同一闸门：pinned version 落在
+        // 「> 当前 && < 同通道已见最高」区间即疑似驱动降级安装（前端快照可能
+        // 是重放的旧版本），warn 后回退 `None` 走服务端重查——重查路径自带
+        // ensure_manifest_not_rollback 与签名校验
+        if !updater.pinned_version_allowed(&version) {
+            tracing::warn!(%version, "拒绝固定版本更新：低于同通道已见最高版本（疑似回滚），回退服务端重查");
             return None;
         }
         Some(crate::updater::UpdateInfo {
@@ -772,7 +813,7 @@ pub async fn apply_update(
     State(updater): State<Arc<dyn UpdaterApi>>,
     body: Option<Json<ApplyUpdateBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let info = match body.and_then(|Json(b)| b.into_pinned()) {
+    let info = match body.and_then(|Json(b)| b.into_pinned(updater.as_ref())) {
         Some(pinned) => {
             tracing::info!(version = %pinned.latest_version, "使用前端确认的固定版本");
             pinned
@@ -1028,6 +1069,124 @@ pub async fn bootstrap_environment(
         "progress": st.progress,
         "last_error": st.last_error,
     })))
+}
+
+/// 下载源选择偏好线格式（`environment::MirrorChoice` 的镜像：`{"choice":"auto"}` /
+/// `{"choice":"direct"}` / `{"choice":"mirror","mirror":"<前缀>"}`）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorSelectionData {
+    /// 选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像）
+    pub choice: String,
+    /// 镜像前缀（choice=mirror 时必在镜像名单内；其余选择无该字段）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<String>,
+}
+
+/// 单个下载源的测速结果（`environment::MirrorProbeEntry` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorProbeEntryData {
+    /// 源类型：direct（GitHub 直连）/ mirror（代理镜像）
+    pub kind: String,
+    /// 镜像前缀（直连为空串；选中偏好即存该值）
+    pub prefix: String,
+    /// 展示名（host，如 github.com / gh-proxy.com）
+    pub label: String,
+    /// 是否测得数据（false = 超时/失败/零字节，UI 显示「不可用」）
+    pub ok: bool,
+    /// 已测字节数
+    pub bytes: u64,
+    /// 总耗时（毫秒）
+    pub elapsed_ms: u64,
+    /// 实测吞吐（字节/秒，失败为 0）
+    pub throughput: u64,
+}
+
+/// POST /api/environment/mirror-probe 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorProbeData {
+    /// 当前选源偏好（与测速结果一并返回，弹窗打开即选中对应行）
+    pub selected: MirrorSelectionData,
+    /// 逐源实测吞吐结果
+    pub results: Vec<MirrorProbeEntryData>,
+}
+
+/// PUT /api/environment/mirror-preference 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorPreferenceData {
+    /// 保存后的选源偏好（回显）
+    pub selected: MirrorSelectionData,
+}
+
+/// POST /api/environment/mirror-probe — 并发测速 GitHub 直连与各镜像源
+///
+/// 初始化弹窗镜像选择行的数据源：每次调用都实测（对 uv 发布资产 Range 拉取
+/// 256KiB），返回逐源吞吐结果与当前选源偏好（auto/direct/mirror）。
+#[utoipa::path(
+    post,
+    path = "/api/environment/mirror-probe",
+    operation_id = "post_api_environment_mirror_probe",
+    tag = "system",
+    responses(
+        (status = 200, description = "逐源实测吞吐结果与当前选源偏好", body = DataEnvelope<MirrorProbeData>),
+        (status = 500, description = "偏好序列化失败", body = ErrorResponse),
+    )
+)]
+pub async fn probe_environment_mirrors(
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+) -> Result<Json<Value>, ApiError> {
+    let results = environment.probe_mirrors().await;
+    let selected = environment.mirror_choice();
+    let selected = serde_json::to_value(&selected)
+        .map_err(|e| ApiError::Internal(format!("选源偏好序列化失败: {e}")))?;
+    Ok(data(serde_json::json!({
+        "selected": selected,
+        "results": results,
+    })))
+}
+
+/// PUT /api/environment/mirror-preference 载荷：下载源选择偏好
+#[derive(Debug, serde::Deserialize, ToSchema)]
+pub struct MirrorPreferencePayload {
+    /// 选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像）
+    pub choice: String,
+    /// mirror 前缀（choice=mirror 时必填，须在镜像名单内）
+    pub mirror: Option<String>,
+}
+
+/// PUT /api/environment/mirror-preference — 保存下载源选择偏好
+///
+/// 偏好落盘 `environment/mirror.json`，随后的 uv 下载 / Python 解释器下载 /
+/// 镜像测速排序均按该偏好执行（显式选源跳过测速）。
+#[utoipa::path(
+    put,
+    path = "/api/environment/mirror-preference",
+    operation_id = "put_api_environment_mirror_preference",
+    tag = "system",
+    request_body(
+        content = MirrorPreferencePayload,
+        description = "下载源选择偏好（choice=mirror 时 mirror 必填且须在镜像名单内）",
+    ),
+    responses(
+        (status = 200, description = "保存后的选源偏好（回显）", body = DataEnvelope<MirrorPreferenceData>),
+        (status = 400, description = "choice 未知或 mirror 前缀不在名单内", body = ErrorResponse),
+        (status = 500, description = "偏好落盘或序列化失败", body = ErrorResponse),
+    )
+)]
+pub async fn set_mirror_preference(
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+    Json(payload): Json<MirrorPreferencePayload>,
+) -> Result<Json<Value>, ApiError> {
+    let choice =
+        crate::environment::MirrorChoice::from_api(&payload.choice, payload.mirror.as_deref())
+            .map_err(ApiError::BadRequest)?;
+    environment
+        .set_mirror_choice(choice)
+        .await
+        .map_err(|e| ApiError::Internal(format!("保存镜像偏好失败: {e}")))?;
+    let selected = environment.mirror_choice();
+    let selected = serde_json::to_value(&selected)
+        .map_err(|e| ApiError::Internal(format!("选源偏好序列化失败: {e}")))?;
+    Ok(data(serde_json::json!({ "selected": selected })))
 }
 
 // ---- 文档 ----
@@ -1537,7 +1696,8 @@ mod tests {
         Err(String),
     }
 
-    struct MockUpdaterApi(MockOutcome);
+    /// (check_update 结果, pin 闸门是否放行)
+    struct MockUpdaterApi(MockOutcome, bool);
 
     #[async_trait::async_trait]
     impl UpdaterApi for MockUpdaterApi {
@@ -1571,6 +1731,10 @@ mod tests {
             None
         }
 
+        fn pinned_version_allowed(&self, _version: &str) -> bool {
+            self.1
+        }
+
         fn has_pending_update(&self) -> bool {
             false
         }
@@ -1598,7 +1762,7 @@ mod tests {
     }
 
     async fn run_check(outcome: MockOutcome) -> Value {
-        let api: Arc<dyn UpdaterApi> = Arc::new(MockUpdaterApi(outcome));
+        let api: Arc<dyn UpdaterApi> = Arc::new(MockUpdaterApi(outcome, true));
         let app = axum::Router::new()
             .route("/api/check-update", route_get(check_update))
             .with_state(api);
@@ -1646,6 +1810,97 @@ mod tests {
         let d = &v["data"];
         assert_eq!(d["has_update"], false);
         assert!(d["error"].as_str().unwrap().contains("网络超时"));
+    }
+
+    // ============ POST /api/system/update pin 闸门（版本单调，T6-4 补口） ============
+
+    /// 三项齐备且各项校验通过的 pin 请求体（版本须高于当前 CARGO_PKG_VERSION）
+    fn pinned_body() -> ApplyUpdateBody {
+        ApplyUpdateBody {
+            version: Some("5.3.0".into()),
+            url: Some("https://example.com/app.zip".into()),
+            sha256: Some("a".repeat(64)),
+        }
+    }
+
+    /// into_pinned 单测：闸门放行 → 构造 pin 的 UpdateInfo；闸门拒绝 → None
+    #[test]
+    fn test_into_pinned_rollback_gate() {
+        let allowed = MockUpdaterApi(MockOutcome::None, true);
+        let info = pinned_body()
+            .into_pinned(&allowed)
+            .expect("闸门放行应构造 pin");
+        assert_eq!(info.latest_version, "5.3.0");
+        // 闸门拒绝（pinned 落在「> 当前 && < 同通道已见最高」区间）
+        let denied = MockUpdaterApi(MockOutcome::None, false);
+        assert!(pinned_body().into_pinned(&denied).is_none());
+    }
+
+    async fn run_apply(mock: Arc<dyn UpdaterApi>) -> axum::http::StatusCode {
+        let app = axum::Router::new()
+            .route("/api/system/update", axum::routing::post(apply_update))
+            .with_state(mock);
+        let sha = "a".repeat(64);
+        let body = format!(
+            r#"{{"version":"5.3.0","url":"https://example.com/app.zip","sha256":"{sha}"}}"#
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/system/update")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    /// pin 三项齐备且单调闸门放行 → 直接使用前端固定版本
+    #[tokio::test]
+    async fn test_apply_update_pin_accepted_uses_pinned_version() {
+        let api: Arc<dyn UpdaterApi> = Arc::new(MockUpdaterApi(MockOutcome::None, true));
+        assert_eq!(
+            run_apply(api).await,
+            axum::http::StatusCode::OK,
+            "pin 放行时无需服务端重查（mock 的 check_update 返回 None 会在重查路径上报 400）"
+        );
+    }
+
+    /// pin 被单调闸门拒绝（低于同通道已见最高版本）→ 回退服务端重查
+    #[tokio::test]
+    async fn test_apply_update_pin_rejected_falls_back_to_recheck() {
+        // 重查命中更高版本：证明确实走了重查而非沿用被拒的 pin
+        let mut rechecked = sample_info();
+        rechecked.latest_version = "9.9.9".into();
+        let api: Arc<dyn UpdaterApi> =
+            Arc::new(MockUpdaterApi(MockOutcome::Info(rechecked), false));
+        let app = axum::Router::new()
+            .route("/api/system/update", axum::routing::post(apply_update))
+            .with_state(api);
+        let sha = "a".repeat(64);
+        let body = format!(
+            r#"{{"version":"5.3.0","url":"https://example.com/app.zip","sha256":"{sha}"}}"#
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/system/update")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"]["version"], "9.9.9", "应使用重查结果而非被拒 pin");
     }
 
     // ============ GET /api/logs/export 日志导出包 ============
@@ -1855,6 +2110,11 @@ mod tests {
             None
         }
 
+        // 上传包路径不走 pin 闸门，mock 恒放行
+        fn pinned_version_allowed(&self, _version: &str) -> bool {
+            true
+        }
+
         fn has_pending_update(&self) -> bool {
             false
         }
@@ -2010,5 +2270,84 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    /// 契约镜像漂移守卫（2026-11-19 契约批次）：新注解三端点的 DTO 字段集
+    /// 必须与各自源类型的线格式逐键一致——源类型演化而镜像未跟随时本测试失败
+    ///（口径与 ws.rs 的 WsLogEntryData 守卫一致）
+    #[test]
+    fn contract_mirror_dtos_match_source_wire_shapes() {
+        use std::collections::BTreeSet;
+
+        fn keys(value: serde_json::Value) -> BTreeSet<String> {
+            value
+                .as_object()
+                .expect("载荷应序列化为对象")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        // update-state：LastCheckState ↔ UpdateStateData
+        let wire =
+            serde_json::to_value(crate::updater::LastCheckState::default()).expect("线格式序列化");
+        let mirror = serde_json::to_value(UpdateStateData::default()).expect("镜像序列化");
+        assert_eq!(
+            keys(wire),
+            keys(mirror),
+            "UpdateStateData 与 LastCheckState 线格式漂移"
+        );
+
+        // mirror-probe 逐源结果：MirrorProbeEntry ↔ MirrorProbeEntryData
+        let entry = crate::environment::MirrorProbeEntry {
+            kind: "direct",
+            prefix: String::new(),
+            label: String::new(),
+            ok: false,
+            bytes: 0,
+            elapsed_ms: 0,
+            throughput: 0,
+        };
+        let wire = serde_json::to_value(&entry).expect("线格式序列化");
+        let mirror = serde_json::to_value(MirrorProbeEntryData {
+            kind: "direct".to_string(),
+            prefix: String::new(),
+            label: String::new(),
+            ok: false,
+            bytes: 0,
+            elapsed_ms: 0,
+            throughput: 0,
+        })
+        .expect("镜像序列化");
+        assert_eq!(
+            keys(wire),
+            keys(mirror),
+            "MirrorProbeEntryData 与 MirrorProbeEntry 线格式漂移"
+        );
+
+        // 选源偏好：MirrorChoice 三变体 ↔ MirrorSelectionData（Auto/Direct 无
+        // mirror 字段，Mirror 携带前缀——skip_serializing_if 与 tag+content 对齐）
+        let variants = [
+            (crate::environment::MirrorChoice::Auto, "auto", None),
+            (crate::environment::MirrorChoice::Direct, "direct", None),
+            (
+                crate::environment::MirrorChoice::Mirror("https://m.example/".to_string()),
+                "mirror",
+                Some("https://m.example/".to_string()),
+            ),
+        ];
+        for (choice, choice_str, mirror_field) in variants {
+            let wire = serde_json::to_value(&choice).expect("线格式序列化");
+            let mirror = serde_json::to_value(MirrorSelectionData {
+                choice: choice_str.to_string(),
+                mirror: mirror_field,
+            })
+            .expect("镜像序列化");
+            assert_eq!(
+                keys(wire),
+                keys(mirror),
+                "MirrorSelectionData 与 MirrorChoice 线格式漂移（{choice_str}）"
+            );
+        }
     }
 }

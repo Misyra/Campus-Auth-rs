@@ -3,6 +3,7 @@
  * 原「任务」「环境」两个 Tab 合并而来：任务定义与它依赖的运行环境同域，且两页均为动作/状态卡、无配置保存栏。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EnvironmentInstallDialog from "@/components/common/EnvironmentInstallDialog.vue";
 import { ref, computed, watch, onMounted, onActivated, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { useTasks } from "@/composables/useTasks";
@@ -19,8 +20,14 @@ import { TASK_REPO_URL, TUTORIAL_VIDEO_RECORD_URL } from "@/utils/constants";
 import { useToast } from "@/composables/useToast";
 
 const { busy } = useStatus();
-const { envStatus, envLoading, envError, refreshEnv, bootstrapEnv } = useEnvironment();
+const { envStatus, envLoading, envError, refreshEnv } = useEnvironment();
 const { toastOnly } = useToast();
+
+/**
+ * 初始化弹窗开关：「初始化环境 / 重新同步」统一走 EnvironmentInstallDialog
+ * （阶段进度 + 下载源测速选择 + 日志尾部），不再只靠 toast 等结果。
+ */
+const installDialogOpen = ref(false);
 const t = useTasks();
 const { httpTasks, scripts } = useTaskDirectory();
 const { profiles, activeProfileId } = useProfiles();
@@ -283,7 +290,7 @@ async function recognizeOcr() {
             type="button"
             class="btn btn-secondary btn-sm"
             :disabled="busy.env"
-            @click="void bootstrapEnv()"
+            @click="installDialogOpen = true"
             title="重新同步运行环境（Python 依赖与浏览器）"
           >
             <IconApp v-if="busy.env" name="refresh" class="spin" />
@@ -294,7 +301,7 @@ async function recognizeOcr() {
             type="button"
             class="btn btn-primary btn-sm"
             :disabled="busy.env"
-            @click="void bootstrapEnv()"
+            @click="installDialogOpen = true"
             title="初始化运行环境（uv sync + 浏览器）"
           >
             <IconApp v-if="busy.env" name="refresh" class="spin" />
@@ -440,4 +447,10 @@ async function recognizeOcr() {
       </div>
     </section>
   </div>
+  <!-- 初始化弹窗（阶段进度 / 下载源选择 / 日志），Teleport 与滚动锁由 Modal 承担 -->
+  <EnvironmentInstallDialog
+    :open="installDialogOpen"
+    auto-start
+    @close="installDialogOpen = false"
+  />
 </template>

@@ -4,11 +4,13 @@ use std::path::{Path, PathBuf};
 
 use tokio_util::sync::CancellationToken;
 
+use super::download::{github_asset_probe_urls, rank_mirror_urls};
 use super::process::{CommandOutputError, command_output_with_cancel, uv_command};
 use super::verify::uv_exe_path;
 use crate::environment::{
-    EnvironmentError, EnvironmentManager, UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY,
-    UV_SYNC_TIMEOUT,
+    EnvironmentError, EnvironmentManager, GITHUB_MIRRORS, PYTHON_BUILD_STANDALONE_BASE,
+    UV_DOWNLOAD_MAX_RETRIES, UV_DOWNLOAD_RETRY_DELAY, UV_SYNC_TIMEOUT,
+    mirror::{MirrorChoice, mirror_prefix_of, read_mirror_choice},
 };
 use crate::utils::io_human::io_error_reason;
 
@@ -16,6 +18,68 @@ use crate::utils::io_human::io_error_reason;
 const DDDDOCR_REQUIREMENT: &str = "ddddocr>=1.6.1";
 /// ddddocr 包名（`uv remove` 用）
 const DDDDOCR_PACKAGE: &str = "ddddocr";
+
+/// uv 托管 Python 下载源阶梯：按用户选源偏好构造 `UV_PYTHON_INSTALL_MIRROR`
+/// 取值序列（None = 直连不加环境变量）。
+///
+/// `uv sync` 首建 venv 时会从 python-build-standalone（GitHub Releases）下载
+/// CPython——此前该链路直连无任何镜像加速，国内网络常拖满 600s 同步超时。
+/// Auto 并发测速（URL 复用 uv 的发布资产，同 host 同 CDN 路由等价）；
+/// Direct = 直连最前、镜像依次兜底；Mirror = 选中镜像最前、其余镜像次之、
+/// 直连殿后。Python 压缩包完整性由 uv 自带的 SHA256 校验兜底，镜像只影响
+/// 传输路径。
+async fn python_mirror_ladder(mgr: &EnvironmentManager) -> Vec<Option<&'static str>> {
+    let choice = read_mirror_choice(mgr);
+    // Mirror(String) 在解析入口已校验属名单；这里回查静态前缀供阶梯复用——
+    // 若文件被手改成名单外前缀，脏值不得注入环境变量，按 Auto 测速兜底
+    let chosen = choice
+        .mirror_prefix()
+        .and_then(|p| GITHUB_MIRRORS.iter().copied().find(|x| *x == p));
+    if let Some(prefix) = chosen {
+        // 选中镜像最前，其余镜像按名单序次之，直连殿后兜底
+        let mut ladder: Vec<Option<&'static str>> = Vec::with_capacity(GITHUB_MIRRORS.len() + 1);
+        ladder.push(Some(prefix));
+        ladder.extend(
+            GITHUB_MIRRORS
+                .iter()
+                .copied()
+                .filter(|m| *m != prefix)
+                .map(Some),
+        );
+        ladder.push(None);
+        return ladder;
+    }
+    if matches!(choice, MirrorChoice::Direct) {
+        let mut ladder: Vec<Option<&'static str>> = vec![None];
+        ladder.extend(GITHUB_MIRRORS.iter().copied().map(Some));
+        return ladder;
+    }
+    // Auto（以及名单外的脏 Mirror 值兜底）
+    let probe_urls = github_asset_probe_urls();
+    let order = rank_mirror_urls(mgr, &probe_urls).await;
+    let urls: Vec<String> = order
+        .into_iter()
+        .map(|idx| probe_urls[idx].clone())
+        .collect();
+    urls.iter()
+        .filter_map(|url| mirror_prefix_of(url))
+        .map(Some)
+        .chain(std::iter::once(None))
+        .collect()
+}
+
+/// 为 uv 子进程命令附加托管 Python 下载镜像环境变量
+///
+/// 镜像语义：`UV_PYTHON_INSTALL_MIRROR` 以「镜像前缀 + python-build-standalone
+/// Releases 基址」替换 uv 默认的 GitHub 直连基址。None = 直连，不加变量。
+fn apply_python_mirror_env(cmd: &mut tokio::process::Command, mirror: Option<&str>) {
+    if let Some(mirror) = mirror {
+        cmd.env(
+            "UV_PYTHON_INSTALL_MIRROR",
+            format!("{mirror}{PYTHON_BUILD_STANDALONE_BASE}"),
+        );
+    }
+}
 
 /// 执行 `uv sync` 安装 Python 虚拟环境。
 ///
@@ -44,6 +108,9 @@ pub async fn run_uv_sync(
     let venv_path = mgr.worker_project_path().join(crate::environment::VENV_DIR);
 
     let mut last_err: Option<EnvironmentError> = None;
+    // 托管 Python 下载源阶梯（直连/镜像按实测吞吐排序）：venv 缺失时 uv 会现场
+    // 下载 CPython，直连 GitHub 在国内常拖满同步超时；重试时沿阶梯换源
+    let mirror_ladder = python_mirror_ladder(mgr).await;
     for attempt in 1..=UV_DOWNLOAD_MAX_RETRIES {
         if attempt > 1 {
             tracing::warn!(
@@ -61,6 +128,9 @@ pub async fn run_uv_sync(
         cmd.arg("sync")
             .arg("--project")
             .arg(&*mgr.worker_project_path().to_string_lossy());
+        // 每次重试取阶梯的下一档（超出阶梯长度回退直连）
+        let mirror = mirror_ladder.get((attempt - 1) as usize).copied().flatten();
+        apply_python_mirror_env(&mut cmd, mirror);
         cmd.env("UV_PROJECT_ENVIRONMENT", &venv_path)
             .current_dir(mgr.base_path());
 
@@ -248,12 +318,14 @@ async fn run_uv_package_alter(
         ]
     };
     let mut last_err: Option<EnvironmentError> = None;
+    // add/remove 可能触发托管 Python 下载（venv 缺失等异常路径）：同样走测速选源
+    let mirror_ladder = python_mirror_ladder(mgr).await;
     for (i, args) in arg_sets.iter().enumerate() {
         let backup = ProjectFilesBackup::take(mgr.worker_project_path())
             .await
             .map_err(|e| EnvironmentError::UvExtractFailed(io_error_reason(e)))?;
 
-        let cmd = uv_package_alter_command(
+        let mut cmd = uv_package_alter_command(
             &uv_exe,
             op,
             args,
@@ -261,6 +333,7 @@ async fn run_uv_package_alter(
             &venv_path,
             mgr.base_path(),
         );
+        apply_python_mirror_env(&mut cmd, mirror_ladder.first().copied().flatten());
 
         let output = match command_output_with_cancel(cmd, UV_SYNC_TIMEOUT, cancel).await {
             Ok(output) => output,
@@ -377,6 +450,60 @@ impl ProjectFilesBackup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment::UV_FALLBACK_VERSION;
+
+    /// 探测 URL 列表：直连在前、镜像按名单顺序、指向 uv 发布资产
+    #[test]
+    fn test_github_asset_probe_urls() {
+        let urls = github_asset_probe_urls();
+        assert_eq!(urls.len(), 1 + GITHUB_MIRRORS.len());
+        assert!(
+            urls[0].starts_with("https://github.com/astral-sh/uv/releases/download"),
+            "首项为直连"
+        );
+        assert!(urls[0].contains(UV_FALLBACK_VERSION));
+        for (mirror, url) in GITHUB_MIRRORS.iter().zip(urls.iter().skip(1)) {
+            assert!(url.starts_with(*mirror));
+            assert!(url.ends_with(&urls[0]), "镜像 URL = 前缀 + 直连 URL");
+        }
+    }
+
+    /// 镜像前缀判定：镜像 URL 归属对应镜像，直连返回 None
+    #[test]
+    fn test_mirror_prefix_of() {
+        let urls = github_asset_probe_urls();
+        assert_eq!(mirror_prefix_of(&urls[0]), None, "首项为直连");
+        for (mirror, url) in GITHUB_MIRRORS.iter().zip(urls.iter().skip(1)) {
+            assert_eq!(mirror_prefix_of(url), Some(*mirror));
+        }
+    }
+
+    /// 镜像环境变量：Some 时写入 `UV_PYTHON_INSTALL_MIRROR`（镜像前缀 + 基址），None 不写
+    #[test]
+    fn test_apply_python_mirror_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = uv_command(&dir.path().join("uv"));
+        apply_python_mirror_env(&mut cmd, None);
+        assert!(
+            !cmd.as_std()
+                .get_envs()
+                .any(|(k, _)| k == "UV_PYTHON_INSTALL_MIRROR"),
+            "直连不得设置镜像变量"
+        );
+        let mirror = GITHUB_MIRRORS[0];
+        apply_python_mirror_env(&mut cmd, Some(mirror));
+        let expected = format!("{mirror}{PYTHON_BUILD_STANDALONE_BASE}");
+        let got = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "UV_PYTHON_INSTALL_MIRROR")
+            .map(|(_, v)| {
+                v.expect("已设置的环境变量必有值")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        assert_eq!(got, Some(expected));
+    }
 
     /// 项目文件备份：take 快照 → 改写 → restore 还原；discard 仅清备份留原文件。
     #[tokio::test]

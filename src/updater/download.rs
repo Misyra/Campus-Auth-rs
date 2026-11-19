@@ -38,6 +38,16 @@ pub(crate) const DOWNLOAD_STALL_TIMEOUT: std::time::Duration = std::time::Durati
 /// 更新压缩包大小上限，避免异常响应占满磁盘。
 pub(crate) const MAX_UPDATE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
+/// 直连失败是否值得经镜像代理重试：前置校验类错误（URL 白名单 / 缺摘要）
+/// 与下载源无关，重试必现同错；其余（网络失败 / 停滞 / 超限 / 摘要不符）
+/// 都可能因换源而成功——摘要不符常对应镜像缓存损坏，换源重试正是解法。
+pub(crate) fn is_mirror_retryable(err: &UpdaterError) -> bool {
+    !matches!(
+        err,
+        UpdaterError::HttpsRequired(_) | UpdaterError::MissingChecksum
+    )
+}
+
 /// 流式下载并执行 SHA256 校验
 ///
 /// 下载前强制校验 URL 为 HTTPS；流式写入临时文件时增量更新 `Sha256`，

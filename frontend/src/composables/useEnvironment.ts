@@ -40,7 +40,8 @@ async function bootstrapEnv(): Promise<boolean> {
     const res = await environmentApi.bootstrap();
     // 后端同步等待完成，直接可得最新状态
     await refreshEnv();
-    const ok = Boolean((res as unknown as { capability_ready?: boolean }).capability_ready ?? envStatus.value?.capability_ready);
+    // bootstrap 回包即 EnvironmentStatus 全量，capability_ready 直接可读
+    const ok = res.capability_ready;
     if (ok) toastOnly(true, "环境初始化完成");
     else toastOnly(false, envStatus.value?.last_error || "环境初始化完成但仍未就绪，请查看日志");
     return Boolean(ok);
