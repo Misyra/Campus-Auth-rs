@@ -461,7 +461,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
                 :class="[item.level ? 'log-' + item.level.toLowerCase() : '']"
               >
                 <span class="log-time">{{ formatTimestamp(item.timestamp) }}</span>
-                <span v-if="item.level" class="log-level-badge" :class="'level-' + item.level.toLowerCase()">{{ item.level }}</span>
+                <span v-if="item.level" class="log-level-badge" :class="'log-' + item.level.toLowerCase()">{{ item.level }}</span>
                 <span v-if="item.source" class="log-source-badge" :class="'source-' + item.source">{{ getSourceLabel(item.source) }}</span>
                 <div class="log-content">
                   <span class="log-message">{{ stripScreenshotHint(item.message) }}</span>

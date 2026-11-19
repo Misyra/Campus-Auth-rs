@@ -24,12 +24,15 @@
   text-align: center;
 }
 
-/* 日志级别色走 --log-* 语义 token（base.css 定义；dashboard.css 的日志行同源，
-   级别配色改动只改 base.css 一处），深浅主题自动适配 */
-.log-level-badge.level-info { color: var(--log-info); }
-.log-level-badge.level-warning { color: var(--log-warn); }
-.log-level-badge.level-error { color: var(--log-error); }
-.log-level-badge.level-debug { color: var(--log-debug); }
+/* 日志级别色走 --log-* 语义 token（base.css 定义），深浅主题自动适配。
+   级别类与仪表盘日志行（dashboard.css .log-entry.log-*）共用同一套 log-* 命名
+   （模板 'log-' + level 小写），级别配色改动只改 base.css 一处。
+   历史口径：仅 info/warning/error/debug 四档着色——后端拼写的 WARN 与 TRACE
+   徽标维持默认文字色，勿在此顺手补齐（与日志行的 warn/warning 全着色不同）。 */
+.log-level-badge.log-info { color: var(--log-info); }
+.log-level-badge.log-warning { color: var(--log-warn); }
+.log-level-badge.log-error { color: var(--log-error); }
+.log-level-badge.log-debug { color: var(--log-debug); }
 
 .log-source-badge {
   min-width: 30px;
