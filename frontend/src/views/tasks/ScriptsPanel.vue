@@ -244,9 +244,12 @@ onMounted(async () => {
           >
             <td class="tsk-drag-cell" @click.stop>
               <div class="tsk-order-group">
+                <!-- 拖拽把手是指针专用装饰：键盘排序走旁边「上移 / 下移」按钮，
+                     屏读器不播报避免与按钮重复（no-static 由此豁免） -->
                 <div
                   class="task-drag-handle"
                   title="拖拽排序"
+                  aria-hidden="true"
                   @mousedown="drag.onHandleMouseDown($event)"
                   @mouseup="drag.onHandleMouseUp($event)"
                 >
@@ -415,11 +418,12 @@ onMounted(async () => {
             <div class="form-group">
               <label for="script-binary">执行程序</label>
               <div class="binary-input-group">
-                <CustomSelect v-model="editingTask.binary_path" :options="binaryOptions" @change="onBinarySelectChange" />
+                <CustomSelect v-model="editingTask.binary_path" :options="binaryOptions" trigger-id="script-binary" @change="onBinarySelectChange" />
                 <input
                   v-if="editingTask.binary_path === '__custom__'"
                   v-model="editingTask._customBinary"
                   type="text"
+                  aria-label="自定义执行程序路径"
                   placeholder="输入可执行文件的完整路径（.exe）"
                   class="mt-2"
                 />

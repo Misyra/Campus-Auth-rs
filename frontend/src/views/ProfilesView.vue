@@ -586,7 +586,19 @@ async function confirmImport(): Promise<void> {
       <!-- 方案列表 -->
       <div v-else class="profiles-list">
         <div v-for="(info, pid) in p.profiles.value" :key="pid" class="profile-card" :class="{ active: p.activeProfileId.value === pid }">
-          <div class="profile-card-main" @click="!p.autoSwitch.value && p.setActiveProfile(pid)" :class="{ disabled: p.autoSwitch.value && p.activeProfileId.value !== pid }">
+          <!-- role=button + 键盘激活：卡片主体内部只有展示性 span（操作按钮在
+               卡片底部独立容器），可安全承载交互语义；autoSwitch 关闭时置
+               aria-disabled 与既有视觉禁用态对齐 -->
+          <div
+            class="profile-card-main"
+            role="button"
+            tabindex="0"
+            :aria-disabled="p.autoSwitch.value"
+            @click="!p.autoSwitch.value && p.setActiveProfile(pid)"
+            @keydown.enter.prevent="!p.autoSwitch.value && p.setActiveProfile(pid)"
+            @keydown.space.prevent="!p.autoSwitch.value && p.setActiveProfile(pid)"
+            :class="{ disabled: p.autoSwitch.value && p.activeProfileId.value !== pid }"
+          >
             <div class="profile-card-header">
               <div class="profile-card-title">
                 <span class="profile-card-name">{{ info.name || pid }}</span>

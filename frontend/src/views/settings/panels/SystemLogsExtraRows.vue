@@ -45,13 +45,13 @@ async function handleExportLogs(): Promise<void> {
   <div>
     <SettingsRow description="低于该级别的日志将被过滤">
       <template #label>
-        <label>全局日志级别</label>
+        <label for="settings-log-level">全局日志级别</label>
         <FieldHelp text="低于该级别的日志将被过滤。选择后即时热更新。" />
       </template>
       <CustomSelect
         :model-value="config.config.logging.level"
         :options="logLevelOptions"
-        aria-label="全局日志级别"
+        trigger-id="settings-log-level"
         @update:model-value="config.setLogLevel($event as string)"
       />
     </SettingsRow>

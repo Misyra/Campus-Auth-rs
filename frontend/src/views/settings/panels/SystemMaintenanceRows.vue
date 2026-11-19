@@ -63,6 +63,9 @@ async function reloadConfig() {
     </SettingsRow>
     <SettingsRow description="从磁盘重新读取配置文件并应用，无需重启">
       <template #label>
+        <!-- 行标题：该行控件是自带完整文本的动作按钮「重新加载配置」，标题
+             与按钮名不同，强行 for 关联会改写按钮的可访问名（误报豁免） -->
+        <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
         <label>配置热重载</label>
         <FieldHelp text="从磁盘重新读取配置文件并应用，无需重启。日常修改请使用下方的保存按钮。" />
       </template>

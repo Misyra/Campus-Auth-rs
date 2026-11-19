@@ -209,8 +209,8 @@ function setResultStep(event: Event): void {
           placeholder="http://10.0.0.1/（留空时使用方案的认证地址）" />
       </div>
       <div class="form-group flow-cert">
-        <label>HTTPS 证书</label>
-        <CustomSelect v-model="certPolicy" :options="HTTP_CERT_POLICY_OPTIONS" />
+        <label :for="`${uid}-cert-policy`">HTTPS 证书</label>
+        <CustomSelect v-model="certPolicy" :options="HTTP_CERT_POLICY_OPTIONS" :trigger-id="`${uid}-cert-policy`" />
       </div>
       </div>
     </details>
@@ -259,15 +259,24 @@ function setResultStep(event: Event): void {
       <template v-if="step.kind === 'request'">
         <div class="form-row flow-address-row">
           <div class="form-group flow-method">
-            <label>请求方式</label>
-            <CustomSelect :model-value="step.method" :options="HTTP_METHOD_OPTIONS" aria-label="请求方式" @update:model-value="setStepMethod(step, $event)" />
+            <label :for="`${uid}-${step.id}-method`">请求方式</label>
+            <CustomSelect :model-value="step.method" :options="HTTP_METHOD_OPTIONS" :trigger-id="`${uid}-${step.id}-method`" @update:model-value="setStepMethod(step, $event)" />
           </div>
           <div class="form-group">
             <label :for="`${uid}-${step.id}-url`">请求地址</label>
-            <input :id="`${uid}-${step.id}-url`" v-model.trim="step.url" type="text" placeholder="http://10.0.0.1/login" @focus="activeFields[step.id] = 'url'" @input="enableFlow" />
+            <!-- 密码进 URL 的风险提示经 aria-describedby 直连本输入框（危险操作提示→触发控件） -->
+            <input
+              :id="`${uid}-${step.id}-url`"
+              v-model.trim="step.url"
+              type="text"
+              placeholder="http://10.0.0.1/login"
+              :aria-describedby="isCredentialExposedViaGet(step.method, step.url) ? `${uid}-${step.id}-url-risk` : undefined"
+              @focus="activeFields[step.id] = 'url'"
+              @input="enableFlow"
+            />
           </div>
         </div>
-        <p v-if="isCredentialExposedViaGet(step.method, step.url)" class="note note--warn">
+        <p v-if="isCredentialExposedViaGet(step.method, step.url)" :id="`${uid}-${step.id}-url-risk`" class="note note--warn">
           此步骤把密码放进 URL，网关或代理的日志可能记录完整地址；门户支持时优先使用 POST。
         </p>
         <p class="flow-help">{{ step.method === 'POST' ? 'POST：地址填写接口，请求内容写在下面。' : 'GET：参数直接写在地址里，例如 /login?username={username}。' }}</p>
@@ -303,10 +312,12 @@ function setResultStep(event: Event): void {
           </label>
         <div class="form-row">
           <div class="form-group">
-            <label>请求失败时</label>
-            <CustomSelect :model-value="step.on_error" :options="errorOptions" :disabled="step.id === model.result_step_id"
+            <label :for="`${uid}-${step.id}-on-error`">请求失败时</label>
+            <CustomSelect :model-value="step.on_error" :options="errorOptions" :trigger-id="`${uid}-${step.id}-on-error`" :disabled="step.id === model.result_step_id"
+              :aria-describedby="step.id === model.result_step_id ? `${uid}-${step.id}-on-error-why` : undefined"
               @update:model-value="setStepError(step, $event)" />
-            <span v-if="step.id === model.result_step_id" class="hint">结果来源步骤必须停止并报告失败。</span>
+            <!-- 禁用原因直连控件：屏读器聚焦禁用态时仍能读到"为什么不可改" -->
+            <span v-if="step.id === model.result_step_id" :id="`${uid}-${step.id}-on-error-why`" class="hint">结果来源步骤必须停止并报告失败。</span>
           </div>
           <div class="form-group">
             <label :for="`${uid}-${step.id}-wait`">请求后等待（秒）</label>
@@ -354,8 +365,8 @@ function setResultStep(event: Event): void {
           </select>
         </div>
         <div class="form-group">
-          <label>判断方式</label>
-          <CustomSelect v-model="successCheck" :options="successOptions" aria-label="判断方式" />
+          <label :for="`${uid}-success-check`">判断方式</label>
+          <CustomSelect v-model="successCheck" :options="successOptions" :trigger-id="`${uid}-success-check`" />
         </div>
       </div>
       <p v-if="successCheck === 'network'" class="flow-help flow-result-help">正式登录后检查能否访问外网。下方试运行只检查请求与响应，联网结果需要在方案中登录确认。</p>
@@ -372,8 +383,8 @@ function setResultStep(event: Event): void {
           <span class="hint">如果同时出现成功与失败提示，优先按失败处理。</span>
         </div>
         <div class="form-group">
-          <label>出现该提示后</label>
-          <CustomSelect v-model="failureAction" :options="HTTP_FAILURE_ACTION_OPTIONS" aria-label="失败处理方式" />
+          <label :for="`${uid}-failure-action`">出现该提示后</label>
+          <CustomSelect v-model="failureAction" :options="HTTP_FAILURE_ACTION_OPTIONS" :trigger-id="`${uid}-failure-action`" />
         </div>
       </details>
     </section>

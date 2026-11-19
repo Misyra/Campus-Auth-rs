@@ -124,6 +124,7 @@ function onOpenAutoFocus(event: Event): void {
                     role="combobox"
                     aria-autocomplete="list"
                     aria-controls="command-palette-list"
+                    aria-expanded="true"
                     :aria-activedescendant="activeDomId"
                     @keydown="onInputKeydown"
                   />
@@ -133,12 +134,18 @@ function onOpenAutoFocus(event: Event): void {
                   <div v-if="!filtered.length" class="command-palette-empty">无匹配命令</div>
                   <div v-for="group in groups" :key="group.group" role="group" :aria-label="group.group">
                     <div class="command-palette-group-label">{{ group.group }}</div>
+                    <!-- aria-expanded 恒为 true：面板整体在 palette.open 下渲染，
+                         combobox 展开态与输入框存在性等价。选项的键盘激活由输入框
+                         activedescendant 模式统一处理（↑↓/Enter），本元素不接收
+                         焦点，click 仅指针路径——click-events 在此为误报 -->
+                    <!-- eslint-disable-next-line vuejs-accessibility/click-events-have-key-events -->
                     <div
                       v-for="entry in group.entries"
                       :id="`command-palette-item-${entry.command.id}`"
                       :key="entry.command.id"
                       class="command-palette-item"
                       role="option"
+                      tabindex="-1"
                       :aria-selected="entry.index === activeIndex"
                       :class="{ active: entry.index === activeIndex }"
                       @click="run(entry.command)"

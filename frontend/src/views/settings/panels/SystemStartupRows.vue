@@ -57,13 +57,17 @@ onMounted(() => {
     </SettingsRow>
     <SettingsRow>
       <template #label>
-        <label>服务模式</label>
+        <label for="settings-runtime-mode">服务模式</label>
         <FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" />
       </template>
       <template #description>
         <span class="hint">{{ runtimeModeHint }}</span>
       </template>
-      <CustomSelect v-model="config.config.app_settings.runtime_mode" :options="autostartModeOptions" aria-label="服务模式" />
+      <CustomSelect
+        v-model="config.config.app_settings.runtime_mode"
+        :options="autostartModeOptions"
+        trigger-id="settings-runtime-mode"
+      />
     </SettingsRow>
     <SettingsRow :description="autostartDescription(autostart)">
       <template #label>

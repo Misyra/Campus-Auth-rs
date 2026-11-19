@@ -128,7 +128,8 @@ async function installPlaywright(channel: string) {
     <div v-if="pythonNotReady" class="browser-safe-info browser-safe-info--warning browser-notice--top">
       <p>
         运行环境未就绪，浏览器功能不可用。请先前往
-        <a class="inline-link" @click.prevent="router.push({ name: 'settings-tasks' })">设置 · 任务与环境 → 运行环境</a>
+        <!-- href 供键盘聚焦与中键/新窗口语义，click.prevent 维持 SPA 路由 -->
+        <a class="inline-link" :href="router.resolve({ name: 'settings-tasks' }).href" @click.prevent="router.push({ name: 'settings-tasks' })">设置 · 任务与环境 → 运行环境</a>
         初始化。
       </p>
     </div>

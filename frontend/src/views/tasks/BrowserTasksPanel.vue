@@ -275,9 +275,12 @@ onMounted(async () => {
           >
             <td class="tsk-drag-cell" @click.stop>
               <div class="tsk-order-group">
+                <!-- 拖拽把手是指针专用装饰：键盘排序走旁边「上移 / 下移」按钮，
+                     屏读器不播报避免与按钮重复（no-static 由此豁免） -->
                 <div
                   class="task-drag-handle"
                   title="拖拽排序"
+                  aria-hidden="true"
                   @mousedown="drag.onHandleMouseDown($event)"
                   @mouseup="drag.onHandleMouseUp($event)"
                 >
@@ -450,6 +453,8 @@ onMounted(async () => {
           </div>
           <div class="card-body">
             <div class="form-group">
+              <!-- aria-invalid/aria-describedby 与下方三态说明联动：语法错误时屏读器
+                   在控件上直接读到错误结论；合法但含危险步骤时读到危险提示 -->
               <textarea
                 id="task-json"
                 v-model="t.editingTask.value.json"
@@ -457,12 +462,14 @@ onMounted(async () => {
                 rows="18"
                 placeholder="任务JSON配置"
                 :class="{ 'json-invalid': t.jsonError.value, 'json-valid': jsonValid }"
+                :aria-invalid="!!t.jsonError.value || undefined"
+                :aria-describedby="t.jsonError.value ? 'task-json-note' : t.dangerousSteps.value.length ? 'task-json-note' : undefined"
                 @input="t.validateJson(); t.syncJsonToMeta()"
               ></textarea>
-              <div v-if="t.jsonError.value" class="json-error">JSON 语法错误，修正前不会保存：{{ t.jsonError.value }}</div>
+              <div v-if="t.jsonError.value" id="task-json-note" class="json-error">JSON 语法错误，修正前不会保存：{{ t.jsonError.value }}</div>
               <!-- 危险步骤常驻提示：自动保存模式下没有"保存前"这个时机了（旧版在那里弹一次
                    确认，改一次字段就静默落盘），所以提示挪到字段旁边——用户得当场知道存的是什么 -->
-              <div v-else-if="t.dangerousSteps.value.length" class="note note--warn">
+              <div v-else-if="t.dangerousSteps.value.length" id="task-json-note" class="note note--warn">
                 <IconApp name="alert-triangle" class="icon-sm" />
                 <span>
                   这份配置含 {{ t.dangerousSteps.value.length }} 个会执行 JavaScript 的步骤（{{

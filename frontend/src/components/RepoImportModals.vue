@@ -262,13 +262,18 @@ watch(
             </a>
           </div>
           <div v-if="selectedScreenshotUrl && !brokenImages.has(repoTaskKey(repo.repoImport.value.selected))" class="repo-detail-shot">
+            <!-- 可点击截图补键盘路径：role=button + Enter/Space 触发放大预览 -->
             <img
               :src="selectedScreenshotUrl"
-              :alt="`${repo.repoImport.value.selected.name} 登录页截图`"
+              :alt="`${repo.repoImport.value.selected.name} 登录页截图，回车放大查看`"
               loading="lazy"
               class="repo-detail-shot-img"
+              role="button"
+              tabindex="0"
               title="点击放大查看"
               @click="openShotPreview(selectedScreenshotUrl, repo.repoImport.value.selected.name)"
+              @keydown.enter.prevent="openShotPreview(selectedScreenshotUrl, repo.repoImport.value.selected.name)"
+              @keydown.space.prevent="openShotPreview(selectedScreenshotUrl, repo.repoImport.value.selected.name)"
               @error="markImageBroken(repoTaskKey(repo.repoImport.value.selected))"
             />
             <span class="repo-detail-zoom-hint">点击放大</span>

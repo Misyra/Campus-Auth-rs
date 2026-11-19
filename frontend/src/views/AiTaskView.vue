@@ -273,8 +273,17 @@ const {
 
           <div v-if="taskJson" class="form-group">
             <label for="ai-task-json">任务 JSON（可编辑）</label>
-            <textarea id="ai-task-json" v-model="taskJson" rows="14" spellcheck="false" class="ai-json"></textarea>
-            <div v-if="jsonError" class="ai-json-error">JSON 格式错误：{{ jsonError }}</div>
+            <!-- aria-invalid/aria-describedby：语法错误结论直连控件，屏读器聚焦即报 -->
+            <textarea
+              id="ai-task-json"
+              v-model="taskJson"
+              rows="14"
+              spellcheck="false"
+              class="ai-json"
+              :aria-invalid="!!jsonError || undefined"
+              :aria-describedby="jsonError ? 'ai-task-json-error' : undefined"
+            ></textarea>
+            <div v-if="jsonError" id="ai-task-json-error" class="ai-json-error">JSON 格式错误：{{ jsonError }}</div>
           </div>
           <div v-if="taskJson" class="ai-actions">
             <button class="btn btn-secondary btn-sm" @click="formatJson">格式化</button>

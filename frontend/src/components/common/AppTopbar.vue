@@ -146,7 +146,14 @@ function onNotifOpen(open: boolean): void {
             </div>
             <div class="notification-item-body">
               {{ n.message }}
-              <a v-if="n.action" class="notify-action" @click.prevent="onActionClick(n.action)">{{ n.action.label }}</a>
+              <!-- href 补上真实目标：无 href 的 a 不可聚焦、键盘 Enter 不触发，
+                   click.prevent 维持 SPA 内跳转不整页刷新 -->
+              <a
+                v-if="n.action"
+                class="notify-action"
+                :href="n.action.page ? router.resolve({ name: n.action.page }).href : undefined"
+                @click.prevent="onActionClick(n.action)"
+              >{{ n.action.label }}</a>
             </div>
           </div>
         </AppPopover>

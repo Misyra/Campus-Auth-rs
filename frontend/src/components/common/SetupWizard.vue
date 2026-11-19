@@ -624,21 +624,24 @@ async function skipWizard() {
                 <span class="wizard-env-state">{{ item.ready ? "就绪" : "未就绪" }}</span>
               </li>
             </ul>
-            <div v-if="envPreparing" class="wizard-note">
+            <!-- 三个互斥状态分支共用同一 id，安装按钮经 aria-describedby 读到
+                 当前环境结论（失败原因 / 未就绪说明），不必另开焦点位 -->
+            <div v-if="envPreparing" id="wizard-env-note" class="wizard-note">
               <IconApp name="refresh" class="icon-sm spin" />
               正在初始化环境（{{ envStageLabel }}）{{ bootstrapProgressText }}，可能需要几分钟，请保持网络可用。
             </div>
-            <div v-else-if="envError" class="wizard-note wizard-note--error">
+            <div v-else-if="envError" id="wizard-env-note" class="wizard-note wizard-note--error">
               <IconApp name="alert-triangle" class="icon-sm" />
               {{ envError }}
             </div>
-            <div v-else-if="envStatus && !envStatus.capability_ready" class="wizard-note wizard-note--warn">
+            <div v-else-if="envStatus && !envStatus.capability_ready" id="wizard-env-note" class="wizard-note wizard-note--warn">
               环境尚未就绪。可点击下方按钮自动下载并安装（首次安装耗时数分钟，取决于网络）。
             </div>
             <button
               v-if="!envPreparing"
               class="btn btn-secondary btn-sm"
               :disabled="!!envStatus?.capability_ready"
+              aria-describedby="wizard-env-note"
               @click="startBootstrap"
             >
               <IconApp name="download" class="icon-sm" />

@@ -289,9 +289,12 @@ onMounted(async () => {
           >
             <td class="tsk-drag-cell" @click.stop>
               <div class="tsk-order-group">
+                <!-- 拖拽把手是指针专用装饰：键盘排序走旁边「上移 / 下移」按钮，
+                     屏读器不播报避免与按钮重复（no-static 由此豁免） -->
                 <div
                   class="task-drag-handle"
                   title="拖拽排序"
+                  aria-hidden="true"
                   @mousedown="drag.onHandleMouseDown($event)"
                   @mouseup="drag.onHandleMouseUp($event)"
                 >
@@ -467,8 +470,8 @@ onMounted(async () => {
             </div>
             <div class="form-row">
               <div class="form-group">
-                <label>测试运营商</label>
-                <CustomSelect v-model="carrierSelection" :options="CARRIER_OPTIONS" aria-label="测试运营商" />
+                <label :for="`${uid}-test-carrier`">测试运营商</label>
+                <CustomSelect v-model="carrierSelection" :options="CARRIER_OPTIONS" :trigger-id="`${uid}-test-carrier`" />
               </div>
               <div v-if="showCustomCarrier" class="form-group">
                 <label :for="`${uid}-test-carrier-custom`">自定义运营商</label>

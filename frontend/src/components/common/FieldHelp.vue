@@ -77,11 +77,13 @@ function onPointerDownOutside(event: Event): void {
       @update:open="syncOpen"
     >
       <TooltipTrigger as-child>
+        <!-- role=button：触发器可点击钉住（Enter/Space 已接），button 语义比
+             note 准确——note 不是交互角色，静态交互检查（no-static）会正确拦截 -->
         <span
           class="field-help"
           :class="{ 'field-help--pinned': pinned }"
           tabindex="0"
-          role="note"
+          role="button"
           @click.stop="togglePinned"
           @keydown.enter.prevent="togglePinned"
           @keydown.space.prevent="togglePinned"

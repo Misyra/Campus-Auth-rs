@@ -51,6 +51,9 @@ async function togglePureMode() { await config.togglePureMode(); }
       <template v-if="!pureMode" #details>
         <SettingsRow description="登录页面的渲染分辨率">
           <template #label>
+            <!-- 组标题：控件槽是宽/高两个各带 for 的输入框，标题不指向单一控件
+                 （label-has-for 在此为行标题模式的误报） -->
+            <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
             <label>浏览器窗口尺寸</label>
             <FieldHelp text="登录页面的渲染分辨率。默认 1280×720。" />
           </template>

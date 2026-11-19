@@ -477,7 +477,18 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
                 <div class="log-content">
                   <span class="log-message">{{ stripScreenshotHint(item.message) }}</span>
                   <div v-if="extractScreenshotUrl(item.message)" class="log-screenshot-wrap">
-                    <img :src="extractScreenshotUrl(item.message)!" class="log-screenshot-preview" @click="openFullscreen(extractScreenshotUrl(item.message)!)" loading="lazy" alt="截图" />
+                    <!-- 可点击截图补键盘路径：role=button + Enter/Space 触发全屏 -->
+                    <img
+                      :src="extractScreenshotUrl(item.message)!"
+                      class="log-screenshot-preview"
+                      role="button"
+                      tabindex="0"
+                      alt="截图，回车放大查看"
+                      @click="openFullscreen(extractScreenshotUrl(item.message)!)"
+                      @keydown.enter.prevent="openFullscreen(extractScreenshotUrl(item.message)!)"
+                      @keydown.space.prevent="openFullscreen(extractScreenshotUrl(item.message)!)"
+                      loading="lazy"
+                    />
                   </div>
                 </div>
               </div>

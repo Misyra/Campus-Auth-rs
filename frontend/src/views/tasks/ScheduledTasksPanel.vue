@@ -431,10 +431,11 @@ onMounted(async () => {
                  启动后执行没有它（三个并列短字段另起一行）。 -->
             <div class="form-row form-row--flex">
               <div class="form-group flex-1">
-                <label>触发方式</label>
+                <label for="scheduled-task-trigger">触发方式</label>
                 <CustomSelect
                   :model-value="draft.trigger"
                   :options="triggerOptions"
+                  trigger-id="scheduled-task-trigger"
                   @update:model-value="onTriggerChange"
                 />
               </div>

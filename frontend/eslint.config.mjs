@@ -1,6 +1,7 @@
 // @ts-check
 import js from "@eslint/js";
 import pluginVue from "eslint-plugin-vue";
+import vueA11y from "eslint-plugin-vuejs-accessibility";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
@@ -18,6 +19,12 @@ export default tseslint.config(
   // 模板属于纯噪音 diff，故显式剥离（早年 essential 起步决策的正式收敛）
   ...pluginVue.configs["flat/strongly-recommended"],
   pluginVue.configs["no-layout-rules"],
+
+  // a11y 守门（F13）：vuejs-accessibility recommended 全集为 error 基线，
+  // 零告警后不放宽。裁剪与冲突面见文件尾的 a11y 裁剪块（逐条带中文理由）。
+  // 该配置自带 vue-eslint-parser（与 eslint-plugin-vue 同族），置于其后不
+  // 影响下方 .vue 块的 TS script 解析器注入（parserOptions 为独立键合并）
+  ...vueA11y.configs["flat/recommended"],
 
   // .vue 模板由 vue-eslint-parser 托管，<script lang="ts"> 内容交给 TS 解析器
   {
@@ -67,6 +74,20 @@ export default tseslint.config(
     ],
     rules: {
       "vue/one-component-per-file": "off",
+    },
+  },
+
+  // ── a11y 规则裁剪（F13，零告警后不再放宽）──────────────────────────
+  {
+    files: ["**/*.vue"],
+    rules: {
+      // 默认 every:["nesting","id"] 要求 label 同时嵌套控件且带 for——这是
+      // jsx-a11y v1 时代的过严口径（连其继任者 label-has-associated-control
+      // 都已降为 some）。本仓两种既有合法模式各占一半：toggle 类用嵌套
+      // （<label><input><span class="toggle-label">），设置页用 for+id
+      // （settingsA11y.test.ts 钉住 label for 指向 input id）。some 收缩为
+      // "二者必有其一"（与 HTML 规范一致），label 与控件失联仍会报。
+      "vuejs-accessibility/label-has-for": ["error", { required: { some: ["nesting", "id"] } }],
     },
   },
 );

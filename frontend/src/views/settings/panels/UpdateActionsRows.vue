@@ -142,6 +142,9 @@ onMounted(() => { void refreshUpdateState(); });
   <div>
     <SettingsRow v-if="!IS_OPENWRT" description="从本地挑一个已下载好的发布包直接安装，不联网下载">
       <template #label>
+        <!-- 行标题：控件是自带完整文本的动作按钮「选择安装包」，名称与标题
+             不同，强行 for 关联会改写按钮可访问名（误报豁免） -->
+        <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
         <label>手动选择安装包</label>
         <FieldHelp text="从本地挑一个已下载好的发布包直接安装，不联网下载。适用于下载慢、或用自编译/镜像包的情况；版本须高于当前版本。" />
       </template>
@@ -160,6 +163,8 @@ onMounted(() => { void refreshUpdateState(); });
     </SettingsRow>
     <SettingsRow description="记录最近一次手动或自动检查的结果，重启后保留">
       <template #label>
+        <!-- 行标题：控件槽是检查时间/状态文本行，无可标记的表单控件（误报豁免） -->
+        <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
         <label>上次检查时间</label>
         <FieldHelp text="记录最近一次手动或自动检查的结果，重启后保留。" />
       </template>

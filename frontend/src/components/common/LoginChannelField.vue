@@ -286,7 +286,9 @@ async function runTest(): Promise<void> {
           <label :for="`${uid}-task`">浏览器任务</label>
           <FieldHelp :text="HELP.browserTask" wide />
         </div>
-        <CustomSelect :id="`${uid}-task`" v-model="taskBinding" :options="browserTaskSelectOptions" />
+        <!-- trigger-id 让 label for 落在下拉触发按钮上（裸 :id 经 attrs 会落到
+             根 div，label 关联失效） -->
+        <CustomSelect :trigger-id="`${uid}-task`" v-model="taskBinding" :options="browserTaskSelectOptions" />
       </div>
     </div>
 
@@ -297,19 +299,22 @@ async function runTest(): Promise<void> {
           <FieldHelp :text="HELP.scriptTask" wide />
         </div>
         <CustomSelect
-          :id="`${uid}-script-task`"
+          :trigger-id="`${uid}-script-task`"
           :model-value="modelValue.active_script_task"
           :options="scriptTaskSelectOptions"
+          :aria-invalid="boundScriptTaskMissing || undefined"
+          :aria-describedby="`${uid}-script-bind-note`"
           @update:model-value="onScriptTaskChange"
         />
       </div>
 
-      <!-- 未绑定 / 绑定的脚本已被删除：两种都会让脚本登录直接失败，故当场提示并给出出口 -->
-      <div v-if="boundScriptTaskMissing" class="note note--warn">
+      <!-- 未绑定 / 绑定的脚本已被删除：两种都会让脚本登录直接失败，故当场提示并给出出口；
+           两个互斥分支共用同一 id，屏读器经 aria-describedby 总能读到当前绑定结论 -->
+      <div v-if="boundScriptTaskMissing" :id="`${uid}-script-bind-note`" class="note note--warn">
         <IconApp name="alert-triangle" class="icon-sm" />
         <span>绑定的脚本任务已不存在，请重新选择；脚本登录在选中任务前不可用。</span>
       </div>
-      <div v-else-if="!modelValue.active_script_task.trim()" class="note">
+      <div v-else-if="!modelValue.active_script_task.trim()" :id="`${uid}-script-bind-note`" class="note">
         <IconApp name="info" class="icon-sm" />
         <span>尚未绑定登录脚本，脚本登录会直接失败。</span>
         <a href="#" class="http-task-link" @click.prevent="emit('openGuide')">去新建 →</a>
@@ -331,19 +336,22 @@ async function runTest(): Promise<void> {
           <FieldHelp :text="HELP.httpTask" wide />
         </div>
         <CustomSelect
-          :id="`${uid}-http-task`"
+          :trigger-id="`${uid}-http-task`"
           :model-value="modelValue.active_http_task"
           :options="httpTaskSelectOptions"
+          :aria-invalid="boundHttpTaskMissing || undefined"
+          :aria-describedby="`${uid}-http-bind-note`"
           @update:model-value="onHttpTaskChange"
         />
       </div>
 
-      <!-- 未绑定 / 绑定的任务已被删除：两种都会让HTTP 登录直接失败，故当场提示并给出出口 -->
-      <div v-if="boundHttpTaskMissing" class="note note--warn">
+      <!-- 未绑定 / 绑定的任务已被删除：两种都会让HTTP 登录直接失败，故当场提示并给出出口；
+           两个互斥分支共用同一 id，屏读器经 aria-describedby 总能读到当前绑定结论 -->
+      <div v-if="boundHttpTaskMissing" :id="`${uid}-http-bind-note`" class="note note--warn">
         <IconApp name="alert-triangle" class="icon-sm" />
         <span>绑定的HTTP 登录任务已不存在，请重新选择；HTTP 登录在选中任务前不可用。</span>
       </div>
-      <div v-else-if="!modelValue.active_http_task.trim()" class="note">
+      <div v-else-if="!modelValue.active_http_task.trim()" :id="`${uid}-http-bind-note`" class="note">
         <IconApp name="info" class="icon-sm" />
         <span>尚未绑定HTTP 登录任务，HTTP 登录会直接失败。</span>
         <a href="#" class="http-task-link" @click.prevent="emit('openGuide')">去新建 →</a>

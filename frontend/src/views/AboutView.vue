@@ -235,16 +235,22 @@ const {
             </div>
 
             <!-- 保留勾选：默认不勾（默认真卸载）。放在数据目录上方，勾选后下方行的标签
-                 立刻从「将删除」变成「保留」，后果在按下按钮前就看得见 -->
+                 立刻从「将删除」变成「保留」，后果在按下按钮前就看得见。
+                 危险操作说明经 aria-describedby 直连勾选框（后果说明 + 禁用原因） -->
             <label class="toggle toggle-help-inline uninstall-keep">
-              <input type="checkbox" v-model="uninstallKeepUserData" :disabled="uninstallRunning || !!uninstallKeepBlockReason" />
+              <input
+                type="checkbox"
+                v-model="uninstallKeepUserData"
+                :disabled="uninstallRunning || !!uninstallKeepBlockReason"
+                aria-describedby="uninstall-keep-hint uninstall-keep-blocked"
+              />
               <span class="toggle-slider"></span>
               <span class="toggle-label">保留配置与任务</span>
             </label>
-            <p class="uninstall-keep-hint">
+            <p id="uninstall-keep-hint" class="uninstall-keep-hint">
               保留下面已有的数据与加密密钥，位置不变。在原目录重新解压即可继续使用；换目录重装时需自行迁移数据。
             </p>
-            <p v-if="uninstallKeepBlockReason" class="uninstall-blocked">{{ uninstallKeepBlockReason }}</p>
+            <p v-if="uninstallKeepBlockReason" id="uninstall-keep-blocked" class="uninstall-blocked">{{ uninstallKeepBlockReason }}</p>
 
             <div v-for="d in uninstallData" :key="d.key" class="uninstall-item" :class="{ disabled: !d.exists }">
               <div class="uninstall-item-info">

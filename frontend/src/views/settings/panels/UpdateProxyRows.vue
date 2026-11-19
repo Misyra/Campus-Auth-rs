@@ -21,7 +21,13 @@ const config = useConfig();
         <span class="sr-only">使用代理</span>
       </label>
     </SettingsRow>
-    <SettingsRow v-if="config.config.updater.use_proxy" description="完整的 HTTP 代理地址，如 http://127.0.0.1:7890">
+    <!-- description-id + input aria-describedby：格式说明经编程关联可随控件朗读
+         （FieldHelp 的 tooltip 只在悬停/聚焦 `?` 时可达） -->
+    <SettingsRow
+      v-if="config.config.updater.use_proxy"
+      description="完整的 HTTP 代理地址，如 http://127.0.0.1:7890"
+      description-id="settings-proxy-url-desc"
+    >
       <template #label>
         <label for="settings-proxy-url">代理地址</label>
         <FieldHelp text="完整的 HTTP 代理地址，如 http://127.0.0.1:7890。" />
@@ -32,6 +38,7 @@ const config = useConfig();
         type="text"
         placeholder="http://127.0.0.1:7890"
         spellcheck="false"
+        aria-describedby="settings-proxy-url-desc"
       />
     </SettingsRow>
   </div>

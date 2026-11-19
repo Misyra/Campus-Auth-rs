@@ -30,7 +30,7 @@ withDefaults(
     /** 紧凑变体（通知下拉等小容器场景） */
     small?: boolean;
   }>(),
-  { dashed: false, small: false },
+  { dashed: false, small: false, icon: undefined, strokeWidth: undefined, title: undefined, description: undefined },
 );
 </script>
 

@@ -242,6 +242,7 @@ onBeforeUnmount(stopPoll);
           :class="{ 'is-indeterminate': progressPercent == null && !allDone }"
           :value="progressPercent ?? undefined"
           max="100"
+          aria-label="安装进度"
         ></progress>
         <span class="env-progress-text">{{ progressText }}</span>
         <span v-if="pollError" class="env-poll-error">状态获取失败，重试中…</span>
