@@ -32,7 +32,7 @@ pub type ProfileMergeFn = Box<dyn FnOnce(ProfileData) -> ProfileMergeFuture + Se
 pub type SettingsMergeFn = Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>;
 /// 损坏文件备份前缀
 pub const CORRUPT_PREFIX: &str = "settings.corrupt.";
-/// 原子写入临时文件前缀（`utils::io::atomic_write_bytes` 生成的 `.tmp_XXXX.json`）
+/// 原子写入临时文件前缀（`utils::io::atomic_write_bytes` 生成的 `.tmp_XXXX.<目标扩展名>`）
 pub const TMP_PREFIX: &str = ".tmp_";
 /// 迁移备份目录前缀
 pub const BACKUP_PREFIX: &str = ".backup.v5.";
