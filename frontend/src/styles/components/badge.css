@@ -23,35 +23,51 @@
   font-family: var(--font-mono);
 }
 
+/* ═══ 语义变体：统一 Catmail 徽章三段式配方「淡底 + 浅边 + 深字」（设计地基批） ═══
+   淡底 = 语义色低透明度水洗、浅边 = 语义色 0.25~0.3 档、深字 = 语义色本体（浅色
+   主题下语义 token 自带加深重映射，如 --success #047857 / --warning-text #a34a08）。
+   success / warn 有具名语义 token（--*-bg / --*-border）直接引用；primary / info
+   走 rgb 原语派生（无具名 token），透明度与具名档位对齐，不引入新色值。 */
+
 .badge--primary {
   background: rgba(var(--primary-rgb), 0.15);
+  border-color: rgba(var(--primary-rgb), 0.3);
   color: var(--primary);
 }
 
 .badge--success {
-  background: rgba(var(--success-rgb), 0.15);
+  background: var(--success-bg);
+  border-color: var(--success-border);
   color: var(--success);
 }
 
 .badge--warn {
-  background: rgba(var(--warning-rgb), 0.12);
-  /* 文字走加深版：原色琥珀在浅色卡片上约 3.2:1，--warning-text 才过 AA */
+  /* 收口半途配方：底色从手写 0.12 改走语义 token --warning-bg（深浅主题各自调档），
+     边框补齐三段式；文字维持加深版 --warning-text（原色琥珀在浅色卡片上约 3.2:1，
+     不过 AA） */
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
   color: var(--warning-text);
 }
 
 .badge--info {
-  background: rgba(var(--accent-rgb), 0.12);
+  /* 强调色系走选中态配方：--accent-soft 浅底（--accent-rgb color-mix 派生）+
+     --border-accent-strong 浅边（运行时注入跟随自定义强调色） */
+  background: var(--accent-soft);
+  border-color: var(--border-accent-strong);
   color: var(--accent-text, var(--accent));
 }
 
 /* 脚本类：主色系 */
 .badge-script {
   background: rgba(var(--primary-rgb), 0.15);
+  border-color: rgba(var(--primary-rgb), 0.3);
   color: var(--primary);
 }
 
 /* 浏览器标记：成功色系 */
 .badge-browser {
-  background: rgba(var(--success-rgb), 0.15);
+  background: var(--success-bg);
+  border-color: var(--success-border);
   color: var(--success);
 }

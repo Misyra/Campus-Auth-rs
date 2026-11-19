@@ -50,6 +50,13 @@
   /* 中性灰蓝原语（slate）：滚动条/占位符/骨架等中性半透明色统一引用，浅色主题下整体加深 */
   --slate-rgb: 148, 163, 184;
 
+  /* 选中态浅底（Catmail accent-soft 配方，设计地基批）：由 --accent-rgb 经 color-mix
+     派生而非写死色值——运行时注入的自定义强调色与深浅主题切换自动跟随（浅色主题的
+     --accent-rgb 重映射为黑，混合结果即黑色 12% 水洗）。选中列表项 / 强调徽标 /
+     fn 词条等「浅底强调」场景统一引用此 token；不支持 color-mix 的旧引擎按
+     transparent 处理（about.css 已有同款降级先例）。 */
+  --accent-soft: color-mix(in srgb, rgb(var(--accent-rgb)) 12%, transparent);
+
   /* 状态色 */
   --success: #10b981;
   --success-bg: rgba(var(--success-rgb), 0.15);
@@ -94,6 +101,15 @@
      自然是中性发光） */
   --shadow-accent: 0 0 10px rgba(var(--accent-rgb), 0.2);
 
+  /* Catmail 卡片/浮层阴影配方（设计地基批）：结构 = 贴地 1px 锐层 + 大 blur 低强度
+     漫射层；浮层（弹窗/下拉/命令面板）在两层之间加一档中程投影成三层。与 Catmail
+     的差异只在颜色基色（oklch → 本项目黑）与透明度（深色表面阴影需更重才可辨）：
+     :root 深色分支整体加深，浅色分支（文件尾 [data-theme="light"]）即 Catmail
+     原始强度档。页面批的卡片/浮层消费此 token，勿在组件里手拼阴影。 */
+  --panel-elevation: 0 1px 2px rgba(0, 0, 0, 0.25), 0 6px 20px -10px rgba(0, 0, 0, 0.4);
+  --overlay-elevation: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px -2px rgba(0, 0, 0, 0.35),
+    0 16px 40px -12px rgba(0, 0, 0, 0.5);
+
   /* 圆角 */
   --radius-xs: 4px;
   --radius-sm: 6px;
@@ -104,10 +120,15 @@
   --radius-3xl: 16px;
   --radius-full: 999px;
 
-  /* 间距：粗粒度节奏档位。6/10/12/20 这类局部微调值允许直接写 px，
-     不为它们扩档（避免 token 集合膨胀到没人记得住） */
+  /* 间距：粗粒度节奏档位。10/20 这类局部微调值允许直接写 px，
+     不为它们扩档（避免 token 集合膨胀到没人记得住）。
+     例外：阶段 1c 实测逃逸值 12px（×18 处）/ 6px（×17 处）/ 2px（×10 处）
+     已升为档位（Catmail 设计地基批），页面层批次据此前提回填字面量。 */
+  --space-3xs: 2px;
   --space-xs: 4px;
+  --space-sm-xs: 6px;
   --space-sm: 8px;
+  --space-md-sm: 12px;
   --space-md: 16px;
   --space-lg: 24px;
   --space-xl: 32px;
@@ -147,11 +168,14 @@
   /* 兼容别名：body 基准字号（历史上预留的动态入口，当前无设置项） */
   --font-size-base: var(--text-base);
 
-  /* 动效节奏：三档时长 + 统一缓动曲线（easeOutCubic，比线性 ease 更利落） */
+  /* 动效节奏：三档时长 + 统一缓动曲线（easeOutCubic，比线性 ease 更利落）。
+     --ease-out-soft 为 Catmail 统一缓动（设计地基批）：motion.css 的动效基元与
+     页面批次的入场/级联/弹层一律走它，既有 --ease-out 保持不动、存量消费照旧 */
   --dur-fast: 0.12s;
   --dur-base: 0.18s;
   --dur-slow: 0.26s;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-soft: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* 动画/布局尺寸 */
   --collapse-anim-max: 300px;
@@ -278,12 +302,20 @@ textarea {
   outline-offset: 2px;
 }
 
-/* Firefox 滚动条兜底：Chromium/Safari 走上面的 ::-webkit-scrollbar（6px 细条），
+/* Firefox 滚动条兜底：Chromium/Safari 走下面的 ::-webkit-scrollbar（6px 细条），
    Firefox 不认识伪元素，系统默认粗滚动条观感突兀。标准属性必须用 supports 护栏
-   ——无条件声明会让支持它的 Chrome 接管为 thin（≈11px），日志区 4px 细条会变粗。 */
+   ——无条件声明会让支持它的 Chrome 接管为 thin（≈11px），日志区 4px 细条会变粗
+   （dashboard.css 的 .log-viewer / .history-list 4px 特例依赖该护栏存活）。
+   hover-reveal 口径与 WebKit 分支一致：默认透明，滚动容器 hover / focus-within
+   才显色——scrollbar-color 可继承，悬停容器的后代同步继承显色值。 */
 @supports not selector(::-webkit-scrollbar) {
   html {
     scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  *:hover,
+  *:focus-within {
     scrollbar-color: rgba(var(--slate-rgb), 0.2) transparent;
   }
 }
@@ -297,12 +329,23 @@ textarea {
   background: transparent;
 }
 
+/* hover-reveal（Catmail 配方，设计地基批）：thumb 默认透明，滚动容器 hover /
+   focus-within 才显色；键盘滚动时 focus-within 同样满足。:hover 沿祖先链命中
+   所有外层滚动容器，悬停嵌套容器内层时外层也照常显色。
+   特例：dashboard.css 的 .log-viewer / .history-list thumb（4px 常显）声明在本文件
+   之后载入、特异性同级，故日志区不受透明默认影响；thumb 直指时的 0.35 提亮为
+   全局统一行为，4px 宽度不受本段任何规则影响。 */
 ::-webkit-scrollbar-thumb {
-  background: rgba(var(--slate-rgb), 0.2);
+  background: transparent;
   border-radius: 3px;
 }
 
-::-webkit-scrollbar-thumb:hover {
+*:hover::-webkit-scrollbar-thumb,
+*:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(var(--slate-rgb), 0.2);
+}
+
+*:hover::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--slate-rgb), 0.35);
 }
 
@@ -420,6 +463,11 @@ html.reduce-motion .btn { transform: none !important; }
   --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.1);
   --shadow-xl: 0 20px 60px rgba(0, 0, 0, 0.15);
   --shadow-accent: 0 0 10px rgba(var(--accent-rgb), 0.15);
+  /* Catmail 阴影配方浅色分支：透明度即 Catmail 原始强度档（贴地 0.05 + 漫射 0.13），
+     基色用浅色主题阴影同款石板深蓝 rgba(15, 23, 42)，与上方 --shadow 系一致 */
+  --panel-elevation: 0 1px 2px rgba(15, 23, 42, 0.05), 0 6px 20px -10px rgba(15, 23, 42, 0.13);
+  --overlay-elevation: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 12px -2px rgba(15, 23, 42, 0.08),
+    0 16px 40px -12px rgba(15, 23, 42, 0.16);
   /* 描边底色：默认单色主题色下取中性黑（青蓝描边叠在黑白强调色上不协调，
      与 useAppearance 的单色分支口径一致）；非单色时由 useAppearance 注入当前强调色。 */
   --border-accent: rgba(0, 0, 0, 0.2);

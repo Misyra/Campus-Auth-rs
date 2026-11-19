@@ -1,0 +1,108 @@
+/* motion.css — 动效基元层（Catmail 设计语言映射，设计地基批）
+ *
+ * 归层判据：三组动效均为跨组件复用（页面根入场 / 卡片级联 / 浮层弹入），
+ * 按 index.css 文件头判据 ① 归 styles 层。页面/组件只通过类名消费本文件，
+ * 禁止在页面样式里重抄 @keyframes——时长、缓动、位移与关停口径都在这里收口。
+ *
+ * 三组基元（Catmail 实测口径）：
+ *   page-in    页面入场 0.18s（--dur-base），translateY(4px) 淡入
+ *   fade-rise  卡片浮起 0.28s，配合 .stagger-children 每 40ms 步进级联（至第 8 子项封顶）
+ *   pop-in     浮层弹入 0.16s，translateY(4px) + scale(0.98)
+ *   统一缓动 --ease-out-soft = cubic-bezier(0.32, 0.72, 0, 1)（base.css）。
+ *
+ * 与既有动效的关系：base.css 的 pageEnter（translateY 6px / --dur-slow）仍由
+ * layout.css 的 router-view 落点消费，本文件的 .page-in 是页面批后续接入的
+ * Catmail 口径入口（4px / 0.18s），两者并存，页面批迁移时逐步收口。
+ *
+ * 时长 0.28s / 0.16s 为 Catmail 配方档位，不并入 base.css 的 --dur-* 三档
+ * （避免档位膨胀）；消费方一律用类名，不感知具体数值。
+ */
+
+/* ── 页面入场：0.18s，translateY(4px) 淡入 ── */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── 卡片浮起：0.28s，行程 8px（比页面入场的 4px 多一档，与更长时长匹配） ── */
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── 浮层弹入：0.16s，98% 缩放 + 4px 上移，柔和不弹跳 ── */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ═══ 消费类 ═══
+ * `both` 填充：动画开始前保持起始帧（透明），delay 期间不闪出全量内容；
+ * 结束后保持终止帧，动画与静止态无缝衔接。 */
+
+/* 页面根节点入场：挂在页面最外层容器上 */
+.page-in {
+  animation: page-in var(--dur-base) var(--ease-out-soft) both;
+}
+
+/* 单卡片浮起：不需要级联时单独使用 */
+.fade-rise {
+  animation: fade-rise 0.28s var(--ease-out-soft) both;
+}
+
+/* 卡片级联容器：直接子项统一播 fade-rise，每 40ms 步进错峰，至第 8 子项封顶
+   （280ms 为第 8 项步进值；第 9 项起不再排队，长列表不会越排越久） */
+.stagger-children > * {
+  animation: fade-rise 0.28s var(--ease-out-soft) both;
+}
+
+.stagger-children > *:nth-child(2) { animation-delay: 40ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 80ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 120ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 160ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 200ms; }
+.stagger-children > *:nth-child(7) { animation-delay: 240ms; }
+.stagger-children > *:nth-child(n + 8) { animation-delay: 280ms; }
+
+/* 浮层弹入：弹窗容器 / 下拉面板 / 命令面板等一次性挂载的浮层（层级走 base.css --z-*） */
+.pop-in {
+  animation: pop-in 0.16s var(--ease-out-soft) both;
+}
+
+/* ═══ 关停双闸 ═══
+ * base.css 已有通配 0.01ms 兜底（!important）；此处类级显式关停为第二重保险：
+ * prefers-reduced-motion（系统偏好）与 html.reduce-motion（手动阅读偏好，
+ * useAppearance 落的钩子）双入口直接不挂动画，而不是「极快地播完」。 */
+@media (prefers-reduced-motion: reduce) {
+  .page-in,
+  .fade-rise,
+  .pop-in,
+  .stagger-children > * {
+    animation: none;
+  }
+}
+
+html.reduce-motion .page-in,
+html.reduce-motion .fade-rise,
+html.reduce-motion .pop-in,
+html.reduce-motion .stagger-children > * {
+  animation: none;
+}

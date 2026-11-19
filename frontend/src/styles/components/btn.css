@@ -43,15 +43,31 @@
   /* 透明边框而非 border:none：与 .btn 的 1px 边框保持同一盒模型，否则同一行里
      主按钮（无边框）比次按钮（1px 边框）矮 1px，实测 40px vs 41px，肉眼可见错位。 */
   border: 1px solid transparent;
+  /* Catmail primary 配方（设计地基批）：accent 色贴地投影 + 顶部 1px 内高光
+     （rgb(255 255 255/0.18) 原值映射，模拟顶缘受光）。投影基色走 --accent-rgb，
+     单色主题（黑/白强调色）下自然退化为中性投影/微光，不引入新色值。 */
+  box-shadow: 0 1px 2px rgba(var(--accent-rgb), 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.18);
   font-weight: 600;
   position: relative;
   overflow: hidden;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  /* Catmail 口径：hover 底色由 accent 经 color-mix 现场派生（86% accent + black），
+     不再消费 --accent-hover 维护的色阶——自定义强调色无需任何配套档位即可获得
+     正确的 hover 深/浅偏移。注意单色主题的极端值会饱和（浅色主题纯黑 accent
+     混 black 仍为黑），此时 hover 反馈由本条 transform 位移与边框变化承担。
+     黑/白以 rgb(0 0 0)/rgb(255 255 255) 函数形式书写：color-named lint 规则
+     禁止具名色关键字，函数形式等价且合规。 */
+  background: color-mix(in oklab, var(--accent) 86%, rgb(0 0 0));
   color: var(--on-accent-hover, var(--on-accent));
   transform: translateY(-1px);
+}
+
+.btn-primary:active:not(:disabled) {
+  /* 按下回浅一档（86% accent + white）：与 hover 的深化形成「按下回弹」方向差，
+     单色极端值下饱和为原色，按压反馈由 .btn:active 的 scale(0.98) 承担 */
+  background: color-mix(in oklab, var(--accent) 86%, rgb(255 255 255));
 }
 
 .btn-secondary {

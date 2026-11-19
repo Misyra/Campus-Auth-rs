@@ -43,6 +43,11 @@
 }
 
 .chip--fn {
+  /* 可调用函数：走 Catmail 选中态/强调三段式（设计地基批）——--accent-soft 浅底 +
+     --border-accent-strong 浅边 + 强调色字（运行时注入跟随自定义强调色），
+     与 badge--info 同配方；此前只染文字，衬底后可调用性一眼可辨 */
+  background: var(--accent-soft);
+  border-color: var(--border-accent-strong);
   color: var(--accent-text, var(--accent));
 }
 

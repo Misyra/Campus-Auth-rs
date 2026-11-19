@@ -1,11 +1,14 @@
 /* card.css — 卡片容器（card / card-header / card-body / card-footer） */
 .card {
   background: var(--bg-card);
+  /* Catmail 卡片质感（设计地基批）：1px subtle 边 + 双层柔和阴影（--panel-elevation，
+     1px 贴地锐层 + 大 blur 低强度漫射）；--radius-xl 即 12px，与 Catmail 卡片圆角同值。
+     深浅主题的阴影强度由 token 分支承担，此处不写死 rgba。 */
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   -webkit-backdrop-filter: var(--card-blur, var(--blur-md));
   backdrop-filter: var(--card-blur, var(--blur-md));
-  box-shadow: var(--shadow);
+  box-shadow: var(--panel-elevation);
   transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 
@@ -73,7 +76,8 @@
 .card-footer {
   display: flex;
   justify-content: flex-end;
-  gap: 12px;
+  /* 12px = --space-md-sm（阶段 1c 实测逃逸档位，等值回填） */
+  gap: var(--space-md-sm);
   padding: var(--space-md) 20px;
   border-top: 1px solid var(--border);
   align-items: center;

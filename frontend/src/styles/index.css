@@ -1,6 +1,6 @@
 /**
  * 全局样式入口。
- * 按层级导入：基础变量 → 布局 → 组件 → 页面样式 → 响应式。
+ * 按层级导入：基础变量 → 动效基元 → 布局 → 组件 → 页面样式 → 响应式。
  *
  * 新代码归属判据：
  * ① 跨组件复用 / 含 [data-theme] 分支 / 涉及 tsk-* settings-* 等共享类 → styles/ 分层文件；
@@ -31,6 +31,10 @@
 
 /* 基础变量与重置 */
 @import "./base.css";
+
+/* 动效基元（page-in / fade-rise + stagger / pop-in）——紧跟 base 层挂载，
+   类级工具层，先于组件/页面样式载入以便被覆写 */
+@import "./motion.css";
 
 /* 布局（sidebar / topbar / content-wrapper） */
 @import "./layout.css";
