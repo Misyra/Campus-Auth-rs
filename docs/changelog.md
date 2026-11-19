@@ -2,6 +2,13 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.1”。
 
+## 开发中（2026-11-20 前端统一重构战役立项：脏树清库 + 设置页滚动模型修复）
+
+> 2026-11-20 用户拍板「重构彻底一点、不留技术债，之前的问题统一重构优化掉」：前端收口战役与 UI 视觉重构合并为统一战役（结构收口 → 视觉重构 → 组件层 → 清债转正；设置页同步引入 schema 驱动混合架构）；同日三拍板 = 设置页顶部 tab 替代左侧子导航 / 分区拆 8 区 / 先地基后视觉。方案、现状诊断与 Catmail 设计语言调研结论集中记录于 plan-next「前端设计系统收口战役」节。
+
+- **脏树 17 批分批提交**：2026-11-13 至 11-19 混载的鉴权 / UI 精修 / 任务页 / Web 校验上提 / 镜像 / Engine P1 / 六项小修 / 性能收敛 / 契约 / AI 类型 / stylelint 门禁 / Worker 打包 / CI / 文档各批按「一次 commit 一件事」落库（9c584d28..952b7a52），工作区清零——plan-next「脏树分批提交」与战役阶段 0 勾销。
+- **设置页滚动模型修复（战役首项）**：删除 `.content-wrapper:has(> .settings-page)` overflow:hidden 与 `.settings-scroll` 自身滚动声明（settings/list.css），回归 `.content-wrapper` 整体滚动——修「只有中间内容区可滚、左右空白区滚不动」（根因：唯一滚动容器被关在 max-width:1080px 居中列内，列外空白命中的 wrapper / main-content 均不可滚）；`scrollToSection` 改 `scrollIntoView` 声明式定位（落点由 scroll-margin / scroll-padding 表达，组件不再持常数）、save-bar 改 sticky 吸附（bottom 与 wrapper 底内边距同值，滚动全程悬浮位与到底静止位重合零跳变）、滚动 / 输入监听自模板迁移至 wrapper（列外空白区的滚轮也能解除锚定，`bindScrollContainer` onMounted/onBeforeUnmount 成对防泄漏）、updateActiveSection 判定线 +32→+56（防锚定后高亮回跳）、sr-only 包含块守卫随迁 `.settings-page`（防外观页取色控件撑爆 documentElement）。验证：lint:css 0 error / vitest 717 全过 / typecheck / build 全绿。
+
 ## 开发中（2026-11-19 第二轮交叉复核：android/ 壳 + 修复批次对质 + 未审区）
 
 > 承接同日全面审查与修复：5 路子代理补审此前未覆盖区（android/ 壳工程 15 文件、http_login boa 沙箱边界、release.yml 全文、mirrors 模块细审、frontend/preview）并对当日 8 个修复批次做第二双眼睛交叉复核。复核结论：当日修复批次无假绿（AiStreamEvent 九变体与后端 StreamEvent 逐字段零漂移、wheel 经 `uv build --wheel` 实测恰 21 模块、样式变量分叉默认值链渲染不变、pin 闸门通道口径成立、engine P1 挂起测试无 vacuous pass）；android 壳骨架质量高（JNI 四方一致 / FGS 合规面完整 / manifest 加固到位）。本轮只读审查 + 当日引入问题的即时回修，其余发现落档 plan-next。
