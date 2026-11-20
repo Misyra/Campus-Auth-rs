@@ -7,6 +7,7 @@
  */
 import IconApp from "@/components/common/IconApp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { TUTORIAL_VIDEO_AI_URL } from "@/utils/constants";
@@ -61,10 +62,8 @@ const {
     <div class="ai-dev-notice">
       <IconApp name="alert-triangle" class="icon-sm" />
       <span>
-        当前功能仍在开发，可能不稳定。如果无法生成正确任务，请到
-        <router-link to="/settings/tasks">设置 · 任务与环境</router-link>
-        下载<router-link to="/settings/tasks">任务录制器</router-link>，点选元素后把提示词交给任意大模型生成；
-        也可参考
+        功能仍在开发中，生成不稳定时可用
+        <router-link to="/settings/tasks">任务录制器</router-link>替代，或参考
         <a :href="TUTORIAL_VIDEO_AI_URL" target="_blank" rel="noopener noreferrer">使用教程视频</a>。
       </span>
     </div>
@@ -84,15 +83,12 @@ const {
         <span class="ai-step-dot">{{ isGenerateDone ? "✓" : "3" }}</span>
         <span class="ai-step-label">生成任务</span>
       </div>
-    </div>
-
-    <div class="hint ai-steps-hint">
-      <b>使用步骤</b>
-      <ol>
-        <li>先选择模型服务商并保存配置：需要该服务商的 API Key（各自独立加密保存），模型名可在保存前点「获取模型列表」从服务商拉取。</li>
-        <li>退出校园网登录后捕获认证页，再连回网络生成任务（总时长最长 10 分钟）。</li>
-        <li>在下方预览 JSON，确认后保存为任务。</li>
-      </ol>
+      <span class="ai-steps-help">
+        <FieldHelp
+          wide
+          text="① 选择模型服务商并保存配置：需要该服务商的 API Key（各自独立加密），模型名可点「获取模型列表」拉取。&#10;&#10;② 退出校园网登录后捕获认证页，再连回网络生成任务（总时长最长 10 分钟）。&#10;&#10;③ 在下方预览 JSON，确认后保存为任务。"
+        />
+      </span>
     </div>
 
     <div class="ai-task-grid">
@@ -109,7 +105,7 @@ const {
           </button>
           <div v-show="configExpanded">
             <div class="hint ai-privacy-hint">
-              API Key 按服务商分别加密保存在本机。切换服务商时会自动切换到对应 Key，不会把 DeepSeek Key 发给 GLM。
+              API Key 按服务商分别加密保存在本机，切换服务商时自动使用对应的 Key。
             </div>
             <div class="ai-provider-grid" role="radiogroup" aria-label="模型服务商">
               <button v-for="item in PRESETS" :key="item.id" type="button" class="ai-provider-card"
@@ -184,7 +180,7 @@ const {
         </div>
         <div class="card-body">
           <div class="hint">
-            请在<b>未登录校园网</b>状态下捕获（已认证时不会跳转到登录页）。页面内容与截图将发送给你配置的 LLM 服务商。
+            请在<b>未登录校园网</b>状态下捕获；页面内容与截图将发送给你配置的 LLM 服务商。
           </div>
           <div v-if="captureChannelDegraded" class="ai-capture-warn">
             <span>
@@ -195,7 +191,6 @@ const {
           <div class="form-group">
             <label for="ai-capture-url" class="required">登录页地址</label>
             <input id="ai-capture-url" v-model="captureUrl" type="text" placeholder="例如 http://10.x.x.x 或任意网址（未登录时自动跳转到认证页）" autocomplete="off" spellcheck="false" @keyup.enter="capture" />
-            <span class="hint">请填写登录页或可触发校园网跳转的地址。</span>
           </div>
           <div class="ai-actions">
             <button class="btn btn-primary" :disabled="capturing" @click="capture">
@@ -215,7 +210,6 @@ const {
               <span><b>{{ captureResult.structure_summary.forms }}</b> 个表单</span>
               <span><b>{{ captureResult.structure_summary.controls }}</b> 个控件</span>
               <span><b>{{ captureResult.structure_summary.captcha_candidates }}</b> 个验证码候选</span>
-              <small>生成时优先读取结构信息，并始终附带脱敏局部 HTML。</small>
             </div>
             <div class="ai-actions">
               <button class="btn btn-secondary btn-sm" :disabled="savingBundle" @click="saveBundle" title="下载离线页面文件：MHTML（Chromium 渠道）+ 原始 HTML + 离线副本 + CSS/JS 资源 + 截图">
@@ -243,7 +237,7 @@ const {
               <label for="ai-idle" class="ai-idle-label">前端空闲超时</label>
               <CustomSelect v-model="streamIdleValue" :options="streamIdleOptions" class="ai-idle-select" compact />
             </div>
-            <span class="hint ai-idle-hint">有输出会刷新空闲计时；服务端单次生成总时长仍不超过 10 分钟</span>
+            <span class="hint ai-idle-hint">有输出会刷新空闲计时；服务端总时长仍不超过 10 分钟</span>
             <span class="ai-generate-hint hint" v-if="streamPhase && !generateResult">{{ streamPhase }}</span>
             <span class="ai-generate-hint hint" v-else-if="generateResult">第 {{ generateResult.attempts }} 轮通过校验 · {{ generateResult.model }}</span>
           </div>

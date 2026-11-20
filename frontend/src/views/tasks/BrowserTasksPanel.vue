@@ -364,7 +364,7 @@ onMounted(async () => {
         <span>共 {{ browserTasks.length }} 个任务</span>
         <span v-if="searchQuery.trim()">· {{ visibleTasks.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首或用 ↑↓ 调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
@@ -519,11 +519,9 @@ onMounted(async () => {
         <div class="card">
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
-            <p class="tsk-side-hint">任务本身不会自动运行：到「方案」页选中它并保存，自动登录才会使用。</p>
             <p class="tsk-side-hint">
-              可以<button type="button" class="btn btn-link" @click="repo.showRepoImport()">选择现成任务</button>，或用<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成。
+              任务不会自动运行：到「方案」页选中并保存后生效。可<button type="button" class="btn btn-link" @click="repo.showRepoImport()">选择现成任务</button>或用<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成，步骤字段说明见<a href="/api/docs/task-writing-guide" target="_blank" rel="noopener noreferrer">编写指南</a>。
             </p>
-            <p class="tsk-side-hint">步骤类型与字段说明见<a href="/api/docs/task-writing-guide" target="_blank" rel="noopener noreferrer">编写指南</a>。</p>
           </div>
         </div>
       </div>

@@ -368,7 +368,7 @@ onMounted(async () => {
         <span>共 {{ httpTasks.length }} 个任务</span>
         <span v-if="searchQuery.trim()">· {{ visibleRows.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首或用 ↑↓ 调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
@@ -428,7 +428,7 @@ onMounted(async () => {
               <div class="form-group">
                 <label :for="`${uid}-id`">任务 ID</label>
                 <input :id="`${uid}-id`" :value="httpTaskDraft.id" type="text" disabled />
-                <span class="hint">自动生成，用来绑定方案；如需另一份任务，请复制。</span>
+                <span class="hint">自动生成，用于绑定方案</span>
               </div>
             </details>
           </div>
@@ -478,7 +478,6 @@ onMounted(async () => {
                 <input :id="`${uid}-test-carrier-custom`" v-model.trim="customCarrierValue" type="text" placeholder="校园专网" />
               </div>
             </div>
-            <p class="hint">按顺序执行当前填写的全部步骤。测试凭据不会保存到任务；任务配置补齐后自动保存。</p>
             <HttpTestResult v-if="testResult" :result="testResult" />
           </div>
         </div>

@@ -89,7 +89,7 @@ const STEP_HEADER: Record<StepKey, { title: string; sub: string }> = {
   },
   school: {
     title: "匹配你学校的登录任务",
-    sub: "输入学校名称，自动为两个任务仓库测速、择优获取索引并查找匹配的社区任务",
+    sub: "输入学校名称，自动测速并从社区任务仓库查找匹配任务",
   },
   done: {
     title: "初始配置完成",
@@ -651,7 +651,7 @@ async function skipWizard() {
 
           <div class="wizard-section">
             <h3>选择浏览器</h3>
-            <p class="wizard-section-sub">自动探测系统中已安装的浏览器，也可安装 Playwright 托管引擎；随后可在此修改。</p>
+            <p class="wizard-section-sub">自动探测已安装的浏览器，也可安装 Playwright 托管引擎。</p>
             <div v-if="browsersLoading" class="wizard-note"><IconApp name="refresh" class="icon-sm spin" /> 正在检测浏览器…</div>
             <div v-else-if="browsers.length === 0" class="wizard-note wizard-note--warn">未检测到任何可用浏览器。</div>
             <div v-else class="wizard-browser-list" role="radiogroup" aria-label="浏览器选择">
@@ -692,7 +692,7 @@ async function skipWizard() {
               <IconApp name="alert-triangle" class="icon-sm" />
               {{ browserError }}
             </div>
-            <p class="wizard-note wizard-note--muted">环境与浏览器也可以稍后在「设置 · 任务与环境 / 浏览器」中配置，不阻塞继续。</p>
+            <p class="wizard-note wizard-note--muted">环境与浏览器也可稍后在「设置」中配置，不阻塞继续。</p>
           </div>
         </div>
 
@@ -794,9 +794,8 @@ async function skipWizard() {
             <div v-else-if="debugState === 'applied'" class="wizard-mode-note">
               <strong>当前已切换至调试模式</strong>
               <p>
-                浏览器窗口可见、日志记录 DEBUG 级别、启动后不自动登录，便于你完成剩余配置并验证登录。
-                请到「方案」页填写校园网账号、密码与认证地址，确认能正常登录后，
-                到「设置 · 系统」把运行模式切换回<strong>默认模式</strong>即可日常使用。
+                浏览器窗口可见、启动后不自动登录，便于完成剩余配置并验证登录。
+                请先到「方案」页填写账号并确认能正常登录，再到「设置 · 系统」切回<strong>默认模式</strong>。
               </p>
             </div>
             <div v-else class="wizard-note wizard-note--warn">

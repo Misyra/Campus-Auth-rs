@@ -333,7 +333,7 @@ onMounted(async () => {
       <div v-if="st.scheduledTasks.value.length" class="tsk-foot">
         <span>共 {{ st.scheduledTasks.value.length }} 个定时任务</span>
         <span class="tsk-spacer"></span>
-        <span>点行进入编辑 · 改动自动保存 · 开关控制启用</span>
+        <span>点行进入编辑 · 开关控制启用</span>
       </div>
     </div>
   </div>
@@ -418,7 +418,7 @@ onMounted(async () => {
                 <label for="scheduled-task-target">{{ draft.task_type === 'script' ? '选择脚本' : '选择浏览器任务' }}</label>
                 <CustomSelect v-if="draft.task_type === 'script'" v-model="draft.target_id" :options="scriptTargetOptions" />
                 <CustomSelect v-else v-model="draft.target_id" :options="browserTargetOptions" />
-                <span class="hint">{{ draft.task_type === 'script' ? '在「任务 → 脚本」页创建和管理脚本' : '浏览器任务会自动打开网页并执行登录等自动化操作' }}</span>
+                <span v-if="draft.task_type === 'script'" class="hint">在「任务 → 脚本」页创建和管理脚本</span>
               </div>
             </div>
           </div>
@@ -445,7 +445,6 @@ onMounted(async () => {
                 <input id="scheduled-task-time" class="sch-time-input" type="time"
                   :value="formatScheduleTime(draft.schedule)"
                   @input="onTimeChange($event as InputEvent)" />
-                <span class="hint">每天到这个时间执行一次</span>
                 <!-- 非每日表达式（*/5 之类）在表单里表达不了：说清保存会改写调度语义 -->
                 <span v-if="draft._originalCronInvalid" class="hint text-danger">
                   原表达式「{{ draft._originalCron }}」不是每日时间格式。不动上面的时间就保持原样；
@@ -512,9 +511,6 @@ onMounted(async () => {
         <div class="card">
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
-            <p class="tsk-side-hint">定时任务只调度<strong>「浏览器任务」或「脚本」</strong>，它本身不含登录参数。</p>
-            <p class="tsk-side-hint">HTTP 登录任务不在这里调度——它的验证入口是任务编辑器里的「发送测试请求」。</p>
-            <p class="tsk-side-hint">改动自动保存；名称与目标没补齐前不会落盘，新建任务因此不会在磁盘上留下半成品。</p>
             <p class="tsk-side-hint">立即运行只是「排入执行」，成败与耗时见「执行历史」。</p>
           </div>
         </div>

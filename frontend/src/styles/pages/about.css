@@ -286,11 +286,6 @@
   color: #fb7299; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
 }
 
-.muted {
-  color: var(--text-muted);
-  margin-top: var(--space-sm);
-}
-
 .qq-group {
   margin-top: var(--space-sm);
 }

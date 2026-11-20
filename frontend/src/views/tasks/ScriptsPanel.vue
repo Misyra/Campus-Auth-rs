@@ -313,7 +313,7 @@ onMounted(async () => {
         <span>共 {{ scripts.length }} 个脚本</span>
         <span v-if="searchQuery.trim()">· {{ visibleScripts.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首或用 ↑↓ 调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
@@ -399,8 +399,7 @@ onMounted(async () => {
                   <!-- 允许字符写全：与 SCRIPT_ID_PATTERN / 后端 is_valid_task_id 同口径
                        （历史上这里写着"字母开头、只能用下划线"，比后端严，导致一类 ID 存不上） -->
                   <template v-if="editingTask._isNew">
-                    1~64 位字母、数字、下划线或连字符；它同时是文件名，创建后不可修改。
-                    打完名字按回车（或点输入框外）即创建，输入途中不会落盘
+                    1~64 位字母、数字、下划线或连字符；即文件名，回车或失焦后创建（输入途中不落盘），创建后不可修改
                   </template>
                   <template v-else>脚本文件名，创建后不可修改</template>
                 </span>
@@ -457,7 +456,7 @@ onMounted(async () => {
                 placeholder="#!/usr/bin/env python3&#10;from urllib.request import urlopen&#10;&#10;..."
               ></textarea>
               <span class="hint">
-                脚本可直接硬编码账号密码等参数；stdout 与 stderr 作为执行结果就地显示（不进日志页），按退出码判定成败（0 = 成功）
+                stdout/stderr 在「立即运行」结果里就地显示（不进日志页），按退出码判定成败（0 = 成功）
               </span>
             </div>
           </div>
@@ -479,12 +478,10 @@ onMounted(async () => {
               <IconApp :name="runningIds.has(currentId) ? 'refresh' : 'play'" class="icon-sm" :class="{ spin: runningIds.has(currentId) }" />
               {{ runningIds.has(currentId) ? '运行中…' : '立即运行' }}
             </button>
-            <p class="tsk-side-hint">「立即运行」只测试脚本进程，不注入登录方案的 CAMPUS_* 凭据，也不做登录后网络验证。登录效果请在「方案」页测试。</p>
+            <p class="tsk-side-hint">「立即运行」不注入登录方案的 CAMPUS_* 凭据，也不做登录后网络验证；登录效果请在「方案」页测试。</p>
             <dl class="tsk-kv">
               <dt>调度</dt>
               <dd><span class="tsk-side-hint">在「定时任务」里引用本脚本才会自动执行</span></dd>
-              <dt>输出</dt>
-              <dd><span class="tsk-side-hint">stdout 与 stderr 在「立即运行」的结果里就地显示（不进日志页）</span></dd>
             </dl>
             <!-- 最近一次「立即运行」的结果：脚本输出不进日志页，不留下来就无处可查 -->
             <div
@@ -510,18 +507,12 @@ onMounted(async () => {
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
             <p class="tsk-side-hint">
-              脚本既能做辅助动作（打卡、签到等），也能当登录脚本：到「方案」把登录方式设为
+              脚本可作打卡、签到等辅助动作，也可作登录脚本：到「方案」把登录方式设为
               <strong>自定义脚本</strong>并选中本脚本，凭据以 <code>CAMPUS_*</code> 环境变量传入。
             </p>
             <p class="tsk-side-hint">
-              登录脚本按<strong>退出码</strong>判定成败：0 = 本次尝试成功，程序随后仍做一次网络验证；
-              非 0 = 按方案的重试策略重发（次数见「设置 · 检测」的「最大重试次数」）。
+              登录成败按<strong>退出码</strong>判定：0 = 成功（程序仍会做网络验证），非 0 按方案重试。
             </p>
-            <p class="tsk-side-hint">
-              可从文件或仓库导入。仓库脚本会在确认前显示完整代码；导入后请检查方案绑定与目标地址。
-            </p>
-            <p class="tsk-side-hint">默认超时 60 秒，退出码 0 视为成功；stderr 输出不影响判定。</p>
-            <p class="tsk-side-hint">脚本内容上限 100 KB。</p>
           </div>
         </div>
       </div>

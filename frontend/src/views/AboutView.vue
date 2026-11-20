@@ -171,7 +171,6 @@ const {
         </div>
         <p>License: AGPL-3.0-only (<a :href="APP_LICENSE_URL" target="_blank" rel="noopener noreferrer">LICENSE</a>)</p>
         <p class="qq-group">QQ交流群：<strong>1105307735</strong></p>
-        <p class="muted">Made with ❤️ for campus network users</p>
       </div>
 
       <!-- 卸载 -->

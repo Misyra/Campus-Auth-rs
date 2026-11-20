@@ -548,7 +548,7 @@
   background: var(--warning-bg);
   color: var(--warning-text);
   font-size: var(--text-md);
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 .tsk-gaps svg {
@@ -584,7 +584,7 @@
 .tsk-side-hint {
   margin: 0;
   font-size: var(--text-md);
-  line-height: 1.6;
+  line-height: 1.5;
   color: var(--text-secondary);
 }
 

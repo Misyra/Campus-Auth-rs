@@ -368,7 +368,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
     <!-- 环境未就绪提示：点名缺失组件，并就地提供初始化和设置入口。 -->
     <div v-if="showEnvBanner" class="network-status-banner disconnected env-banner">
       <span class="status-dot"></span>
-      <span class="status-text" :title="`运行环境未就绪（缺 ${envMissingText}），手动登录时会自动初始化`">
+      <span class="status-text">
         <span class="env-message-full">运行环境未就绪（缺 {{ envMissingText }}），手动登录时会自动初始化</span>
         <span class="env-message-compact">运行环境缺少{{ envMissingText }}</span>
       </span>
@@ -386,10 +386,11 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
       <button class="btn btn-sm btn-link env-banner-detail" @click.stop="router.push({ name: 'settings-tasks' })" aria-label="查看任务与环境设置"><span class="env-action-full">前往设置查看</span><span class="env-action-compact">设置</span></button>
     </div>
 
-    <!-- 统计卡片：stagger-children 让四张卡 40ms 步进级联浮起（motion.css 基元） -->
+    <!-- 统计卡片：stagger-children 让四张卡 40ms 步进级联浮起（motion.css 基元）；
+         图标块统一中性描边小方块（原四色圆角底块已中性化，语义色留给副文案） -->
     <div class="stats-grid stagger-children">
       <div class="stat-card">
-        <div class="stat-icon green">
+        <div class="stat-icon">
           <IconApp name="clock" />
         </div>
         <div class="stat-info">
@@ -398,7 +399,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         </div>
       </div>
       <div class="stat-card">
-        <div class="stat-icon blue">
+        <div class="stat-icon">
           <IconApp name="activity" />
         </div>
         <div class="stat-info">
@@ -409,7 +410,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         </div>
       </div>
       <div class="stat-card">
-        <div class="stat-icon orange">
+        <div class="stat-icon">
           <IconApp name="alert-triangle" />
         </div>
         <div class="stat-info">
@@ -420,7 +421,7 @@ function openFullscreen(url: string) { window.open(url, "_blank", "noopener,nore
         </div>
       </div>
       <div class="stat-card">
-        <div class="stat-icon purple">
+        <div class="stat-icon">
           <IconApp name="calendar" />
         </div>
         <div class="stat-info">

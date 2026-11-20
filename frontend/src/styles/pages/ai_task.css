@@ -261,14 +261,14 @@
   font-size: var(--text-sm);
   line-height: 1.6;
 }
-.ai-steps-hint {
-  margin-bottom: var(--space-md);
-  padding: var(--space-sm) 12px;
-  border-radius: var(--radius-sm);
-  background: rgba(var(--slate-rgb), 0.08);
+/* 步骤说明收进步进器行尾的 ？（FieldHelp）：常驻灰字块（三步 ol）改为悬停可见，
+   行内只占一个圆标；小屏步进器改三列网格后无处安放，直接隐藏 */
+.ai-steps-help {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  flex: none;
 }
-.ai-steps-hint ol { margin: 6px 0 0; padding-left: 20px; }
-.ai-steps-hint li + li { margin-top: var(--space-xs); }
 
 .ai-config-toggle {
   display: flex;
@@ -414,6 +414,7 @@
   .ai-step-label { font-size: var(--text-sm); white-space: normal; text-align: center; }
   .ai-step { flex-direction: column; gap: 6px; min-width: 0; }
   .ai-step-sep { display: none; }
+  .ai-steps-help { display: none; }
   .ai-provider-grid { grid-template-columns: 1fr; }
   .ai-stepper { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-inline: 10px; }
 }

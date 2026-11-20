@@ -24,7 +24,7 @@
   background: var(--bg-card-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 20px;
+  padding: 16px 20px;
   display: flex;
   align-items: center;
   gap: var(--space-md);
@@ -36,40 +36,23 @@
   background: var(--bg-card);
 }
 
+/* 图标块中性化：原 48px 四色圆角底块收敛为 28px 中性描边小方块，
+   彩色语义只留给数值副文案（连续失败 / 重试中的警示色） */
 .stat-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: var(--radius-lg);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform var(--dur-slow) var(--ease-out);
+  color: var(--text-secondary);
+  flex: none;
 }
-
 
 .stat-icon svg {
-  width: 24px;
-  height: 24px;
-}
-
-.stat-icon.green {
-  background: rgba(var(--success-rgb), 0.15);
-  color: var(--success);
-}
-
-.stat-icon.blue {
-  background: rgba(var(--accent-rgb), 0.15);
-  color: var(--accent-text, var(--accent));
-}
-
-.stat-icon.orange {
-  background: rgba(var(--warning-rgb), 0.15);
-  color: var(--warning);
-}
-
-.stat-icon.purple {
-  background: rgba(var(--purple-rgb), 0.15);
-  color: var(--purple);
+  width: 16px;
+  height: 16px;
 }
 
 .stat-info {
@@ -628,8 +611,6 @@
   .network-status-banner.env-banner .btn { min-height: 30px; padding: 4px 8px; }
   .dashboard-page .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .dashboard-page .stat-card { padding: 12px; gap: 8px; min-width: 0; }
-  .dashboard-page .stat-icon { width: 34px; height: 34px; flex: none; }
-  .dashboard-page .stat-icon svg { width: 18px; height: 18px; }
   .dashboard-page .stat-info { min-width: 0; }
   .dashboard-page .stat-label { font-size: var(--text-xs); }
   .dashboard-page .stat-value { font-size: var(--text-lg); }
