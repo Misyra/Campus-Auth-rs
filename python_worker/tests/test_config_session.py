@@ -15,8 +15,13 @@ import pytest
 
 from config_session import (
     RECORDER_BINDING_NAME,
+    RECORDER_DELETE_ACTION_TYPE,
     RECORDER_DEDUP_MS,
     RECORDER_MAX_ACTIONS,
+    RECORDER_PLACEHOLDER_PASSWORD,
+    RECORDER_PLACEHOLDER_USERNAME,
+    RECORDER_TEXT_MAX_CHARS,
+    RECORDER_USERNAME_HINTS,
     SELECTOR_STRATEGY_PRIORITY,
     RecorderSink,
     build_recorder_init_script,
@@ -554,22 +559,25 @@ def test_recorder_js_embeds_python_constants():
     assert f"const DEDUP_MS = {RECORDER_DEDUP_MS};" in js
     assert RECORDER_BINDING_NAME in js
     assert json.dumps(list(SELECTOR_STRATEGY_PRIORITY)) in js
+    assert json.dumps(list(RECORDER_USERNAME_HINTS)) in js
     for token in (
-        "__BINDING_NAME__", "__MAX_ACTIONS__", "__DEDUP_MS__",
+        "__BINDING_NAME__", "__DELETE_TYPE__", "__MAX_ACTIONS__", "__DEDUP_MS__",
         "__TEXT_MAX__", "__ATTR_MAX__", "__STRUCTURE_DEPTH__", "__STRATEGIES__",
+        "__URL_MAX__", "__FILL_PASSWORD__", "__FILL_USERNAME__", "__USERNAME_HINTS__",
     ):
         assert token not in js, f"模板占位符 {token} 未被替换"
 
 
 def test_recorder_js_capture_scope():
-    """捕获范围：<select> 的 change + 按钮/提交类点击；输入类不录。"""
+    """捕获范围：<select> 的 change + 按钮/提交类点击 + 文本输入（fill）。"""
     js = build_recorder_init_script()
-    assert 'el.tagName !== "SELECT"' in js, "change 仅捕获 select（ISP 选择类）"
+    assert 'el.tagName === "SELECT"' in js, "change 仅捕获 select（ISP 选择类）"
     assert (
         't.closest("button, [type=submit], input[type=submit], [role=button]")' in js
     ), "点击仅捕获按钮/提交类"
     assert 'document.addEventListener("change", ' in js
     assert 'document.addEventListener("click", ' in js
+    assert 'document.addEventListener("input", ' in js, "文本输入录为 fill"
     # 事件用捕获相位注册（门户 JS stopPropagation 不影响录制）
     assert js.count("}, true);") >= 2
 
@@ -582,3 +590,385 @@ def test_recorder_js_debounce_and_cap_logic():
     assert '{ type: "truncated" }' in js, "JS 侧触顶回传 truncated 标记（防漏报）"
     assert "window.__campusAuthRecorderInstalled" in js, "幂等守卫防重复安装"
     assert 'text=\\"' in js, "text 策略输出 Playwright 引号精确匹配形态"
+
+
+# ── fill / navigate 捕获（完整录制升级）──
+
+
+def test_recorder_js_fill_capture_scope():
+    """fill 捕获范围：文本类输入 + textarea；密码框恒替换占位符（绝不落真实值）。"""
+    js = build_recorder_init_script()
+    assert f'const PASSWORD_VALUE = "{RECORDER_PLACEHOLDER_PASSWORD}";' in js
+    assert f'const USERNAME_VALUE = "{RECORDER_PLACEHOLDER_USERNAME}";' in js
+    # 密码分支先于字面值读取：password 框的 el.value 永远不会进入 fill 载荷
+    assert (
+        '(el.getAttribute("type") || "").toLowerCase() === "password") return PASSWORD_VALUE;'
+    ) in js
+    # 文本类 type 词表 + textarea；checkbox/radio/file/hidden 等非文本类不录
+    assert '"text", "password", "tel", "email", "number", "search", "url"' in js
+    assert 'el.tagName === "TEXTAREA"' in js
+    assert 'document.addEventListener("input", ' in js
+    assert 'document.addEventListener("blur", ' in js
+    assert 'document.addEventListener("keydown", ' in js
+
+
+def test_recorder_js_username_heuristic():
+    """用户名启发式：autocomplete="username" + 关键词正则（两端单一事实源注入）。"""
+    js = build_recorder_init_script()
+    assert '=== "username") return true;' in js, "autocomplete=username 直判用户名框"
+    assert json.dumps(list(RECORDER_USERNAME_HINTS)) in js
+    # 关键词经 join 构造大小写不敏感正则（name/id/placeholder/aria-label 命中）
+    assert 'new RegExp("(" + USERNAME_HINTS.join("|") + ")", "i")' in js
+    for hint in ("user", "email", "account", "mobile", "phone", "学号", "账号", "用户名"):
+        assert hint in RECORDER_USERNAME_HINTS
+
+
+def test_recorder_js_fill_debounce_and_navigate_shape():
+    """fill 防抖合并 + navigate 上报形状（selector 恒空串、主框架/非 about:blank）。"""
+    js = build_recorder_init_script()
+    # input 空闲防抖：DEDUP_MS 窗口内只更新最终值，不逐键外发
+    assert "setTimeout(flushFill, DEDUP_MS)" in js
+    assert "pendingFill.value = value;" in js
+    # 结算点：blur / change / Enter 提交 / 点击提交按钮
+    assert js.count("flushFill();") >= 4
+    # fill 不走窗口丢弃（值不同不可丢），连续 fill 由 Python 侧合并取最终值
+    assert 'if (type !== "fill" && type === lastType' in js
+    # navigate：主框架 + 非 about:blank 守卫；value=location.href
+    assert "window.top === window" in js
+    assert 'location.href !== "about:blank"' in js
+    assert 'type: "navigate"' in js
+    assert "location.href, URL_MAX" in js
+    # navigate 就绪重试：init 阶段 binding 可能尚未注入（实测全部丢失），
+    # 短轮询等 binding 出现后再报（40 次 ×50ms）
+    assert "const navReport = (tries)" in js
+    assert 'if (typeof BINDING === "function") {' in js
+    assert "setTimeout(() => navReport(tries - 1), 50)" in js
+    assert "navReport(40);" in js
+    # 面板挂载推迟到 DOM 就绪：init script 执行时 body/documentElement 均可能
+    # 为 null，appendChild 抛错会打断脚本（navigate 块在面板装配之后，实测
+    # 因此全部丢失）
+    assert 'document.readyState === "loading"' in js
+    assert 'document.addEventListener("DOMContentLoaded", buildPanel, { once: true });' in js
+
+
+def test_recorder_sink_accepts_fill_and_navigate():
+    """fill/navigate 过守卫并规范化：navigate selector 归一空串、value 必需。"""
+    sink = RecorderSink()
+    sink.add_json({}, json.dumps(
+        {"type": "fill", "selector": "#password", "strategy": "id",
+         "value": RECORDER_PLACEHOLDER_PASSWORD, "ts": 1}))
+    sink.add_json({}, json.dumps(
+        {"type": "navigate", "strategy": "structure",
+         "value": "http://portal.example/ok", "ts": 2}))
+    actions = sink.recorded_actions()
+    assert [a["type"] for a in actions] == ["fill", "navigate"]
+    assert actions[0]["selector"] == "#password"
+    assert actions[0]["value"] == RECORDER_PLACEHOLDER_PASSWORD
+    assert actions[1]["selector"] == "", "navigate 无目标元素，selector 恒空串"
+    assert actions[1]["value"] == "http://portal.example/ok"
+    assert actions[1]["strategy"] == "structure"
+
+
+def test_recorder_sink_fill_merge_takes_final_value():
+    """连续同目标 fill 就地合并取最终值（不受去重窗口约束）。"""
+    sink = RecorderSink()
+    sink.add_json({}, json.dumps(
+        {"type": "fill", "selector": "#user", "strategy": "id",
+         "value": RECORDER_PLACEHOLDER_USERNAME, "ts": 1000}))
+    sink.add_json({}, json.dumps(
+        {"type": "fill", "selector": "#user", "strategy": "id",
+         "value": "admin@school.edu", "ts": 60000}))
+    actions = sink.recorded_actions()
+    assert len(actions) == 1, "同目标连续 fill 合并为一条最终值"
+    assert actions[0]["value"] == "admin@school.edu", "取最终输入值"
+    assert actions[0]["ts"] == 60000
+
+
+def test_recorder_sink_fill_merge_not_across_other_actions():
+    """合并只看最近一条已记录动作：穿插其他动作后同目标 fill 各自保留。"""
+    sink = RecorderSink()
+    sink.add({"type": "fill", "selector": "#user", "strategy": "id", "value": "v1", "ts": 100})
+    sink.add({"type": "click", "selector": "#next", "strategy": "id", "ts": 150})
+    sink.add({"type": "fill", "selector": "#user", "strategy": "id", "value": "v2", "ts": 200})
+    actions = sink.recorded_actions()
+    assert [a["type"] for a in actions] == ["fill", "click", "fill"]
+    assert (actions[0]["value"], actions[2]["value"]) == ("v1", "v2")
+
+
+def test_recorder_sink_navigate_merge_keeps_last_landing():
+    """重定向链多条 navigate 合并为最终落地页（连续重复只留最后一条）。"""
+    sink = RecorderSink()
+    sink.add_json({}, json.dumps({"type": "navigate", "value": "http://p/1", "ts": 1}))
+    sink.add_json({}, json.dumps({"type": "navigate", "value": "http://p/2", "ts": 2}))
+    sink.add_json({}, json.dumps({"type": "navigate", "value": "http://p/3", "ts": 3}))
+    actions = sink.recorded_actions()
+    assert len(actions) == 1
+    assert actions[0]["value"] == "http://p/3"
+
+
+def test_recorder_sink_navigate_and_fill_malformed_dropped():
+    """navigate 缺 value / fill 缺 selector：视为畸形静默丢弃。"""
+    sink = RecorderSink()
+    for payload in (
+        json.dumps({"type": "navigate", "ts": 1}),
+        json.dumps({"type": "navigate", "value": "", "ts": 1}),
+        json.dumps({"type": "navigate", "value": 3, "ts": 1}),
+        json.dumps({"type": "navigate", "selector": "#x", "ts": 1}),
+        json.dumps({"type": "fill", "value": RECORDER_PLACEHOLDER_PASSWORD, "ts": 1}),
+    ):
+        sink.add_json({}, payload)
+    assert sink.recorded_actions() == []
+
+
+def test_recorder_sink_fill_value_defensive_clip():
+    """fill 字面值兜底截断（JS 已截断，此处防畸形/恶意载荷撑爆 IPC）。"""
+    sink = RecorderSink()
+    sink.add_json({}, json.dumps(
+        {"type": "fill", "selector": "#a", "strategy": "id", "value": "x" * 600, "ts": 1}))
+    assert len(sink.recorded_actions()[0]["value"]) == RECORDER_TEXT_MAX_CHARS
+
+
+def test_recorder_sink_fill_merge_at_cap_still_allowed():
+    """触顶后的同目标 fill 合并仍放行（替换不增计数、不置 truncated）。"""
+    sink = RecorderSink()
+    for i in range(RECORDER_MAX_ACTIONS - 1):
+        sink.add({"type": "click", "selector": f"#b{i}", "strategy": "id", "ts": i})
+    sink.add({"type": "fill", "selector": "#user", "strategy": "id", "value": "v1", "ts": 800})
+    sink.add({"type": "fill", "selector": "#user", "strategy": "id", "value": "v2", "ts": 900})
+    actions = sink.recorded_actions()
+    assert len(actions) == RECORDER_MAX_ACTIONS, "合并替换不增计数"
+    assert (actions[-1]["value"], actions[-1]["ts"]) == ("v2", 900)
+    assert sink.truncated is False
+
+
+# ── 录制悬浮面板：单步删除与权威列表回推 ──
+
+
+def test_recorder_sink_delete_removes_action_and_syncs_count():
+    """__delete__ 控制事件：按身份删除对应动作、计数联动、控制事件不进输出。"""
+    sink = RecorderSink()
+    sink.add_json({}, json.dumps(
+        {"type": "click", "selector": "#a", "strategy": "id", "ts": 100}))
+    sink.add_json({}, json.dumps(
+        {"type": "change", "selector": "[name=isp]", "strategy": "name",
+         "value": "cmcc", "ts": 200}))
+    sink.add_json({}, json.dumps(
+        {"type": "navigate", "value": "http://p/ok", "ts": 300}))
+    assert len(sink.recorded_actions()) == 3
+
+    # add_json 返回值即权威全量列表（binding 返回值回推面板的唯一回程通道）
+    listed = sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "200",
+         "action_type": "change", "selector": "[name=isp]"}))
+    assert [a["ts"] for a in listed] == [100, 300], "删除后计数联动"
+    assert [a["ts"] for a in sink.recorded_actions()] == [100, 300]
+    # 其余动作保持原序（ts 不变，输出恒按 ts 升序）
+    assert [a["type"] for a in sink.recorded_actions()] == ["click", "navigate"]
+    assert all(a["type"] != RECORDER_DELETE_ACTION_TYPE
+               for a in sink.recorded_actions()), "控制事件不进 recorded_actions"
+    # 仅 ts（无身份字段）也可删（宽容口径）
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "300"}))
+    assert [a["ts"] for a in sink.recorded_actions()] == [100]
+
+
+def test_recorder_sink_delete_identity_is_precise():
+    """删除按 (ts, action_type, selector) 身份精确匹配：同 ts 不同身份不误删。"""
+    sink = RecorderSink()
+    sink.add({"type": "click", "selector": "#a", "strategy": "id", "ts": 100})
+    sink.add({"type": "fill", "selector": "#a", "strategy": "id", "value": "v", "ts": 100})
+    # 身份不符（action_type 不对）→ 不删除
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "100",
+         "action_type": "navigate", "selector": "#a"}))
+    assert len(sink.recorded_actions()) == 2
+    # 身份不符（selector 不对）→ 不删除
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "100",
+         "action_type": "click", "selector": "#b"}))
+    assert len(sink.recorded_actions()) == 2
+    # 精确身份命中 fill 条，click 条不受影响
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "100",
+         "action_type": "fill", "selector": "#a"}))
+    actions = sink.recorded_actions()
+    assert len(actions) == 1
+    assert actions[0]["type"] == "click"
+
+
+def test_recorder_sink_delete_all_action_types():
+    """navigate / fill / change / click 四类动作均可删除。"""
+    sink = RecorderSink()
+    sink.add_json({}, json.dumps(
+        {"type": "click", "selector": "#btn", "strategy": "id", "ts": 1}))
+    sink.add_json({}, json.dumps(
+        {"type": "change", "selector": "[name=isp]", "strategy": "name",
+         "value": "cmcc", "ts": 2}))
+    sink.add_json({}, json.dumps(
+        {"type": "fill", "selector": "#pwd", "strategy": "id",
+         "value": RECORDER_PLACEHOLDER_PASSWORD, "ts": 3}))
+    sink.add_json({}, json.dumps(
+        {"type": "navigate", "value": "http://p/step", "ts": 4}))
+    for ts, atype, selector in ((1, "click", "#btn"), (2, "change", "[name=isp]"),
+                                (3, "fill", "#pwd"), (4, "navigate", "")):
+        sink.add_json({}, json.dumps(
+            {"type": RECORDER_DELETE_ACTION_TYPE, "value": str(ts),
+             "action_type": atype, "selector": selector}))
+    assert sink.recorded_actions() == []
+
+
+def test_recorder_sink_delete_malformed_ignored():
+    """畸形删除载荷（value 缺失/非数值/无匹配）静默忽略，动作不受影响。"""
+    sink = RecorderSink()
+    sink.add({"type": "click", "selector": "#a", "strategy": "id", "ts": 100})
+    for payload in (
+        json.dumps({"type": RECORDER_DELETE_ACTION_TYPE}),
+        json.dumps({"type": RECORDER_DELETE_ACTION_TYPE, "value": "abc"}),
+        json.dumps({"type": RECORDER_DELETE_ACTION_TYPE, "value": None}),
+        json.dumps({"type": RECORDER_DELETE_ACTION_TYPE, "value": "999"}),
+        json.dumps({"type": RECORDER_DELETE_ACTION_TYPE, "value": []}),
+    ):
+        assert len(sink.add_json({}, payload)) == 1, "畸形/未命中仍回当前列表"
+    assert [a["ts"] for a in sink.recorded_actions()] == [100]
+
+
+def test_recorder_sink_delete_after_truncated_keeps_guard():
+    """删除已截断会话中的动作：计数下降、容量重开接受新动作，truncated 不复位。"""
+    sink = RecorderSink()
+    # 多喂 3 条触发触顶丢弃（前 50 条全记录、后 3 条被弃）
+    for i in range(RECORDER_MAX_ACTIONS + 3):
+        sink.add({"type": "click", "selector": f"#b{i}", "strategy": "id", "ts": i})
+    assert sink.truncated is True
+    assert len(sink.recorded_actions()) == RECORDER_MAX_ACTIONS
+
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "10",
+         "action_type": "click", "selector": "#b10"}))
+    actions = sink.recorded_actions()
+    assert len(actions) == RECORDER_MAX_ACTIONS - 1
+    assert all(a["ts"] != 10 for a in actions)
+    assert sink.truncated is True, "truncated 记录『发生过触顶丢弃』，删除不复位"
+    # 删除后容量自然重开：新动作重新被接受，truncated 语义仍然保持
+    assert sink.add({"type": "click", "selector": "#new", "strategy": "id", "ts": 999}) is True
+    assert len(sink.recorded_actions()) == RECORDER_MAX_ACTIONS
+    assert sink.truncated is True
+
+
+def test_recorder_sink_delete_recompute_dedup_anchor():
+    """删除末条后去重/合并锚点重算为当前最近一条已记录动作（既有口径不变）。"""
+    sink = RecorderSink()
+    sink.add({"type": "click", "selector": "#a", "strategy": "id", "ts": 100})
+    sink.add({"type": "click", "selector": "#b", "strategy": "id", "ts": 200})
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "200",
+         "action_type": "click", "selector": "#b"}))
+    # 锚点若仍指 #b，窗口内新 #b 点击会被误丢；重算为 #a 后 #b 正常记录
+    assert sink.add({"type": "click", "selector": "#b", "strategy": "id", "ts": 300}) is True
+    # 清空后锚点复位：全新动作不受历史窗口压制
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "300",
+         "action_type": "click", "selector": "#b"}))
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "100",
+         "action_type": "click", "selector": "#a"}))
+    assert sink.recorded_actions() == []
+    assert sink.add({"type": "click", "selector": "#a", "strategy": "id", "ts": 400}) is True
+
+
+def test_recorder_sink_delete_then_fill_merge_uses_new_tail():
+    """删除末条后 fill/navigate 合并目标跟随新末条（合并逻辑不受删除破坏）。"""
+    sink = RecorderSink()
+    sink.add({"type": "fill", "selector": "#user", "strategy": "id", "value": "v1", "ts": 100})
+    sink.add({"type": "click", "selector": "#go", "strategy": "id", "ts": 150})
+    sink.add_json({}, json.dumps(
+        {"type": RECORDER_DELETE_ACTION_TYPE, "value": "150",
+         "action_type": "click", "selector": "#go"}))
+    # 末条变回 #user fill：同目标 fill 就地合并取最终值，而非新增一条
+    sink.add({"type": "fill", "selector": "#user", "strategy": "id", "value": "v2", "ts": 500})
+    actions = sink.recorded_actions()
+    assert len(actions) == 1
+    assert actions[0]["value"] == "v2"
+    assert actions[0]["ts"] == 500
+
+
+def test_recorder_sink_add_json_returns_list_on_every_payload():
+    """返回值契约：任何载荷（含畸形/触顶标记/未命中删除）都返回权威全量列表。"""
+    sink = RecorderSink()
+    sink.add({"type": "click", "selector": "#a", "strategy": "id", "ts": 1})
+    for payload in (
+        "not json",
+        "[1, 2]",
+        json.dumps({"type": "hover", "selector": "#x"}),
+        json.dumps({"type": "truncated"}),
+        json.dumps({"type": RECORDER_DELETE_ACTION_TYPE, "value": "999"}),
+    ):
+        listed = sink.add_json({}, payload)
+        assert isinstance(listed, list)
+        assert [a["ts"] for a in listed] == [1], "返回值恒为当前权威全量列表"
+    sink.add_json({}, json.dumps(
+        {"type": "click", "selector": "#a", "strategy": "id", "ts": 2000}))
+    assert [a["ts"] for a in sink.recorded_actions()] == [1, 2000]
+
+
+# ── 录制悬浮面板：JS 构造契约（字符串断言）──
+
+
+def test_recorder_js_panel_dom_and_labels():
+    """面板 DOM 契约：右下角/最高层级/深色半透明/默认展开/中文徽标/aria-label/计数。"""
+    js = build_recorder_init_script()
+    assert 'const PANEL_ID = "__campusRecordPanel";' in js
+    assert "position:fixed;right:12px;bottom:12px" in js, "固定右下角"
+    assert "z-index:2147483647" in js, "层级极高"
+    assert "background:rgba(17,20,26,0.88)" in js, "半透明深色底"
+    assert "max-width:280px" in js, "宽 ≤280px"
+    assert "max-height:200px;overflow-y:auto" in js, "列表高上限滚动"
+    assert "let collapsed = false;" in js, "默认展开"
+    assert 'textContent = "录制面板"' in js
+    assert '"共 " + items.length + " 步"' in js, "头部「共 N 步」计数"
+    assert 'textContent = "暂无动作"' in js
+    for label in ("点击", "选择", "输入", "跳转", "输入中"):
+        assert label in js, "类型徽标中文（含防抖待结算态）"
+    assert 'setAttribute("aria-label", "删除第" + (i + 1) + "步");' in js
+    assert '"收起录制面板"' in js and '"展开录制面板"' in js, "折叠按钮 aria-label"
+    # fill 摘要直接取 value：占位符原样显示（不做任何替换）
+    assert "String(s.value || \"\") + \" @ \" + String(s.selector || \"\")" in js
+    assert "s.type === \"navigate\") return String(s.value || \"\")" in js, "navigate 显示 URL"
+
+
+def test_recorder_js_panel_self_defense():
+    """面板自防：根节点事件 stopPropagation + 录制器各捕获监听面板内判断。"""
+    js = build_recorder_init_script()
+    assert 'root.addEventListener(mutedEvents[i], (ev) => ev.stopPropagation());' in js, \
+        "面板根所有事件 stopPropagation（拦门户冒泡监听）"
+    # document 捕获先于面板根触发，录制器必须各自判断事件源是否在面板内
+    assert "const inPanel = (t) => !!(panelRoot && t && panelRoot.contains(t));" in js
+    assert js.count("if (inPanel(ev.target)) return;") == 3, "click/blur/keydown 自防"
+    assert js.count("if (inPanel(el)) return;") == 2, "change/input（fill 管道）自防"
+    # click 自防先于 closest 匹配：面板 × 按钮自身就是 button，命中即被录成点击
+    click_seg = js.split('document.addEventListener("click"')[1].split("}, true);")[0]
+    assert "if (inPanel(ev.target)) return;" in click_seg
+    assert click_seg.index("if (inPanel(ev.target)) return;") < click_seg.index('t.closest("button')
+
+
+def test_recorder_js_delete_wiring_and_server_sync():
+    """删除链路与权威列表回推契约：__delete__ 两端同源、身份字段、未上报清缓冲。"""
+    js = build_recorder_init_script()
+    assert f'const DELETE_TYPE = "{RECORDER_DELETE_ACTION_TYPE}";' in js, \
+        "控制事件类型两端同源（Python 常量注入）"
+    assert "type: DELETE_TYPE," in js
+    assert "value: String(entry.ts)," in js
+    assert "action_type: entry.type," in js
+    assert "selector: entry.selector," in js
+    # 未上报（防抖待结算）直接清页面缓冲，无控制事件
+    assert "clearTimeout(pendingFill.timer); pendingFill = null;" in js
+    assert "pageSteps = pageSteps.filter((s) => s !== entry);" in js
+    # 权威全量列表经 binding 返回值回推，整体收敛面板显示
+    assert "if (Array.isArray(v)) renderFromServer(v);" in js
+    assert "serverSteps = Array.isArray(list) ? list : null;" in js
+    # 捕获入列即镜像：乐观渲染先行，回包后收敛
+    assert "pageSteps.push(mirror);" in js
+    assert "renderPanel();" in js
+    # 面板仅主框架渲染（iframe 不重复出现）
+    assert "if (window.top !== window) return;" in js
+    # pending fill 条目随输入实时更新最终值
+    assert "if (pendingFill.panelEntry) pendingFill.panelEntry.value = value;" in js

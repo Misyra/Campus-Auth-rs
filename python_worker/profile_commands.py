@@ -26,6 +26,7 @@ import step_handlers
 from auto_login import (
     auto_login_success_message,
     build_replay_steps,
+    build_replay_variables,
     validate_auto_login_actions,
 )
 from browser_launch import _nav_timeout, _to_ms
@@ -346,7 +347,15 @@ class ProfileCommandsMixin:
             actions = validate_auto_login_actions(raw_actions)
         except ValueError as exc:
             raise WorkerError(Outcome.UNKNOWN_ERROR, f"recorded_actions 非法: {exc}") from exc
-        replay_steps = build_replay_steps(actions)
+        # 占位符解析 + 首条 navigate 跳过都依赖 portal_url 与凭据映射：
+        # 凭据键与浏览器任务执行同名（username/password/isp/auth_url，Rust 侧
+        # build_persistent_login_params 下发），缺失时映射不注入、回放退化为
+        # 旧行为（只回放 click/change）
+        replay_steps = build_replay_steps(
+            actions,
+            portal_url=portal_url,
+            variables=build_replay_variables(params),
+        )
         bs = params.get("browser_settings", {}) or {}
         cancel_id = str(params.get("cancel_id") or "")
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None

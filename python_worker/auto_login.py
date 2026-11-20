@@ -6,8 +6,13 @@
 
 - ``validate_auto_login_actions``：录制动作数组校验（畸形/不认识的 type 在
   启动浏览器**之前**拦截，失败即结构化错误，不留半开资源）；
+- ``build_replay_variables``：从命令参数键（与浏览器任务执行完全同名：
+  ``username`` / ``password`` / ``isp`` / ``auth_url``）构建系统变量映射，
+  供 fill/navigate 的 ``{{USERNAME}}`` 等占位符解析；
 - ``build_replay_steps``：录制动作 → 既有步骤处理器的回放映射
-  （click → click 处理器、change → select 处理器），不另写一套执行器；
+  （click → click 处理器、change → select 处理器、fill → input 处理器
+  （``locator.fill`` 整值填充）、navigate → navigate 处理器），不另写一套
+  执行器；fill/navigate 的 value 先经变量映射解析占位符；
 - 沉降窗口常量：门户回填等待（load 态 + 固定沉降），窗口可测（测试按常量
   monkeypatch）。
 
@@ -17,10 +22,13 @@
 from __future__ import annotations
 
 from models import StepConfig
+from variable_resolver import resolve
 
 #: 回放可接受的录制动作类型（与录制契约一致）：click（按钮/提交类点击）、
-#: change（仅 <select> 的选择）。不认识的 type 在校验阶段结构化报错。
-AUTO_LOGIN_ACTION_TYPES: tuple[str, ...] = ("click", "change")
+#: change（仅 <select> 的选择）、fill（文本输入，值可为 {{USERNAME}}/
+#: {{PASSWORD}} 占位符）、navigate（页面导航，value=落地地址，selector 恒为
+#: 空串）。不认识的 type 在校验阶段结构化报错。
+AUTO_LOGIN_ACTION_TYPES: tuple[str, ...] = ("click", "change", "fill", "navigate")
 
 #: 回放动作数防御上限：录制器侧上限为 50（``RECORDER_MAX_ACTIONS``），此处放宽
 #: 到 4 倍兜底畸形/未来放宽的载荷；超限在校验阶段报错而非让回放吃满命令级超时。
@@ -46,8 +54,11 @@ def validate_auto_login_actions(raw_actions: list) -> list[dict]:
     - ``type`` 必须在 :data:`AUTO_LOGIN_ACTION_TYPES` 内（不认识的 type 结构化
       报错，绝不静默跳过——静默跳过会让"少点了一次登录"伪装成成功）；
     - ``selector`` 必须为非空字符串（回放直接用录制串，Playwright 兼容形态）；
-    - ``change`` 必须携带非空字符串 ``value``（``select_option`` 的匹配目标；
-      录制器对 change 恒写 value，缺失视为数据损坏，启动前拦截）；
+      ``navigate`` 例外：无目标元素，录制器恒发空串，缺失/空白归一为空串；
+    - ``change`` / ``fill`` 必须携带非空字符串 ``value``（``select_option`` 的
+      匹配目标 / 填入值；fill 的值可为 {{USERNAME}}/{{PASSWORD}} 占位符或
+      字面量，录制器对两者恒写 value，缺失视为数据损坏，启动前拦截）；
+      ``navigate`` 的 ``value``（落地地址）同理必填——无地址的导航无回放意义；
     - ``ts`` / ``strategy`` 不参与回放（序列本身即 ts 升序），不做强校验。
     """
     if len(raw_actions) > AUTO_LOGIN_MAX_ACTIONS:
@@ -65,6 +76,18 @@ def validate_auto_login_actions(raw_actions: list) -> list[dict]:
                 f"{where} 的 type 不受支持: {action_type!r}（仅支持 "
                 f"{'/'.join(AUTO_LOGIN_ACTION_TYPES)}）"
             )
+        if action_type == "navigate":
+            value = raw.get("value")
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{where}（navigate）缺少非空 value")
+            normalized.append({
+                "type": "navigate",
+                "selector": "",
+                "strategy": str(raw.get("strategy") or "unknown"),
+                "ts": raw.get("ts") if isinstance(raw.get("ts"), int) else 0,
+                "value": value,
+            })
+            continue
         selector = raw.get("selector")
         if not isinstance(selector, str) or not selector.strip():
             raise ValueError(f"{where} 缺少 selector")
@@ -74,33 +97,76 @@ def validate_auto_login_actions(raw_actions: list) -> list[dict]:
             "strategy": str(raw.get("strategy") or "unknown"),
             "ts": raw.get("ts") if isinstance(raw.get("ts"), int) else 0,
         }
-        if action_type == "change":
+        if action_type in ("change", "fill"):
             value = raw.get("value")
             if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"{where}（change）缺少非空 value")
+                raise ValueError(f"{where}（{action_type}）缺少非空 value")
             action["value"] = value
         normalized.append(action)
     return normalized
 
 
-def build_replay_steps(actions: list[dict]) -> list[StepConfig]:
+def build_replay_variables(params: dict) -> dict[str, str]:
+    """从命令参数构建系统变量映射（键名与浏览器任务执行完全同名）。
+
+    ``username`` / ``password`` / ``isp`` / ``auth_url`` → ``{{USERNAME}}`` /
+    ``{{PASSWORD}}`` / ``{{ISP}}`` / ``{{LOGIN_URL}}``，供 fill/navigate 的
+    value 占位符解析（经 :func:`variable_resolver.resolve`，系统保留变量值
+    不再链式展开——凭据本身含 ``{{X}}`` 字面序列时保持原样，P2-7）。
+    键缺失或为 None 时不注入（对齐 task_runner 的 ``_system_variables``：
+    ``str(None)`` 会把字面 "None" 当凭据注入模板）。
+    """
+    mapping = {
+        "USERNAME": "username",
+        "PASSWORD": "password",
+        "ISP": "isp",
+        "LOGIN_URL": "auth_url",
+    }
+    return {
+        key: str(params[src])
+        for key, src in mapping.items()
+        if params.get(src) is not None
+    }
+
+
+def build_replay_steps(
+    actions: list[dict],
+    *,
+    portal_url: str = "",
+    variables: dict[str, str] | None = None,
+) -> list[StepConfig]:
     """录制动作 → 既有步骤处理器的回放映射（保持数组顺序，即 ts 升序）。
 
     - ``click`` → ``click`` 处理器（候选拆分 / 隐藏降级 / 文本兜底全部复用，
       selector 直接用录制串）；
     - ``change`` → ``select`` 处理器（value 精确匹配 → 文本匹配链复用，
-      最终落到 ``select_option``）。
+      最终落到 ``select_option``）；
+    - ``fill`` → ``input`` 处理器（``clear`` 默认 True → 走 ``locator.fill``
+      整值填充，与录制语义一致），value 先经 ``variables`` 解析占位符；
+    - ``navigate`` → ``navigate`` 处理器（``goto`` 的 domcontentloaded 等待
+      与门户首导航同口径），value 同样解析占位符。
+
+    **序列首条 navigate 与 ``portal_url`` 相同则跳过**：录制器对每个新文档
+    （含门户首页）都上报 navigate，回放主流程已先打开门户页并完成回填沉降，
+    重复 goto 会重载门户页冲掉沉降成果。跳过语义以 ``wait(0)`` 占位表达而
+    非删步——保持动作 ↔ 步骤 1:1 对齐（回放循环以同下标动作定位错误消息）。
+
+    ``portal_url`` / ``variables`` 缺省时行为与旧版完全一致（不跳过、不解析），
+    既有 click/change 调用方无需感知新参数。
 
     步骤 ``id`` 仅为进度/错误消息标识（``auto-login-<序号>``），不设显式
     ``timeout``——单步预算沿用上下文默认超时（``browser_settings.timeout``，
     既有超时契约）。
     """
     steps: list[StepConfig] = []
+    first_navigate_checked = False
     for index, action in enumerate(actions):
         step_id = f"auto-login-{index + 1}"
-        if action["type"] == "click":
+        action_type = action["type"]
+        if action_type == "click":
             steps.append(StepConfig(id=step_id, step_type="click", selector=action["selector"]))
-        else:
+            continue
+        if action_type == "change":
             steps.append(
                 StepConfig(
                     id=step_id,
@@ -109,6 +175,33 @@ def build_replay_steps(actions: list[dict]) -> list[StepConfig]:
                     value=action["value"],
                 )
             )
+            continue
+        # fill/navigate 的 value 先解析占位符（{{USERNAME}}/{{PASSWORD}}/{{ISP}}/
+        # {{LOGIN_URL}}，映射由 build_replay_variables 构建；未命中保留原样）。
+        # change 不解析——录制值是 select 选中值字面量，保持既有契约字节面
+        value = action["value"]
+        if variables:
+            value = resolve(value, variables)
+        if action_type == "fill":
+            steps.append(
+                StepConfig(
+                    id=step_id,
+                    step_type="input",
+                    selector=action["selector"],
+                    value=value,
+                )
+            )
+            continue
+        # navigate：首条与门户地址相同则跳过（wait(0) 占位，见 docstring）；
+        # load 级沉降不落在单步上——慢资源门户到不了 load，wait_until="load"
+        # 会把「登录其实已成功」的回放打成导航失败，违背「沉降不作为成败
+        # 判定」的既有纪律，load 级等待由回放后既有的沉降窗口承担
+        if not first_navigate_checked:
+            first_navigate_checked = True
+            if portal_url and value.strip() == portal_url.strip():
+                steps.append(StepConfig(id=step_id, step_type="wait", duration=0))
+                continue
+        steps.append(StepConfig(id=step_id, step_type="navigate", value=value))
     return steps
 
 
@@ -126,5 +219,6 @@ __all__ = [
     "AUTO_LOGIN_MAX_ACTIONS",
     "auto_login_success_message",
     "build_replay_steps",
+    "build_replay_variables",
     "validate_auto_login_actions",
 ]

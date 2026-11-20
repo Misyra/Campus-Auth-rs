@@ -155,14 +155,16 @@ FIFO 排队时间不再吃掉执行预算，与 BRG-1 的 `0.9 × 预算` Python
 「记住密码」模式的工作方式：门户登录页自带「记住密码」，凭据存
 cookies/localStorage；把 `user_data_dir` 持久化后这些登录态跨进程保留，下次
 打开门户页时**门户自己的 JS 会把账号密码默认填入**（纯页面行为，无头可用）。
-因此自动化只需**录制登录点击**：
+因此自动化**录制完整操作序列**（点击/选择 + 文本输入 + 页面导航；凭据类
+输入以 `{{USERNAME}}`/`{{PASSWORD}}` 占位符录制，密码永不落明文）：
 
 1. `profile_session_start`：开一次 headed 持久会话，用户手动登录（勾选门户
-   记住密码），Worker 录下点击/选择序列；
+   记住密码），Worker 录下点击/选择/输入/导航序列；
 2. `profile_session_stop`：关闭浏览器（登录态保留在 `user_data_dir`），取回
    录制结果；
 3. 之后的自动登录（`profile_auto_login`）：无头持久上下文打开门户页（门户 JS
-   自动回填）+ 回放录到的点击 + 网络验证兜底（Rust 侧编排）。
+   自动回填）+ 回放录制序列（凭据占位符由下发的凭据参数解析）+ 网络验证兜底
+   （Rust 侧编排）。
 
 ### 请求 / 响应契约
 
@@ -190,17 +192,35 @@ cookies/localStorage；把 `user_data_dir` 持久化后这些登录态跨进程�
 ### 录制契约（recorded_actions 元素）
 
 - `type`：`click`（按钮/提交类点击，捕获范围 `button`、`[type=submit]`、
-  `input[type=submit]`、`[role=button]`，`closest` 兼容按钮内嵌子元素）或
-  `change`（仅 `<select>`，ISP 选择类，附 `value` 为选中值）；**输入类交互
-  不录**——账号密码回填由门户自己的 JS 负责；
+  `input[type=submit]`、`[role=button]`，`closest` 兼容按钮内嵌子元素）、
+  `change`（仅 `<select>`，ISP 选择类，附 `value` 为选中值）、`fill`
+  （文本输入：`input[type=text|password|tel|email|number|search|url]` 与
+  `textarea`，contenteditable 不录，附 `value`）或 `navigate`（页面导航标记：
+  每个新文档上报一条，`value` 为落地地址 `location.href`，`selector` 恒为
+  空串、`strategy` 恒为 `structure`；仅主框架且非 about:blank 才上报）；
+- `fill` 的 `value` 占位符语义（密码永不落明文）：`input[type=password]`
+  恒为 `{{PASSWORD}}`（**绝不捕获真实输入值**）；`autocomplete="username"`
+  或 name/id/placeholder/aria-label 命中账号类关键词（user/email/account/
+  mobile/phone/学号/账号/用户名，大小写不敏感，`RECORDER_USERNAME_HINTS`
+  单一事实源）的文本框恒为 `{{USERNAME}}`；其余文本框录实际值字面量（空值
+  不上报）。回放侧从命令参数的 `username` / `password` / `isp` / `auth_url`
+  （与浏览器任务执行完全同名）构建系统变量映射，经 `variable_resolver`
+  解析 fill/navigate 的占位符（`build_replay_variables`，未命中保留原样）；
+- 输入捕获与结算：`input` 事件空闲防抖合并——同一输入框在 `DEDUP_MS`
+  （500ms）空闲窗口内连续输入只产生一条待结算值（取最终值，不逐键外发）；
+  blur / change / 回车提交 / 点击提交按钮时结算（回车提交不触发 blur，
+  文档随导航销毁前由 Enter/click 兜底结算，保证「输入 → 提交」时序）；
 - `selector` / `strategy`：启发式按 `#id → [name=] → [data-testid] → 首个
   其他 data-* → 可见文本（button 文案，截断转义，Playwright 引号精确匹配
   形态 `text="..."`）→ 结构路径（nth-child 链，兜底必命中）`取首个命中，
   `strategy` 标明采用的级别；优先级顺序由 Python 侧
   `config_session.SELECTOR_STRATEGY_PRIORITY` 常量单一事实源驱动（同时注入
   录制器 JS 模板）；
-- `ts`：事件时间戳（毫秒）；同一元素（同 type + 同 selector）500ms 内重复
-  事件只记一次（窗口锚点为最近一条已记录动作，跨导航仍有效）；
+- 去重口径：`click` / `change` 同元素（同 type + 同 selector）500ms 内重复
+  事件只记一次（窗口锚点为最近一条已记录动作，跨导航仍有效）；`fill` /
+  `navigate` 与最近一条已记录动作同 (type, selector) 时**就地合并取最终值**
+  （fill 取输入会话最终值——值不同不可按窗口丢弃；navigate 取重定向链最终
+  落地页），不受窗口约束；
 - 动作序列按 `ts` 升序返回，上限 50 条（`RECORDER_MAX_ACTIONS`），触顶丢弃
   后续并在响应 `truncated: true` 标记。
 
@@ -210,6 +230,40 @@ cookies/localStorage；把 `user_data_dir` 持久化后这些登录态跨进程�
 （捕获相位注册，门户 JS `stopPropagation` 不影响录制）。JS 侧文档内触顶会向
 Python 回传 `{"type": "truncated"}` 标记（文档计数随导航归零，需标记补齐才能
 正确覆盖跨文档累计的丢弃），全局上限与 `truncated` 语义由 Python 侧权威收口。
+
+### 录制悬浮面板（实时步骤列表 + 单步删除）
+
+录制脚本同批注入一个悬浮面板（方案页配置录制 / 任务页录制新任务两条录制
+用途共用，回放侧无需感知）：
+
+- **形态**：固定右下角、可折叠（默认展开；折叠态仅存页面内存、不跨页传递
+  ——门户登录必然跳页，每页默认展开让用户始终看得见实时列表），内联样式
+  全套（与页面 CSS 隔离），z-index 2147483647，半透明深色底，宽 ≤280px，
+  列表高上限滚动；仅主框架渲染（iframe 不重复出现，iframe 里的动作仍照常
+  录制并出现在主框架面板中，删除按动作身份寻址、与来源 frame 无关）；
+- **实时列表**：捕获管线入列即同步镜像——列表项 = 序号 + 类型徽标（点击/
+  选择/输入/跳转）+ 摘要（click 显示 selector；change 显示 selector = 选中值；
+  fill 显示 value @ selector，`{{PASSWORD}}`/`{{USERNAME}}` 占位符原样显示；
+  navigate 显示落地 URL），防抖待结算中的输入以「输入中」条目先行显示，
+  结算后转为正式条目；头部「共 N 步」为权威总计数。跨页口径：页面 JS 无法
+  主动拉取汇聚器状态，`expose_binding` 的**返回值**是唯一回程通道（回调即
+  `RecorderSink.add_json` 本体）——汇聚器处理每条上报/删除后把权威**全量
+  列表**（含跨页累计，≤50 条，人力节奏下体积可忽略）经返回值回推，面板
+  显示全量列表 + 权威计数；binding 失联时退回本页乐观镜像（此时上报本身
+  也失联，仅可见性降级）；
+- **单步删除语义**：每项右侧 × 按钮（aria-label「删除第 N 步」）——未上报
+  （防抖待结算）的输入直接清页面缓冲（无控制事件）；已上报的经 binding
+  上报 `{type:"__delete__", value:"<ts>", action_type, selector}` 控制事件，
+  汇聚器按 (ts, action_type, selector) 身份删除对应动作并经返回值回推最新
+  全量列表（面板头部计数与列表即时刷新）。`__delete__` 本身不进
+  `recorded_actions` 输出；删除后其余动作保持原序（不重排，回放按 ts 升序）；
+  `truncated` 不因删除复位（发生过触顶丢弃的事实不可逆），删除后计数下降、
+  上限容量自然重开；去重/合并锚点重算为当前最近一条已记录动作（既有去重/
+  合并口径不受影响）；
+- **面板自防**：面板根节点所有事件 `stopPropagation`（拦门户 JS 的冒泡监听），
+  且录制器 click/fill/change/keydown/blur 捕获监听显式忽略事件源在面板内的
+  目标——document 捕获相位先于面板根触发，仅 stopPropagation 拦不住录制器
+  自身，两层防线确保面板按钮绝不被录成动作。
 
 ### 生命周期与收尾
 
@@ -234,9 +288,9 @@ Python 回传 `{"type": "truncated"}` 标记（文档计数随导航归零，需
 
 「记住密码」自动登录的 Worker 侧执行器（编排由 Rust 侧负责）：无头持久上下文
 打开门户页 → 门户自己的 JS 自动回填账号密码（纯页面行为）→ 逐条回放
-`recorded_actions` → 返回结构化结果。**本命令的成功 = 回放全部动作无错误且
-页面完成导航/加载沉降；登录是否真的成功以 Rust 侧登录后网络验证兜底**
-（非本命令职责）。
+`recorded_actions`（fill/navigate 的占位符 value 由下发的凭据参数解析）→
+返回结构化结果。**本命令的成功 = 回放全部动作无错误且页面完成导航/加载沉降；
+登录是否真的成功以 Rust 侧登录后网络验证兜底**（非本命令职责）。
 
 ### 请求 / 响应契约
 
@@ -244,7 +298,10 @@ Python 回传 `{"type": "truncated"}` 标记（文档计数随导航归零，需
   （**必需**，仅 http/https）、`recorded_actions`（数组，元素
   `{type, selector, strategy, ts, value?}` 即 `profile_session_stop` 的
   `recorded_actions` 原样回传；**空数组 = 只打开门户页等回填不点击**——门户
-  可能记忆了会话直接放行成功页）、`browser_settings`（可选，直连/资源路由/
+  可能记忆了会话直接放行成功页）、`username` / `password` / `isp` /
+  `auth_url`（可选，凭据参数键与浏览器任务执行完全同名——fill/navigate 的
+  `{{USERNAME}}`/`{{PASSWORD}}`/`{{ISP}}`/`{{LOGIN_URL}}` 占位符解析源，
+  缺失时占位符保留原样）、`browser_settings`（可选，直连/资源路由/
   stealth 口径对齐 `_start_browser`，作用于本命令自己的持久 context）、
   `cancel_id`（可选，覆盖本命令全程）；
 - 行为：**headless** `launch_persistent_context(user_data_dir)`（与配置会话的
@@ -270,6 +327,15 @@ Python 回传 `{"type": "truncated"}` 标记（文档计数随导航归零，需
   含 `text="..."` / 结构路径），候选拆分、隐藏降级、文本兜底全部复用；
 - `change` → `select` 处理器：按录制 value 做 option 精确值匹配 → 文本匹配
   兜底，最终 `select_option`；
+- `fill` → `input` 处理器（`clear` 默认 True → `locator.fill` 整值填充）：
+  value 先经凭据变量映射解析占位符（`build_replay_variables` →
+  `variable_resolver.resolve`）；
+- `navigate` → `navigate` 处理器（`goto`，domcontentloaded 等待与门户首导航
+  同口径；load 级沉降不落在单步上——慢资源门户到不了 load 会把「登录其实已
+  成功」的回放打成失败，load 级等待由回放后既有沉降窗口承担）：value 同样
+  解析占位符；**序列首条 navigate 与 `portal_url` 相同则跳过**（回放主流程
+  已先打开门户页并完成回填沉降，重复 goto 会重载门户页冲掉沉降成果；跳过
+  以 `wait(0)` 占位表达，保持动作 ↔ 步骤 1:1 对齐供错误消息定位）；
 - 每步预算沿用上下文默认超时（`browser_settings.timeout`，秒）与取消契约，
   失败即中止回放（后续动作依赖前序语义）。
 

@@ -21,6 +21,7 @@ from auto_login import (
     AUTO_LOGIN_MAX_ACTIONS,
     auto_login_success_message,
     build_replay_steps,
+    build_replay_variables,
     validate_auto_login_actions,
 )
 from models import Outcome, StepConfig
@@ -31,8 +32,8 @@ from step_handlers import StepCancelled, WorkerError
 
 
 def test_action_types_vocabulary():
-    """可回放动作词表与录制契约一致（click / change）。"""
-    assert AUTO_LOGIN_ACTION_TYPES == ("click", "change")
+    """可回放动作词表与录制契约一致（click / change / fill / navigate）。"""
+    assert AUTO_LOGIN_ACTION_TYPES == ("click", "change", "fill", "navigate")
 
 
 def test_validate_actions_accepts_recorder_shape():
@@ -108,6 +109,140 @@ def test_success_message_phases():
     """成功人话短语区分回放与否。"""
     assert "回填" in auto_login_success_message(0)
     assert "1" in auto_login_success_message(1)
+
+
+# ── 纯逻辑：fill / navigate 回放（完整录制升级）──
+
+
+def test_validate_actions_accepts_fill_and_navigate():
+    """fill（占位符/字面值）与 navigate（selector 缺失/空串归一）校验通过并规范化。"""
+    actions = validate_auto_login_actions([
+        {"type": "navigate", "strategy": "structure", "ts": 1,
+         "value": "http://portal.example/step2"},
+        {"type": "navigate", "selector": "", "ts": 2, "value": "http://portal.example/ok"},
+        {"type": "fill", "selector": "#username", "strategy": "id", "ts": 3,
+         "value": "{{USERNAME}}"},
+        {"type": "fill", "selector": "#pwd", "strategy": "id", "ts": 4,
+         "value": "{{PASSWORD}}"},
+    ])
+    assert actions[0]["selector"] == "", "navigate 无目标元素，selector 归一空串"
+    assert actions[0]["value"] == "http://portal.example/step2"
+    assert actions[1]["selector"] == ""
+    assert (actions[2]["value"], actions[3]["value"]) == ("{{USERNAME}}", "{{PASSWORD}}")
+
+
+def test_validate_actions_rejects_fill_navigate_without_value():
+    """fill/navigate 缺非空 value：逐条结构化报错（数据损坏启动前拦截）。"""
+    bad_cases = [
+        [{"type": "fill", "selector": "#u"}],
+        [{"type": "fill", "selector": "#u", "value": ""}],
+        [{"type": "fill", "selector": "#u", "value": "  "}],
+        [{"type": "navigate"}],
+        [{"type": "navigate", "value": ""}],
+        [{"type": "navigate", "selector": "", "value": 3}],
+    ]
+    for payload in bad_cases:
+        with pytest.raises(ValueError) as ei:
+            validate_auto_login_actions(payload)
+        assert "录制动作" in str(ei.value)
+
+
+def test_build_replay_variables_from_params():
+    """凭据映射从命令参数键构建（与浏览器任务执行完全同名），None/缺失不注入。"""
+    variables = build_replay_variables({
+        "username": "202312345", "password": "p@ss", "isp": "cmcc",
+        "auth_url": "http://portal.example/login", "other": "ignored",
+    })
+    assert variables == {
+        "USERNAME": "202312345", "PASSWORD": "p@ss", "ISP": "cmcc",
+        "LOGIN_URL": "http://portal.example/login",
+    }
+    assert build_replay_variables({}) == {}
+    # None（Rust serde null）不注入：str(None) 会把字面 "None" 当凭据（P2-7）
+    assert build_replay_variables({"username": None, "password": "x"}) == {"PASSWORD": "x"}
+
+
+def test_build_replay_steps_resolves_placeholders():
+    """fill/navigate 的占位符经变量映射解析；未传 variables 保持字面值。"""
+    actions = validate_auto_login_actions([
+        {"type": "fill", "selector": "#username", "strategy": "id", "ts": 1,
+         "value": "{{USERNAME}}"},
+        {"type": "fill", "selector": "#password", "strategy": "id", "ts": 2,
+         "value": "{{PASSWORD}}"},
+        {"type": "navigate", "ts": 3, "value": "{{LOGIN_URL}}?next=1"},
+    ])
+    variables = build_replay_variables({
+        "username": "u1", "password": "p1", "auth_url": "http://p.example/login",
+    })
+    steps = build_replay_steps(actions, variables=variables)
+    assert [s.step_type for s in steps] == ["input", "input", "navigate"]
+    assert (steps[0].value, steps[1].value) == ("u1", "p1")
+    assert steps[2].value == "http://p.example/login?next=1"
+    # 不传 variables：占位符保留原样（既有调用方零感知）
+    raw = build_replay_steps(actions)
+    assert raw[0].value == "{{USERNAME}}"
+    assert raw[2].value == "{{LOGIN_URL}}?next=1"
+
+
+def test_build_replay_steps_fill_maps_to_input_handler():
+    """fill → input 处理器（clear 默认 True → locator.fill 整值填充）。"""
+    actions = validate_auto_login_actions([
+        {"type": "fill", "selector": "#username", "strategy": "id", "ts": 1,
+         "value": " literal "},
+    ])
+    (step,) = build_replay_steps(actions)
+    assert isinstance(step, StepConfig)
+    assert (step.step_type, step.selector, step.value, step.clear) == (
+        "input", "#username", " literal ", True,
+    )
+
+
+def test_build_replay_steps_skips_first_navigate_matching_portal():
+    """首条 navigate 与 portal_url 相同 → wait(0) 占位跳过（保持动作↔步骤 1:1）。"""
+    actions = validate_auto_login_actions([
+        {"type": "navigate", "ts": 1, "value": "http://portal.example/login"},
+        {"type": "fill", "selector": "#u", "strategy": "id", "ts": 2, "value": "a"},
+        {"type": "click", "selector": "#login", "strategy": "id", "ts": 3},
+    ])
+    steps = build_replay_steps(actions, portal_url="http://portal.example/login")
+    assert [s.step_type for s in steps] == ["wait", "input", "click"], "首条 navigate 跳过"
+    assert steps[0].duration == 0, "占位 wait 不产生任何页面操作"
+    assert [s.id for s in steps] == ["auto-login-1", "auto-login-2", "auto-login-3"]
+    assert len(steps) == len(actions), "步骤数与动作数保持 1:1（错误消息按下标取动作）"
+
+
+def test_build_replay_steps_first_navigate_mismatch_then_same_kept():
+    """首条 navigate 与 portal_url 不同 → 不跳过；且只检查首条（后续同值保留）。"""
+    actions = validate_auto_login_actions([
+        {"type": "navigate", "ts": 1, "value": "http://portal.example/other"},
+        {"type": "navigate", "ts": 2, "value": "http://portal.example/login"},
+    ])
+    steps = build_replay_steps(actions, portal_url="http://portal.example/login")
+    assert [s.step_type for s in steps] == ["navigate", "navigate"]
+
+
+def test_build_replay_steps_navigate_resolution_before_portal_compare():
+    """首条跳过的比较在占位符解析之后进行（{{LOGIN_URL}} 与门户同值即跳过）。"""
+    actions = validate_auto_login_actions([
+        {"type": "navigate", "ts": 1, "value": "{{LOGIN_URL}}"},
+        {"type": "click", "selector": "#login", "strategy": "id", "ts": 2},
+    ])
+    variables = build_replay_variables({"auth_url": "http://portal.example/login"})
+    steps = build_replay_steps(
+        actions, portal_url="http://portal.example/login", variables=variables,
+    )
+    assert steps[0].step_type == "wait"
+
+
+def test_build_replay_steps_change_value_not_resolved():
+    """change 值保持录制字面量：占位符解析仅对 fill/navigate 生效。"""
+    actions = validate_auto_login_actions([
+        {"type": "change", "selector": "[name=isp]", "strategy": "name", "ts": 1,
+         "value": "{{ISP}}"},
+    ])
+    (step,) = build_replay_steps(actions, variables=build_replay_variables({"isp": "cmcc"}))
+    assert step.step_type == "select"
+    assert step.value == "{{ISP}}", "change 值不解析，既有契约字节面不变"
 
 
 # ── 浏览器替身（stub 级）──
@@ -366,6 +501,27 @@ def test_auto_login_happy_path_headless_and_replay(monkeypatch, tmp_path):
     assert playwrights[0].stopped == 1
     assert core._profile_session is None
     assert (udd / "Cookies").read_text(encoding="utf-8") == "portal-remember-me"
+
+
+def test_auto_login_replays_fill_and_navigate_actions(monkeypatch, tmp_path):
+    """fill/navigate 动作经命令链路映射为 input/navigate 步骤回放（不再拒识）。"""
+    contexts, _playwrights = _patch_auto_login_browser(monkeypatch)
+    calls = _stub_run_steps(monkeypatch)
+    core = WorkerCore()
+    params = _auto_params(tmp_path / "u", recorded_actions=[
+        {"type": "fill", "selector": "#username", "strategy": "id", "ts": 10,
+         "value": "{{USERNAME}}"},
+        {"type": "navigate", "strategy": "structure", "ts": 20,
+         "value": "http://portal.example/step2"},
+        {"type": "click", "selector": "#login-btn", "strategy": "id", "ts": 30},
+    ])
+    result = asyncio.run(core.handle_profile_auto_login(params))
+    assert result["outcome"] == Outcome.SUCCESS.value
+    assert [c[0] for c in calls] == ["input", "navigate", "click"]
+    assert calls[0][1] == "#username"
+    assert calls[1][2] == "http://portal.example/step2"
+    # 校验失败/拒识都不会走到这里：占位符 value 原样透传（解析依赖调用方
+    # 传入 variables——portal_url/variables 接线在编排层，见 build_replay_steps）
 
 
 def test_auto_login_default_direct_connection_args(monkeypatch, tmp_path):
