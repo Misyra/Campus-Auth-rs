@@ -4,6 +4,16 @@
 > 当前活跃：`v5.1.3`（`docs/changelog.md`）。P0/P1 与更新子系统待办的权威摘要以本文件与 `docs/known-issues.md` 为准（原 defect-recheck / updater-audit 过程报告已于 2026-09-12 删除）。
 > 验证块：`cargo clippy --all-targets -- -D warnings` / `cargo test` 双 feature（含 `rust-tests-unix`）/ `cargo fmt --check` / `uv run pytest` / `npm run build` + `vitest` / `e2e-login-chain` 全链路。
 
+## 录制生成独立任务（2026-11-21 立项，**已落地**）
+
+> 用户诉求：「录制能不能做到填入账号密码？能做到就加上去，改成独立的任务形式，用户只需要完整录制内容」。拍板口径：录制升级为**完整操作录制**（含键盘输入），并可一键转换为**标准浏览器任务**（独立任务形式：可手动跑 / 定时调度 / 绑定方案），凭据永不落明文——密码框录 `{{PASSWORD}}`、用户名框录 `{{USERNAME}}` 占位符，运行时经现有变量解析管线注入。
+
+- [x] **Worker 录制器 + 回放升级**（258192b，python_worker/config_session.py + auto_login.py）：注入脚本新增 `fill` 捕获（密码框值恒替换 `{{PASSWORD}}` 绝不落真实值；用户名启发式 → `{{USERNAME}}`；其余字面量；同 selector 防抖合并取最终值）与 `navigate` 导航标记（连续重定向合并最终落地页）；RecorderSink 放行新词表；回放侧支持 fill（locator.fill）与 navigate（goto + 沉降等待，首条与 portal_url 同值跳过），占位符经凭据映射以 `username`/`password`/`isp`/`auth_url` 参数键解析（profile_commands 接线 build_replay_variables）
+- [x] **Rust 凭据下发 + stop 契约升级**（8ce4a68）：`build_persistent_login_params` params 增加四键（与 execute_browser_task 同名同信任边界，「凭据不下发」口径改写）；stop 端点响应携带 `recorded_actions` 动作数组（informational 回显）+ 新增 `apply=false` 结算参数（仅关浏览器取回动作、**不写方案**——任务录制零副作用）；RecordedAction doc 补词表（type 刻意 String 非枚举，零结构变更）
+- [x] **前端录制生成任务**（b695348，views/tasks/）：任务页「录制新任务」三阶段弹窗 → 选方案 start(record=true) → 完整操作 → stop(apply=false) 直取响应动作数组 → 转换器（click→click / fill→input / change→select / navigate→navigate，占位符原样透传）→ 预览（**可单步删除**）+ 命名保存为浏览器任务；RecordedAction 判别联合扩展
+- [x] **录制悬浮面板（追加批，2026-11-21 用户提出）**（258192b）：录制浏览器内注入可折叠悬浮面板——实时显示跨页权威全量动作列表（binding 回包即回程通道）、单步删除（未上报清缓冲、已上报走 `__delete__` 控制事件按身份删除、不进输出）、两层自防（面板根 stopPropagation + 录制器 closest 拦截）；两录制用途共用；前端预览列表同步可删
+- [x] **验证**（2026-11-21）：pytest 462 / cargo test --lib 1477 + clippy 零警告 / vitest 811 + typecheck + stylelint 全绿；demo 门户端到端实测全通——录制 6 动作（2 navigate + 2 占位符 fill + change + click）→ 预览删 2 步 → 保存 4 步任务（`{{LOGIN_URL}}` + 占位符，无明文凭据）→ 立即运行回放 1.66s 成功（变量注入生效）；方案侧 `recorded_actions` 确认未被写入（apply=false 生效）。**途中修复**：init script 执行时 body/documentElement 均可能为 null，面板 appendChild 抛错打断脚本 → navigate 上报全部丢失（挂载推迟 DOMContentLoaded）+ navigate 上报短轮询等 binding 注入
+
 ## 代码审查收尾遗留（2026-11-19）
 
 > 2026-11-19 全面审查（报告 `docs/reports/code-review-2026-11-19.md`，本地不提交）当日已修：P1 run_loop 内联探测、全部 12 项 P2、大部分 P3（逐项见 changelog 同日四节）。仍开放的低优先项：

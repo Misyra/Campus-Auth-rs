@@ -2,6 +2,15 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.1”。
 
+## 开发中（2026-11-21 录制生成独立任务）
+
+> 用户提出「录制能不能填入账号密码，改成独立的任务形式，用户只需完整录制」：录制器升级为完整操作录制（含键盘输入），并可一键转换为标准浏览器任务。全程后台子代理并行开发（Worker / Rust / 前端 / 契约四批）+ 主代理接线收口，端到端实测全通。
+
+- **Worker 录制器完整化（258192b）**：注入脚本新增 `fill` 捕获——密码框值恒替换 `{{PASSWORD}}` 占位符（结构上先于 `el.value` 读取，真实输入值进不了载荷）、用户名启发式（autocomplete=username / name|id|placeholder|aria-label 关键词）恒 `{{USERNAME}}`、其余录字面量；input 防抖合并 + blur/回车/点击提交四处结算（回车提交不触发 blur 的时序兜底）；新增 `navigate` 导航标记（主框架每文档一条，重定向链合并最终落地页，URL 截断 512）。**录制悬浮面板**（同批，用户追加提出）：右下角可折叠深色面板实时显示跨页权威全量动作列表（expose_binding 返回值即唯一回程通道，每条上报回包权威列表整体收敛）、单步删除（未上报清页面缓冲；已上报走 `__delete__` 控制事件，Python 侧按 ts+type+selector 身份精确删除、不误删同毫秒动作、`__delete__` 不进输出）、两层自防（面板根 21 类事件 stopPropagation + 录制器捕获监听 closest 拦截面板内事件源）。回放侧：auto_login 支持回放 fill（locator.fill）与 navigate（goto+沉降，首条与门户地址相同则跳过），占位符经凭据映射解析；profile_commands 接线 `build_replay_variables`。**两个实测修复**：① init script 执行时 body/documentElement 均可能为 null——面板 appendChild 抛 `Cannot read properties of null` 打断脚本，排在其后的 navigate 上报块全部丢失（demo 门户实测 4 条动作缺 2 条导航），挂载推迟到 DOMContentLoaded；② navigate 上报遇 binding 未注入的 init 时序竞态，短轮询 40×50ms 等待（兜底防御，实测 binding 先注入正常命中）。pytest 462（+11 面板/删除语义）。
+- **Rust 凭据下发 + stop 契约升级（8ce4a68）**：`build_persistent_login_params` 载荷新增 `username`/`password`/`isp`/`auth_url` 四键（与 execute_browser_task 同名同信任边界，非新增暴露面），「凭据不下发」口径改写——录制动作占位符回放解析 + 门户记住密码回填仍有效（fill 覆盖回填值）；stop 端点响应携带 `recorded_actions` 动作数组（informational，Worker 回包原样回显）+ 新增 `apply=false` 结算参数：仅关浏览器取回动作**不写方案**（`recorded_actions` 不落盘、`persistent_session_enabled` 不被动翻转），任务录制流程对所选方案零副作用；未录制会话守卫改为 `!record && apply && !discard`（apply=false 放行）。RecordedAction doc 补 fill/navigate 词表（type 刻意 String 非枚举的演进口兑现，零结构变更）。cargo test --lib 1477 / clippy 零警告 / UPDATE_OPENAPI 重生成。
+- **前端「录制新任务」（b695348）**：任务页浏览器任务面板新增「录制新任务」入口，三阶段弹窗（选方案 → 录制中指引 → 预览保存）；流程编排 useTaskRecording 单例 composable（与 PersistentSessionSection 同构镜像、409 口径逐字一致、关闭=放弃防会话占死）；recordedTaskConverter 纯函数——click/fill/change/navigate → click/input/select/navigate 编辑器同形最小字段集步骤，占位符原样透传留给运行时变量解析，词表外丢弃计数；完成录制走 stop+`apply=false` 直取响应动作数组（不回读方案）；预览列表**可单步删除**（悬浮面板只删本页缓冲，跨页汇总删除的可靠点在预览）；RecordedAction 判别联合扩展 fill/navigate；api.d.ts typegen 同步。vitest 811（+12）/ eslint / typecheck / stylelint 全绿。
+- **端到端实测（2026-11-21，demo 门户 http.server + 合成事件无人值守）**：录制 6 动作（2 navigate + fill `{{USERNAME}}` + change telecom + fill `{{PASSWORD}}` + click）→ 预览删 2 步（门户跳转冗余 + success 跳转查询串带演示密码，删除同时避免凭据进任务文件）→ 保存 4 步任务（`url={{LOGIN_URL}}`，磁盘任务文件无明文凭据）→ 立即运行回放 4 步 1.66s 成功（活跃方案凭据注入生效）；全程方案 `recorded_actions` 保持空、持久开关未被翻转（apply=false 副作用隔离验证）。
+
 ## 开发中（2026-11-20 前端统一重构战役批次：收口收尾 + 设计地基 + 新功能 + 大组件拆分 + 仪表盘重排）
 
 > 承接同日立项节。子代理并行流水线推进、逐批独立落库；阶段 1 全部收官，零警告门禁（`lint:css --max-warnings 0`）钉死。
