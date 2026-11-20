@@ -1006,15 +1006,18 @@ impl LoginChannel {
 ///
 /// 字段与 Python Worker 的录制契约逐字对齐（`python_worker/config_session.py`
 /// 的汇聚逻辑 + README「录制契约」一节）：`type`/`selector`/`strategy`/`ts` 恒存在，
-/// `value` 仅 `change` 动作携带（点击不录值，缺键反序列化为 `None`）。
+/// `value` 由 `change`/`fill`/`navigate` 动作携带（点击不录值，缺键反序列化为
+/// `None`；`fill` 的值为录制时的输入内容——凭据经 `{{USERNAME}}`/`{{PASSWORD}}`
+/// 占位符录制，密码永不落明文，回放时由 `profile_auto_login` 下发的凭据解析）。
 ///
 /// `type` 与 `strategy` 刻意保持 `String` 而非枚举：两者都是 Worker 侧演进的
-/// 受控词表（当前 `type` 为 `click`/`change`，`strategy` 为 `id`/`name`/
-/// `data-testid`/`data`/`text`/`structure`），枚举会在未来 Worker 新增词表值时
-/// 让旧主程序读不动方案文件；存储与回放按字面值处理即可。
+/// 受控词表（当前 `type` 为 `click`/`change`/`fill`/`navigate`，`strategy` 为
+/// `id`/`name`/`data-testid`/`data`/`text`/`structure`），枚举会在未来 Worker
+/// 新增词表值时让旧主程序读不动方案文件；存储与回放按字面值处理即可。
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct RecordedAction {
-    /// 动作类型：`click`（按钮/提交类点击）或 `change`（`<select>` 选择）
+    /// 动作类型：`click`（按钮/提交类点击）、`change`（`<select>` 选择）、
+    /// `fill`（输入框填写，值可为凭据占位符）或 `navigate`（页面导航）
     #[serde(rename = "type")]
     pub action_type: String,
     /// 目标元素选择器（Worker 按启发式优先级取首个命中）
@@ -1023,7 +1026,9 @@ pub struct RecordedAction {
     pub strategy: String,
     /// 事件时间戳（毫秒；Worker 侧按此升序返回并做 500ms 去重）
     pub ts: i64,
-    /// `change` 动作的选中值；`click` 无此键（序列化时跳过，与 Worker 返回形状一致）
+    /// `change`/`fill`/`navigate` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}`
+    /// 占位符、`navigate` 为落地页 URL）；仅 `click` 无此键（序列化时跳过，与
+    /// Worker 返回形状一致）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
 }
@@ -1231,8 +1236,9 @@ mod tests {
     }
 
     /// RecordedAction 与 Worker 录制契约（python_worker/config_session.py）逐字对齐：
-    /// `type`/`selector`/`strategy`/`ts` 恒存在，`value` 仅 change 携带（click 缺键
-    /// → None，回写时同样不带 value 键，与 Worker 返回形状一致）。
+    /// `type`/`selector`/`strategy`/`ts` 恒存在，`value` 由 change/fill 携带（click
+    /// 缺键 → None，回写时同样不带 value 键，与 Worker 返回形状一致；fill 的值
+    /// 可为凭据占位符，按字面值透传）。
     #[test]
     fn recorded_action_matches_worker_contract() {
         let worker_shape = serde_json::json!([
@@ -1249,9 +1255,16 @@ mod tests {
                 "ts": 1731475200456i64,
                 "value": "telecom",
             },
+            {
+                "type": "fill",
+                "selector": "#password",
+                "strategy": "id",
+                "ts": 1731475200789i64,
+                "value": "{{PASSWORD}}",
+            },
         ]);
         let actions: Vec<RecordedAction> = serde_json::from_value(worker_shape).unwrap();
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
         assert_eq!(actions[0].action_type, "click");
         assert_eq!(actions[0].selector, "#login-btn");
         assert_eq!(actions[0].strategy, "id");
@@ -1259,6 +1272,9 @@ mod tests {
         assert_eq!(actions[0].value, None, "click 无 value 键");
         assert_eq!(actions[1].action_type, "change");
         assert_eq!(actions[1].value.as_deref(), Some("telecom"));
+        // fill 携带值且占位符原样透传（凭据解析在回放侧，存储永不落明文）
+        assert_eq!(actions[2].action_type, "fill");
+        assert_eq!(actions[2].value.as_deref(), Some("{{PASSWORD}}"));
 
         // 回写形状：click 不得出现 "value": null（Worker 契约里 click 不带该键）
         let click_json = serde_json::to_value(&actions[0]).unwrap();
@@ -1267,6 +1283,9 @@ mod tests {
         // change 回写保留 value
         let change_json = serde_json::to_value(&actions[1]).unwrap();
         assert_eq!(change_json["value"], "telecom");
+        // fill 回写同样保留 value（占位符字面值）
+        let fill_json = serde_json::to_value(&actions[2]).unwrap();
+        assert_eq!(fill_json["value"], "{{PASSWORD}}");
     }
 
     #[test]

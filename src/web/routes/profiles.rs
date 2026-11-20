@@ -160,6 +160,28 @@ pub struct ConfigSessionStartData {
     pub started: bool,
 }
 
+/// `crate::config::schema::RecordedAction` 的线格式镜像声明（与 Worker 录制契约
+/// 同形）：config 持久化树走 schemars::JsonSchema 体系、与 utoipa ToSchema 互不
+/// 复用（见 `Cargo.toml` 对 schemars 的用途注记），profiles 域契约用本镜像标注
+/// 响应形状。字段须与源类型逐字对齐（含 `type` 改名与 `value` 的省略语义）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RecordedActionData {
+    /// 动作类型：`click`（按钮/提交类点击）、`change`（`<select>` 选择）、
+    /// `fill`（输入框填写，值可为凭据占位符）或 `navigate`（页面导航）
+    #[serde(rename = "type")]
+    pub action_type: String,
+    /// 目标元素选择器（Worker 按启发式优先级取首个命中）
+    pub selector: String,
+    /// 选择器采用的启发式级别（与 `selector` 配对）
+    pub strategy: String,
+    /// 事件时间戳（毫秒；Worker 侧按此升序返回并做 500ms 去重）
+    pub ts: i64,
+    /// `change`/`fill` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}` 占位符）；
+    /// `click`/`navigate` 无此键（序列化时跳过，与 Worker 返回形状一致）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
 /// POST /api/profiles/{id}/config-session/stop 响应载荷
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConfigSessionStopData {
@@ -167,9 +189,13 @@ pub struct ConfigSessionStopData {
     pub recorded_count: u64,
     /// 动作数超出 Worker 单次上限（50 条）被截断
     pub truncated: bool,
-    /// 方案的持久会话开关：非 discard 恒为 true（写回方案的当前值），
-    /// discard 回方案当前值（未写回，不虚报）
+    /// 方案的持久会话开关：apply=true（缺省）且非 discard 恒为 true（写回后的值），
+    /// 其余情况回方案当前值（未写回，不虚报）
     pub persistent_session_enabled: bool,
+    /// 本次会话录制的动作数组（informational：无论 discard 与否、apply 与否，
+    /// Worker 回包携带即原样返回；Worker 侧已有单次 50 条截断守卫，量级可控）。
+    /// 任务录制流程经 `apply=false` 消费本字段，前端不必再发一次 GET 方案详情
+    pub recorded_actions: Vec<RecordedActionData>,
 }
 
 /// POST /api/profiles/{id}/config-session/start 查询参数
@@ -1169,24 +1195,39 @@ pub async fn start_config_session(
 #[derive(Deserialize, ToSchema)]
 pub struct ConfigSessionStopQuery {
     /// 丢弃本次录制：仅关闭浏览器，**不落盘录制、不写方案**（A47 对齐决策：
-    /// 「只退出不保存」的显式出口）。录制内容仍回显真实计数（信息无害）
+    /// 「只退出不保存」的显式出口）。录制内容仍回显真实计数与动作数组（信息无害）
     #[serde(default)]
     pub discard: bool,
+    /// 结算写盘开关（缺省 true）：非 discard 时录制动作写回方案 +
+    /// `persistent_session_enabled=true`（方案编辑器「完成配置」路径）；
+    /// `false` 仅结算会话（关浏览器、取回动作）**不写方案**——任务录制流程
+    /// 专用：录制生成浏览器任务不该顺带把方案翻成持久会话。apply=false 时
+    /// 「未录制会话拒绝非 discard」守卫放行（本就不写方案，无空录制覆盖面）
+    #[serde(default)]
+    pub apply: Option<bool>,
 }
 
 /// POST /api/profiles/{id}/config-session/stop — 停止配置会话并结算录制
 ///
-/// 非 discard：解析 Worker 回传的 `recorded_actions`，经方案更新事务（与 PUT
-/// 同一 profiles_lock 临界区）一次性写回
+/// 非 discard 且 apply=true（缺省）：解析 Worker 回传的 `recorded_actions`，经
+/// 方案更新事务（与 PUT 同一 profiles_lock 临界区）一次性写回
 /// `recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：
 /// 并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。
 ///
-/// discard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。
+/// 非 discard 且 apply=false：仅结算会话（关浏览器、取回动作）**不写方案**——
+/// 任务录制流程专用：前端要的是动作数组去生成浏览器任务，不需要「录制任务」
+/// 顺带把方案改成持久会话。响应里 `persistent_session_enabled` 回方案当前值
+/// （与 discard 的回显口径一致）。
 ///
-/// 未录制会话（自由浏览模式打开，`owner.record == false`）拒绝非 discard
-/// 结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以空数组
-/// **覆盖方案既有录制**——守卫钉死这条数据丢失路径，自由浏览会话只能以
-/// discard（仅关闭）方式结束。
+/// discard：仅关闭浏览器取回计数与动作数组，方案保持原样（录制不落盘、开关不动）。
+///
+/// 未录制会话（自由浏览模式打开，`owner.record == false`）拒绝 apply=true（缺省）
+/// 且非 discard 的结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以
+/// 空数组**覆盖方案既有录制**——守卫钉死这条数据丢失路径。apply=false 不写方案、
+/// 无覆盖面，放行（取回的同样是空数组）。
+///
+/// 响应 `recorded_actions` 数组为 informational：无论 discard 与否、apply 与否，
+/// Worker 回包携带即原样返回。
 ///
 /// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
 /// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
@@ -1199,9 +1240,10 @@ pub struct ConfigSessionStopQuery {
     params(
         ("id" = String, Path, description = "Profile ID"),
         ("discard" = bool, Query, description = "true 时仅关闭浏览器不落盘录制（缺省 false）"),
+        ("apply" = Option<bool>, Query, description = "结算写盘开关（缺省 true）：非 discard 时录制动作写回方案；false 仅结算会话不写方案，任务录制流程专用"),
     ),
     responses(
-        (status = 200, description = "会话已结束；非 discard 时录制动作与开关已写回方案（响应只带计数不带动作数组）", body = DataEnvelope<ConfigSessionStopData>),
+        (status = 200, description = "会话已结束；响应携带录制动作数组（informational，discard/apply=false 也回显）——apply=true（缺省）且非 discard 时已写回方案，apply=false 仅结算不写方案", body = DataEnvelope<ConfigSessionStopData>),
         (status = 404, description = "方案不存在", body = ErrorResponse),
         (status = 409, description = "无活跃配置会话，或活跃会话属于其他方案（归属校验拒绝跨方案写盘）", body = ErrorResponse),
         (status = 500, description = "录制动作解析失败或命令超时等内部错误", body = ErrorResponse),
@@ -1215,6 +1257,9 @@ pub async fn stop_config_session(
     Path(id): Path<String>,
     Query(query): Query<ConfigSessionStopQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    // 缺省 true：方案编辑器「完成配置」路径与历史调用方不动，任务录制流程显式
+    // 传 apply=false 关闭写盘副作用
+    let apply = query.apply.unwrap_or(true);
     let profile = config.load_profile(&id)?;
     // 归属校验先行：本地无记录 / 记录指向别的方案时一律不派发——占用互斥
     // 以 Worker 为权威，但「会话属于哪个方案」只有 Rust 侧知道，跨方案
@@ -1228,10 +1273,11 @@ pub async fn stop_config_session(
             owner.profile_id
         )));
     }
-    // 未录制会话（自由浏览模式）没有可落盘的录制内容，非 discard 结算会以
-    // 空数组覆盖方案既有录制——在归属校验后、派发前拦下（归属保留，可改用
-    // discard 重新结算）
-    if !owner.record && !query.discard {
+    // 未录制会话（自由浏览模式）没有可落盘的录制内容，apply=true（缺省）且非
+    // discard 的结算会以空数组覆盖方案既有录制——在归属校验后、派发前拦下
+    // （归属保留，可改用 discard 或 apply=false 重新结算）；apply=false 本就
+    // 不写方案，无覆盖面，放行
+    if !owner.record && apply && !query.discard {
         return Err(ApiError::BadRequest(
             "本次会话以自由浏览模式打开（未录制），无可保存的录制内容；请用「仅关闭」方式结束会话"
                 .into(),
@@ -1274,8 +1320,12 @@ pub async fn stop_config_session(
         .map_err(|e| ApiError::Internal(format!("录制动作解析失败: {e}")))?
         .unwrap_or_default();
     let recorded_count = recorded.len() as u64;
+    // 动作数组进响应：无论 discard 与否、apply 与否，Worker 回包携带即原样返回
+    // ——apply=false 的任务录制流程靠它取动作序列，省一次 GET 方案详情。
+    // 序列化须在写盘分支 move 掉 recorded 之前完成
+    let recorded_actions = serde_json::to_value(&recorded).unwrap_or_default();
     let mut persistent_enabled = profile.persistent_session_enabled;
-    if !query.discard {
+    if !query.discard && apply {
         let actions = recorded;
         let result = profiles
             .update_profile_tx(
@@ -1298,6 +1348,7 @@ pub async fn stop_config_session(
     tracing::info!(
         profile_id = %id,
         discard = query.discard,
+        apply,
         recorded_count,
         truncated,
         "配置会话已停止"
@@ -1306,6 +1357,7 @@ pub async fn stop_config_session(
         "recorded_count": recorded_count,
         "truncated": truncated,
         "persistent_session_enabled": persistent_enabled,
+        "recorded_actions": recorded_actions,
     })))
 }
 
@@ -3521,12 +3573,18 @@ mod tests {
         assert!(bridge.owner().is_none(), "拒绝时不得留下归属记录");
     }
 
-    /// 未录制会话（自由浏览模式）拒绝非 discard 结算：空数组照单落盘会覆盖
-    /// 方案既有录制；改用 discard 仅关闭则放行并清空归属
+    /// 未录制会话（自由浏览模式）拒绝 apply=true（缺省）非 discard 结算：空数组
+    /// 照单落盘会覆盖方案既有录制；改用 discard 仅关闭或 apply=false 不写盘结算
+    /// 均放行并清空归属
     #[tokio::test]
     async fn config_session_stop_未录制会话拒绝落盘结算() {
         let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
             // discard 结算的 Worker 回包（record=false 契约：空数组）
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [],
+                "truncated": false,
+            })),
+            // apply=false 结算的 Worker 回包（同样空数组，仅取回不写盘）
             MockReply::Ok(serde_json::json!({
                 "recorded_actions": [],
                 "truncated": false,
@@ -3582,6 +3640,33 @@ mod tests {
         assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
         drop(guard);
         assert!(bridge.owner().is_none(), "discard 结算后归属应清空");
+
+        // apply=false：不写盘同样放行（守卫防的是空录制覆盖方案，本路径无覆盖面）
+        // ——discard 结算已清归属，重新登记模拟会话仍在跑
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: false,
+        });
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?apply=false").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(
+            v["data"]["recorded_actions"],
+            serde_json::json!([]),
+            "record=false 契约回包为空数组，原样回显"
+        );
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "apply=false 不写回，回方案当前值"
+        );
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
+        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        drop(guard);
+        assert!(bridge.owner().is_none(), "apply=false 结算后归属应清空");
     }
 
     /// stop 非 discard：录制解析后事务写回方案（动作 + 开关），归属随结算清空
@@ -3626,8 +3711,8 @@ mod tests {
         assert!(bridge.owner().is_none(), "stop 结算后归属应清空");
     }
 
-    /// stop discard=true：只关浏览器，录制不落盘、方案不动；响应仍回真实计数
-    /// 与方案当前开关值
+    /// stop discard=true：只关浏览器，录制不落盘、方案不动；响应仍回真实计数、
+    /// 动作数组与方案当前开关值
     #[tokio::test]
     async fn config_session_stop_discard不落盘() {
         let (app, inner, bridge) =
@@ -3652,6 +3737,18 @@ mod tests {
             v["data"]["persistent_session_enabled"], false,
             "未写回，回方案当前值"
         );
+        assert_eq!(
+            v["data"]["recorded_actions"]
+                .as_array()
+                .expect("discard 也要回动作数组")
+                .len(),
+            1,
+            "动作数组与计数同源回显"
+        );
+        assert_eq!(
+            v["data"]["recorded_actions"][0]["selector"], "#login-btn",
+            "动作数组内容为 Worker 回包原样"
+        );
 
         let guard = inner.lock().unwrap();
         let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
@@ -3659,6 +3756,67 @@ mod tests {
         assert!(!dorm.persistent_session_enabled, "discard 不得打开开关");
         drop(guard);
         assert!(bridge.owner().is_none());
+    }
+
+    /// stop apply=false 非 discard：仅结算会话不写方案——方案既有录制与持久
+    /// 开关均保持原样（任务录制流程专用：响应带动作数组，前端不必再 GET 方案）
+    #[tokio::test]
+    async fn config_session_stop_apply_false不写方案仅回动作数组() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [
+                    recorded_click_json(1000),
+                    {"type": "fill", "selector": "#user", "strategy": "id", "ts": 2000, "value": "{{USERNAME}}"}
+                ],
+                "truncated": false,
+            })),
+        ])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        // 预置方案既有录制与持久开关（false）：验证既不被覆盖也不被翻转
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .recorded_actions = vec![crate::config::schema::RecordedAction {
+            action_type: "click".into(),
+            selector: "#real-btn".into(),
+            strategy: "id".into(),
+            ts: 42,
+            value: None,
+        }];
+
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?apply=false").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["recorded_count"], 2);
+        assert_eq!(v["data"]["truncated"], false);
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "apply=false 不写回，回方案当前值（开关不被动翻转）"
+        );
+        let actions = v["data"]["recorded_actions"]
+            .as_array()
+            .expect("apply=false 响应必须携带动作数组");
+        assert_eq!(actions.len(), 2, "动作数组与计数同源");
+        assert_eq!(actions[0]["selector"], "#login-btn");
+        assert_eq!(actions[1]["value"], "{{USERNAME}}", "值原样透传");
+
+        // 方案断言：既有录制原样保留（尤其不被 Worker 新录制覆盖）、开关不动
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.recorded_actions.len(), 1, "apply=false 不得写回录制");
+        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        assert!(!dorm.persistent_session_enabled, "apply=false 不得打开开关");
+        drop(guard);
+        assert!(bridge.owner().is_none(), "结算后归属应清空");
     }
 
     /// stop 无活跃会话（本地无归属）→ 409 且不派发

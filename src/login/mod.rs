@@ -818,13 +818,20 @@ impl LoginOrchestrator {
     ///   终态，编排层不额外终态）。
     /// - `portal_url`：方案浏览器导航有效地址（[`ProfileSnapshot::effective_browser_login_url`]，
     ///   与配置会话/诊断的门户地址口径一致；auth_url 留空时落触发地址，恒非空）。
-    /// - `recorded_actions`：方案录制动作原样透传（空数组 = 只打开门户页等
-    ///   门户 JS 回填，门户可能记忆了会话直接放行）。
+    /// - `recorded_actions`：方案录制动作原样透传（词表含 `click`/`change`/
+    ///   `fill`/`navigate`，`fill` 的值可为 `{{USERNAME}}`/`{{PASSWORD}}` 占位符，
+    ///   由下发的凭据键解析；空数组 = 只打开门户页等门户 JS 回填，门户可能
+    ///   记忆了会话直接放行）。
     /// - `browser_settings`：整体下发 [`RuntimeConfig::browser`]，步骤预算
     ///   `timeout` 抬到 ≥45s（回填沉降 ~6.5s + 逐动作回放对默认 30s 偏紧）。
+    /// - `username` / `password` / `isp` / `auth_url`：凭据四键，取值口径与
+    ///   [`crate::tasks::TaskExecutor::execute_browser`] 的 params 同名键一致
+    ///   （password 取快照解密后的明文，非方案文件里的 `ENC:` 密文）。
     ///
-    /// 凭据不下发：门户「记住密码」的账号回填由持久目录中的
-    /// cookie/localStorage 承载，回放动作只补点击/选择。
+    /// 凭据随载荷下发：录制动作可含 `fill`（值为占位符），回放时需要凭据解析
+    /// 才能回填输入框。与浏览器任务执行同一信任边界（同样经 NDJSON IPC 下发
+    /// 给本机 Worker，不是新增暴露面）；门户「记住密码」的账号回填仍有效，
+    /// 凭据解析出的 `fill` 值会覆盖回填。
     fn build_persistent_login_params(
         &self,
         rt: &RuntimeConfig,
@@ -848,6 +855,12 @@ impl LoginOrchestrator {
             "portal_url": profile.effective_browser_login_url(),
             "recorded_actions": data.recorded_actions,
             "browser_settings": browser,
+            // 凭据四键与 execute_browser 的 params 同名键同口径（快照解密后的
+            // 明文），供 Worker 回放 fill 占位符时解析；NDJSON IPC 通道不落日志
+            "username": profile.username,
+            "password": profile.password.to_string(),
+            "isp": profile.isp,
+            "auth_url": profile.auth_url,
         });
         info!(
             profile = %profile.id,
@@ -2127,8 +2140,8 @@ mod tests {
     }
 
     /// 载荷装配：user_data_dir 按方案 id 拼接且派发前 create_dir_all、
-    /// portal_url 取认证地址口径、recorded_actions 原样透传、
-    /// browser_settings.timeout 抬到 ≥45s
+    /// portal_url 取认证地址口径、recorded_actions 原样透传、凭据四键取快照
+    /// 明文（与 execute_browser 同口径）、browser_settings.timeout 抬到 ≥45s
     #[tokio::test]
     async fn test_build_persistent_login_params_payload() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -2138,6 +2151,9 @@ mod tests {
         profile.id = "pdrop".to_string();
         profile.auth_url = "http://portal.example/auth".to_string();
         profile.trigger_url = String::new();
+        profile.username = "stu0001".to_string();
+        profile.password = zeroize::Zeroizing::new("portal-pass".to_string());
+        profile.isp = "cmcc".to_string();
 
         let data = crate::config::ProfileData {
             persistent_session_enabled: true,
@@ -2168,6 +2184,18 @@ mod tests {
             "http://portal.example/auth",
             "portal_url 取方案认证地址口径"
         );
+        // 凭据四键：与 execute_browser 的 params 同名键同口径（快照解密后的
+        // 明文，非方案文件里的 ENC: 密文），供 fill 占位符回放解析
+        assert_eq!(params["username"], "stu0001", "username 必须取快照明文");
+        assert_eq!(
+            params["password"], "portal-pass",
+            "password 必须取快照解密后的明文"
+        );
+        assert_eq!(params["isp"], "cmcc", "isp 必须取快照");
+        assert_eq!(
+            params["auth_url"], "http://portal.example/auth",
+            "auth_url 必须取快照"
+        );
         assert_eq!(
             params["recorded_actions"],
             serde_json::json!([
@@ -2182,13 +2210,17 @@ mod tests {
         );
     }
 
-    /// 持久自动登录载荷样例（装配形状与 Worker 契约对齐）
+    /// 持久自动登录载荷样例（装配形状与 Worker 契约对齐，含凭据四键）
     fn persistent_payload() -> serde_json::Value {
         serde_json::json!({
             "user_data_dir": "/tmp/browser_profiles/default",
             "portal_url": "http://portal.example/auth",
             "recorded_actions": [],
-            "browser_settings": { "timeout": 45 }
+            "browser_settings": { "timeout": 45 },
+            "username": "stu0001",
+            "password": "portal-pass",
+            "isp": "cmcc",
+            "auth_url": "http://portal.example/auth"
         })
     }
 

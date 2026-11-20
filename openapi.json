@@ -190,8 +190,15 @@
     "description": "POST /api/profiles/{id}/config-session/stop 响应载荷",
     "properties": {
      "persistent_session_enabled": {
-      "description": "方案的持久会话开关：非 discard 恒为 true（写回方案的当前值），\ndiscard 回方案当前值（未写回，不虚报）",
+      "description": "方案的持久会话开关：apply=true（缺省）且非 discard 恒为 true（写回后的值），\n其余情况回方案当前值（未写回，不虚报）",
       "type": "boolean"
+     },
+     "recorded_actions": {
+      "description": "本次会话录制的动作数组（informational：无论 discard 与否、apply 与否，\nWorker 回包携带即原样返回；Worker 侧已有单次 50 条截断守卫，量级可控）。\n任务录制流程经 `apply=false` 消费本字段，前端不必再发一次 GET 方案详情",
+      "items": {
+       "$ref": "#/components/schemas/RecordedActionData"
+      },
+      "type": "array"
      },
      "recorded_count": {
       "description": "本次会话录制的动作数（Worker 侧截断后的真实数量；discard 时仅回显不落盘）",
@@ -207,15 +214,23 @@
     "required": [
      "recorded_count",
      "truncated",
-     "persistent_session_enabled"
+     "persistent_session_enabled",
+     "recorded_actions"
     ],
     "type": "object"
    },
    "ConfigSessionStopQuery": {
     "description": "POST /api/profiles/{id}/config-session/stop 查询参数",
     "properties": {
+     "apply": {
+      "description": "结算写盘开关（缺省 true）：非 discard 时录制动作写回方案 +\n`persistent_session_enabled=true`（方案编辑器「完成配置」路径）；\n`false` 仅结算会话（关浏览器、取回动作）**不写方案**——任务录制流程\n专用：录制生成浏览器任务不该顺带把方案翻成持久会话。apply=false 时\n「未录制会话拒绝非 discard」守卫放行（本就不写方案，无空录制覆盖面）",
+      "type": [
+       "boolean",
+       "null"
+      ]
+     },
      "discard": {
-      "description": "丢弃本次录制：仅关闭浏览器，**不落盘录制、不写方案**（A47 对齐决策：\n「只退出不保存」的显式出口）。录制内容仍回显真实计数（信息无害）",
+      "description": "丢弃本次录制：仅关闭浏览器，**不落盘录制、不写方案**（A47 对齐决策：\n「只退出不保存」的显式出口）。录制内容仍回显真实计数与动作数组（信息无害）",
       "type": "boolean"
      }
     },
@@ -379,8 +394,15 @@
       "description": "POST /api/profiles/{id}/config-session/stop 响应载荷",
       "properties": {
        "persistent_session_enabled": {
-        "description": "方案的持久会话开关：非 discard 恒为 true（写回方案的当前值），\ndiscard 回方案当前值（未写回，不虚报）",
+        "description": "方案的持久会话开关：apply=true（缺省）且非 discard 恒为 true（写回后的值），\n其余情况回方案当前值（未写回，不虚报）",
         "type": "boolean"
+       },
+       "recorded_actions": {
+        "description": "本次会话录制的动作数组（informational：无论 discard 与否、apply 与否，\nWorker 回包携带即原样返回；Worker 侧已有单次 50 条截断守卫，量级可控）。\n任务录制流程经 `apply=false` 消费本字段，前端不必再发一次 GET 方案详情",
+        "items": {
+         "$ref": "#/components/schemas/RecordedActionData"
+        },
+        "type": "array"
        },
        "recorded_count": {
         "description": "本次会话录制的动作数（Worker 侧截断后的真实数量；discard 时仅回显不落盘）",
@@ -396,7 +418,8 @@
       "required": [
        "recorded_count",
        "truncated",
-       "persistent_session_enabled"
+       "persistent_session_enabled",
+       "recorded_actions"
       ],
       "type": "object"
      }
@@ -4686,6 +4709,42 @@
      "data_dirs",
      "cancelled_pending_update",
      "pending_update_left"
+    ],
+    "type": "object"
+   },
+   "RecordedActionData": {
+    "description": "`crate::config::schema::RecordedAction` 的线格式镜像声明（与 Worker 录制契约\n同形）：config 持久化树走 schemars::JsonSchema 体系、与 utoipa ToSchema 互不\n复用（见 `Cargo.toml` 对 schemars 的用途注记），profiles 域契约用本镜像标注\n响应形状。字段须与源类型逐字对齐（含 `type` 改名与 `value` 的省略语义）",
+    "properties": {
+     "selector": {
+      "description": "目标元素选择器（Worker 按启发式优先级取首个命中）",
+      "type": "string"
+     },
+     "strategy": {
+      "description": "选择器采用的启发式级别（与 `selector` 配对）",
+      "type": "string"
+     },
+     "ts": {
+      "description": "事件时间戳（毫秒；Worker 侧按此升序返回并做 500ms 去重）",
+      "format": "int64",
+      "type": "integer"
+     },
+     "type": {
+      "description": "动作类型：`click`（按钮/提交类点击）、`change`（`<select>` 选择）、\n`fill`（输入框填写，值可为凭据占位符）或 `navigate`（页面导航）",
+      "type": "string"
+     },
+     "value": {
+      "description": "`change`/`fill` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}` 占位符）；\n`click`/`navigate` 无此键（序列化时跳过，与 Worker 返回形状一致）",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "required": [
+     "type",
+     "selector",
+     "strategy",
+     "ts"
     ],
     "type": "object"
    },
@@ -9019,7 +9078,7 @@
   },
   "/api/profiles/{id}/config-session/stop": {
    "post": {
-    "description": "非 discard：解析 Worker 回传的 `recorded_actions`，经方案更新事务（与 PUT\n同一 profiles_lock 临界区）一次性写回\n`recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：\n并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。\n\ndiscard：仅关闭浏览器取回计数，方案保持原样（录制不落盘、开关不动）。\n\n未录制会话（自由浏览模式打开，`owner.record == false`）拒绝非 discard\n结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以空数组\n**覆盖方案既有录制**——守卫钉死这条数据丢失路径，自由浏览会话只能以\ndiscard（仅关闭）方式结束。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）。",
+    "description": "非 discard 且 apply=true（缺省）：解析 Worker 回传的 `recorded_actions`，经\n方案更新事务（与 PUT 同一 profiles_lock 临界区）一次性写回\n`recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：\n并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。\n\n非 discard 且 apply=false：仅结算会话（关浏览器、取回动作）**不写方案**——\n任务录制流程专用：前端要的是动作数组去生成浏览器任务，不需要「录制任务」\n顺带把方案改成持久会话。响应里 `persistent_session_enabled` 回方案当前值\n（与 discard 的回显口径一致）。\n\ndiscard：仅关闭浏览器取回计数与动作数组，方案保持原样（录制不落盘、开关不动）。\n\n未录制会话（自由浏览模式打开，`owner.record == false`）拒绝 apply=true（缺省）\n且非 discard 的结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以\n空数组**覆盖方案既有录制**——守卫钉死这条数据丢失路径。apply=false 不写方案、\n无覆盖面，放行（取回的同样是空数组）。\n\n响应 `recorded_actions` 数组为 informational：无论 discard 与否、apply 与否，\nWorker 回包携带即原样返回。\n\n超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）\n耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，\n见该常量处说明）。",
     "operationId": "post_api_profiles_id_config_session_stop",
     "parameters": [
      {
@@ -9039,6 +9098,15 @@
       "schema": {
        "type": "boolean"
       }
+     },
+     {
+      "description": "结算写盘开关（缺省 true）：非 discard 时录制动作写回方案；false 仅结算会话不写方案，任务录制流程专用",
+      "in": "query",
+      "name": "apply",
+      "required": false,
+      "schema": {
+       "type": "boolean"
+      }
      }
     ],
     "responses": {
@@ -9050,7 +9118,7 @@
         }
        }
       },
-      "description": "会话已结束；非 discard 时录制动作与开关已写回方案（响应只带计数不带动作数组）"
+      "description": "会话已结束；响应携带录制动作数组（informational，discard/apply=false 也回显）——apply=true（缺省）且非 discard 时已写回方案，apply=false 仅结算不写方案"
      },
      "404": {
       "content": {

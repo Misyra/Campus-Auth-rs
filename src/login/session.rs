@@ -204,7 +204,9 @@ pub(crate) enum LoginAttemptPlan {
     /// 浏览器渠道持久会话自动登录：派发 Worker `profile_auto_login`。
     ///
     /// 载荷由编排层预装配完整（`user_data_dir` / `portal_url` /
-    /// `recorded_actions` / `browser_settings`（步骤预算 ≥45s 口径）），会话层
+    /// `recorded_actions` / `browser_settings`（步骤预算 ≥45s 口径）/
+    /// `username` / `password` / `isp` / `auth_url`（凭据四键，供 fill 占位符
+    /// 回放解析，与 execute_browser 同口径）），会话层
     /// 仅注入 cancel_id 后经 [`crate::bridge::BridgeApi::execute_persistent_auto_login`]
     /// 下发。Worker 的 Success 只代表回放完成，登录成败仍走既有网络验证兜底
     /// （本计划无可声明的 `success_condition`）；持久上下文由 Worker 在命令结束
@@ -2903,7 +2905,7 @@ mod tests {
     }
 
     /// 持久自动登录载荷样例（编排侧装配形状：user_data_dir / portal_url /
-    /// recorded_actions / browser_settings）
+    /// recorded_actions / browser_settings / 凭据四键）
     fn persistent_params() -> Value {
         serde_json::json!({
             "user_data_dir": "/tmp/browser_profiles/default",
@@ -2912,7 +2914,11 @@ mod tests {
                 { "type": "click", "selector": "text=登录", "strategy": "text", "ts": 1 },
                 { "type": "change", "selector": "#isp", "strategy": "id", "ts": 2, "value": "cmcc" }
             ],
-            "browser_settings": { "timeout": 45 }
+            "browser_settings": { "timeout": 45 },
+            "username": "stu0001",
+            "password": "portal-pass",
+            "isp": "cmcc",
+            "auth_url": "http://portal.example/auth"
         })
     }
 
@@ -2993,6 +2999,13 @@ mod tests {
             persistent_params()["recorded_actions"],
             "录制动作必须原样透传"
         );
+        // 凭据四键必须存在且与编排侧装配一致（原样透传，供 fill 占位符回放解析）
+        for key in ["username", "password", "isp", "auth_url"] {
+            assert_eq!(
+                sent[key], persistent_params()[key],
+                "凭据键 {key} 必须与编排侧装配一致"
+            );
+        }
         let timeout = sent["browser_settings"]["timeout"].as_u64().unwrap();
         assert!(timeout >= 45, "步骤预算必须满足 ≥45s 口径，实际 {timeout}");
         assert!(
