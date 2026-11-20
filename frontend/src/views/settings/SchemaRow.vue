@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * schema 标准行渲染器：按 SettingRowDef 渲染「label + hint + 右侧控件」的设置行。
+ * schema 标准行渲染器：按 SettingRowDef 渲染「label + 右侧控件」的设置行。
  *
  * 控件经绑定路径（PATCH /api/config 载荷点分路径）直连 useConfig 草稿；开关统一
  * 产出 role="switch" + aria-checked（显式绑定状态值，读屏可读），下拉经 CustomSelect
@@ -9,7 +9,6 @@
  */
 import { computed } from "vue";
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SettingRowDef } from "./schema";
 import { useConfig } from "@/composables/useConfig";
@@ -88,13 +87,15 @@ function setSegmented(value: string): void {
 </script>
 
 <template>
-  <SettingsRow :description="row.hint">
+  <!-- 说明文字减法：hint / help 不再常驻渲染，统一由 SettingsRow 收进标题行的 ? 气泡
+       （help 在前、hint 在后拼接）；两者都缺省的行不渲染 ?。hint 数据仍留在 schema
+       供设置搜索匹配（settingsSearch 纯数据语料），此处只管渲染。 -->
+  <SettingsRow :description="row.hint" :help="row.help">
     <template #label>
       <!-- 开关行：label 不指向控件（toggle 由 sr-only + aria-checked 自述）；输入行：label for 指向 input -->
       <label v-if="inputId" :for="inputId">{{ row.label }}</label>
       <template v-else>{{ row.label }}</template>
       <span v-if="row.badge" class="badge badge--sm" :class="row.badge.variant === 'info' ? 'badge--info' : undefined">{{ row.badge.text }}</span>
-      <FieldHelp v-if="row.help" :text="row.help" />
     </template>
 
     <label v-if="control.kind === 'switch'" class="toggle setting-row-switch">

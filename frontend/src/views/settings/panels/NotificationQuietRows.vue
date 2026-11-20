@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 免打扰时段面板体（schema 槽位）：开关 + 嵌套 time 输入（与后端时/分字段互转）。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import { computed } from "vue";
 import { useConfig } from "@/composables/useConfig";
 
@@ -35,11 +34,11 @@ const quietEnd = computed<string>({
 
 <template>
   <div>
-    <SettingsRow description="时段内事件只记日志不推送，支持跨零点（如 22:00–08:00）">
-      <template #label>
-        启用免打扰时段
-        <FieldHelp text="免打扰期间照常记录事件，只是不推送。开始与结束时间相同视为全天免打扰。" />
-      </template>
+    <SettingsRow
+      help="免打扰期间照常记录事件，只是不推送。开始与结束时间相同视为全天免打扰。"
+      description="时段内事件只记日志不推送，支持跨零点（如 22:00–08:00）"
+    >
+      <template #label>启用免打扰时段</template>
       <label class="toggle setting-row-switch">
         <input
           type="checkbox"

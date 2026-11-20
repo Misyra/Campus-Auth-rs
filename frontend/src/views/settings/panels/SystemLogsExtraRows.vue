@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 日志设置面板的非常规行（schema 槽位）：日志级别即时热更新 + 导出诊断日志动作。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import { ref } from "vue";
@@ -43,10 +42,9 @@ async function handleExportLogs(): Promise<void> {
 
 <template>
   <div>
-    <SettingsRow description="低于该级别的日志将被过滤">
+    <SettingsRow help="低于该级别的日志将被过滤。选择后即时热更新。">
       <template #label>
         <label for="settings-log-level">全局日志级别</label>
-        <FieldHelp text="低于该级别的日志将被过滤。选择后即时热更新。" />
       </template>
       <CustomSelect
         :model-value="config.config.logging.level"

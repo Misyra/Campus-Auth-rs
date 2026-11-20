@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 暂停时段面板体（schema 槽位）：开关 + 嵌套的开始/结束时刻行（受开关禁用联动）。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import { useConfig } from "@/composables/useConfig";
 
 const config = useConfig();
@@ -9,11 +8,12 @@ const config = useConfig();
 
 <template>
   <div>
-    <SettingsRow description="每天在指定时段暂停检测和自动登录">
-      <template #label>
-        启用暂停时段
-        <FieldHelp text="启用后在该时段内暂停检测与登录，适用于定时断网时段。" />
-      </template>
+    <!-- 说明统一收进 ? 气泡：help 为详细说明、description 为行短说明，SettingsRow 拼接渲染 -->
+    <SettingsRow
+      help="启用后在该时段内暂停检测与登录，适用于定时断网时段。"
+      description="每天在指定时段暂停检测和自动登录"
+    >
+      <template #label>启用暂停时段</template>
       <label class="toggle setting-row-switch">
         <input type="checkbox" v-model="config.config.pause.enabled" />
         <span class="toggle-slider"></span>

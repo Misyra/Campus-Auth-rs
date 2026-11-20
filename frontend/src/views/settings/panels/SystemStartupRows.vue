@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 启动与运行面板体（schema 槽位）：启动动作/服务模式下拉与开机自启动开关（带注册状态联动）。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import { IS_OPENWRT } from "@/utils/platform";
@@ -45,23 +44,16 @@ onMounted(() => {
 
 <template>
   <div>
-    <SettingsRow>
+    <!-- 说明收进 ? 气泡：help 为固定说明，description 为随当前选择更新的动态说明 -->
+    <SettingsRow help="程序启动后自动执行的操作。" :description="startupActionHint">
       <template #label>
         <label for="settings-startup-action">启动后执行</label>
-        <FieldHelp text="程序启动后自动执行的操作。" />
-      </template>
-      <template #description>
-        <span class="hint">{{ startupActionHint }}</span>
       </template>
       <CustomSelect v-model="config.config.app_settings.startup_action" :options="loginActionOptions" aria-label="启动后执行" />
     </SettingsRow>
-    <SettingsRow>
+    <SettingsRow help="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" :description="runtimeModeHint">
       <template #label>
         <label for="settings-runtime-mode">服务模式</label>
-        <FieldHelp text="完整模式保留 Web 控制台；轻量模式仅后台检测。切换后重启生效。" />
-      </template>
-      <template #description>
-        <span class="hint">{{ runtimeModeHint }}</span>
       </template>
       <CustomSelect
         v-model="config.config.app_settings.runtime_mode"
@@ -69,11 +61,13 @@ onMounted(() => {
         trigger-id="settings-runtime-mode"
       />
     </SettingsRow>
-    <SettingsRow :description="autostartDescription(autostart)">
+    <SettingsRow
+      help="Windows 状态来自系统注册与启动审批检查。移动程序后请重新启用修复；程序不会自动覆盖任务管理器的禁用选择。"
+      :description="autostartDescription(autostart)"
+    >
       <template #label>
         开机自启动
         <span v-if="autostart.method !== '-'" class="badge badge--sm badge--mono">{{ autostart.method }}</span>
-        <FieldHelp text="Windows 状态来自系统注册与启动审批检查。移动程序后请重新启用修复；程序不会自动覆盖任务管理器的禁用选择。" />
       </template>
       <button v-if="!autostart.enabled && (autostart.registered || autostart.error)" type="button" class="btn btn-sm btn-secondary" :disabled="busy.autostart" @click="config.toggleAutostart(false)">取消注册</button>
       <label class="toggle setting-row-switch">

@@ -7,12 +7,15 @@ import { TUTORIAL_VIDEO_RECORD_URL } from "@/utils/constants";
 
 <template>
   <div>
-    <SettingsRow label="录制登录流程" description="先安装 Tampermonkey，再安装录制脚本。在登录页点选表单元素，生成交给 AI 的任务提示词">
-      <template #description>
-        <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener" class="inline-link">
-          安装 Tampermonkey
-        </a>
-      </template>
+    <!-- 说明收进 ? 气泡；原说明区里的 Tampermonkey 官网入口是外链动作，
+         移入控件列与「安装录制器脚本」并列（同任务概览行的 ghost 链接形态） -->
+    <SettingsRow
+      label="录制登录流程"
+      help="先安装 Tampermonkey，再安装录制脚本。在登录页点选表单元素，生成交给 AI 的任务提示词"
+    >
+      <a href="https://www.tampermonkey.net/" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">
+        安装 Tampermonkey
+      </a>
       <a href="/api/tools/task-recorder.user.js" class="btn btn-primary">
         <IconApp name="upload" class="icon-sm" />
         安装录制器脚本

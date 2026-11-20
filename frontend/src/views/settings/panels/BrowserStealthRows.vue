@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 反自动化检测行（schema 槽位）：开关 + 启用后展开的自定义脚本输入与内置脚本回填。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import { useConfig } from "@/composables/useConfig";
 import { useToast } from "@/composables/useToast";
 import { configApi } from "@/api";
@@ -25,14 +24,11 @@ async function loadDefaultStealthScript() {
 
 <template>
   <div>
-    <SettingsRow>
-      <template #label>
-        反自动化检测
-        <FieldHelp text="隐藏自动化特征。仅在被登录页拦截时启用。" />
-      </template>
-      <template #description>
-        <p id="settings-stealth-description">隐藏自动化特征；脚本留空使用内置版本，仅在需要自定义时填写</p>
-      </template>
+    <SettingsRow
+      help="隐藏自动化特征。仅在被登录页拦截时启用。"
+      description="脚本留空使用内置版本，仅在需要自定义时填写"
+    >
+      <template #label>反自动化检测</template>
       <label class="toggle setting-row-switch">
         <input type="checkbox" v-model="config.config.browser.stealth_mode" />
         <span class="toggle-slider"></span>
@@ -46,7 +42,6 @@ async function loadDefaultStealthScript() {
             placeholder="留空使用内置脚本"
             class="textarea--mono"
             aria-label="自定义反检测脚本"
-            aria-describedby="settings-stealth-description"
           ></textarea>
           <button type="button" class="btn btn-sm btn-secondary" @click="loadDefaultStealthScript()">填入内置脚本</button>
         </div>

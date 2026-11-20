@@ -5,7 +5,6 @@
  * 检查结果有发现更新 / 已最新 / 成功暂存 / 失败四类就地分支，超出标准行形态。
  */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, onMounted, ref } from "vue";
 import { useStatus } from "@/composables/useStatus";
@@ -140,13 +139,15 @@ onMounted(() => { void refreshUpdateState(); });
 
 <template>
   <div>
-    <SettingsRow v-if="!IS_OPENWRT" description="从本地挑一个已下载好的发布包直接安装，不联网下载">
+    <SettingsRow
+      v-if="!IS_OPENWRT"
+      help="从本地挑一个已下载好的发布包直接安装，不联网下载。适用于下载慢、或用自编译/镜像包的情况；版本须高于当前版本。"
+    >
       <template #label>
         <!-- 行标题：控件是自带完整文本的动作按钮「选择安装包」，名称与标题
              不同，强行 for 关联会改写按钮可访问名（误报豁免） -->
         <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
         <label>手动选择安装包</label>
-        <FieldHelp text="从本地挑一个已下载好的发布包直接安装，不联网下载。适用于下载慢、或用自编译/镜像包的情况；版本须高于当前版本。" />
       </template>
       <div class="update-check-row">
         <button
@@ -161,21 +162,15 @@ onMounted(() => { void refreshUpdateState(); });
         <span class="hint">支持 .zip / .tar.gz / .tgz，上限 512 MB</span>
       </div>
     </SettingsRow>
-    <SettingsRow description="记录最近一次手动或自动检查的结果，重启后保留">
+    <!-- 说明收进 ? 气泡：description 为最近一次检查的动态结果（随检查状态更新） -->
+    <SettingsRow
+      help="记录最近一次手动或自动检查的结果，重启后保留。"
+      :description="updateCheckHint || undefined"
+    >
       <template #label>
         <!-- 行标题：控件槽是检查时间/状态文本行，无可标记的表单控件（误报豁免） -->
         <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
         <label>上次检查时间</label>
-        <FieldHelp text="记录最近一次手动或自动检查的结果，重启后保留。" />
-      </template>
-      <template #description>
-        <span
-          v-if="updateCheckHint && !updateInfo"
-          class="hint update-check-hint"
-          :class="{ 'update-check-error': !!updateState?.error }"
-        >
-          {{ updateCheckHint }}
-        </span>
       </template>
       <div class="update-check-row">
         <button

@@ -129,7 +129,7 @@
 .settings-list-page :is(.settings-card-header h2, .appearance-card-header h3) { font-size: var(--text-lg); font-weight: 600; }
 .settings-list-page :is(.card-body, .appearance-card-body) {
   flex: none;
-  padding: 0 20px;
+  padding: 0 16px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -147,28 +147,26 @@
    两个类仅存的模板使用点在旧分区组件（SystemSettings / TaskEnvironmentSettings），
    组件按面板拆分后不再使用；行式布局由 .setting-row 与 card-body 自然流承担。 */
 
+/* 行距收紧（Demo A 全收版）：说明灰字退场后行高由标题行决定，min-height 一并退役；
+   分隔线以 color-mix 弱化到 55%，与收紧后的节奏匹配。 */
 .setting-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 340px);
   align-items: center;
   gap: 28px;
-  min-height: 78px;
-  padding-block: 18px;
-  border-bottom: 1px solid var(--border);
+  padding-block: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 .setting-row:last-child { border-bottom: 0; }
 /* 开关的附属输入归入同一组，只在独立设置之间画分隔线。 */
 .setting-row:has(> .setting-row-details) { row-gap: 12px; }
 .setting-row-details { grid-column: 1 / -1; min-width: 0; padding-left: 16px; }
 .setting-row-details:has(> .setting-row-control) { padding-left: 0; }
-.setting-row-details > .setting-row { min-height: 0; padding-block: 0; border-bottom: 0; }
+.setting-row-details > .setting-row { padding-block: 0; border-bottom: 0; }
 .setting-row-details > .setting-row + .setting-row { margin-top: 16px; }
 .setting-row-copy { min-width: 0; }
 .setting-row-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: var(--text-base); font-weight: 500; color: var(--text-primary); line-height: 1.5; }
 .setting-row-title label { margin: 0; }
-.setting-row-description { margin-top: 4px; color: color-mix(in srgb, var(--text-primary) 62%, var(--bg-secondary)); font-size: var(--text-md); line-height: 1.6; overflow-wrap: anywhere; }
-.setting-row .setting-row-description :is(p, .hint, .ocr-description, .ocr-size-hint) { margin: 0; font-size: inherit; line-height: inherit; color: inherit; }
-.setting-row-description .hint { display: block; }
 .setting-row-control { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin: 0; }
 .setting-row-control > :is(input, select, textarea, .custom-select, .segmented, .appearance-slider-item, .appearance-presets) { width: 100%; min-width: 0; }
 .setting-row-control > input[type="number"] { max-width: 128px; }
@@ -214,7 +212,6 @@
 .settings-list-page .ocr-preview { margin-left: auto; }
 .settings-list-page .ocr-recognize-btn { width: auto; margin: 0; }
 .settings-list-page .ocr-result { width: 100%; justify-content: flex-end; }
-.settings-list-page .ocr-description { font-size: inherit; }
 /* :has 参数计入特异度（--pinned 低于 :hover/:focus-visible），升序排列；三条声明相同，顺序不影响计算值 */
 .settings-list-page section:has(.field-help--pinned),
 .settings-list-page section:has(.field-help:hover),
@@ -231,8 +228,8 @@
      对齐，避免滚动到底时保存栏位置跳变 */
   .settings-page .save-bar { padding-top: 12px; bottom: var(--space-md); }
   .settings-list-page { gap: 22px; }
-  .settings-list-page :is(.card-body, .appearance-card-body) { padding-inline: 14px; }
-  .setting-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-block: 16px; }
+  .settings-list-page :is(.card-body, .appearance-card-body) { padding-inline: 12px; }
+  .setting-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-block: 12px; }
   .setting-row-control { justify-content: flex-start; }
   .setting-row-control > .custom-select { max-width: none; }
   .setting-row:has(> .setting-row-control > .setting-row-switch) { grid-template-columns: minmax(0, 1fr) 44px; gap: 14px; }

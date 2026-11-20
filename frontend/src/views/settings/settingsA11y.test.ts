@@ -21,6 +21,8 @@ function readSource(relative: string): string {
  * 机制变化：标准设置行由 SchemaRow 渲染器按 schema 产出，开关的可访问性语义
  * （role="switch" + aria-checked 显式绑定状态值）收口在渲染器一处——此处改为
  * **行为级**断言：真实挂载渲染器，检查它对开关/下拉/数字行产出的 DOM。
+ * 「设置行文字减法」（Demo A 全收版）后行说明不再常驻渲染：hint/help 统一收进
+ * 标题行的 `?` 气泡（SettingsRow 内置 FieldHelp），本文件同步锁定该结构。
  * 保留在槽位组件里的手写控件（自启动开关、通知通道启用开关）维持原有静态锁定。
  */
 
@@ -84,7 +86,7 @@ describe("SchemaRow 渲染器可访问性（标准行）", () => {
     app.unmount();
   });
 
-  it("数字/文本行：label for 指向 input id，FieldHelp 走 aria-describedby", () => {
+  it("数字/文本行：label for 指向 input id；行说明收进 ? 气泡（无常驻说明灰字）", () => {
     const { app, container } = mountRowClean({
       id: "row-c",
       label: "检测间隔（秒）",
@@ -96,7 +98,29 @@ describe("SchemaRow 渲染器可访问性（标准行）", () => {
     expect(input, "数字行应产出绑定 id 的输入框").not.toBeNull();
     const label = container.querySelector<HTMLLabelElement>("label[for='settings-interval']");
     expect(label?.textContent).toContain("检测间隔（秒）");
+    // 文字减法：说明灰字（.setting-row-description）退场，help+hint 并入 ? 触发器
+    expect(container.querySelector(".setting-row-description")).toBeNull();
+    expect(container.querySelector(".field-help"), "help/hint 齐备的行应渲染 ? 帮助触发器").not.toBeNull();
     app.unmount();
+  });
+
+  it("只有 hint 没有 help 的行同样补 ? 触发器；两者皆缺的行不渲染 ?", () => {
+    const mounted = mountRowClean({
+      id: "row-d",
+      label: "重试基准间隔（秒）",
+      hint: "首次重试前的等待秒数，之后逐次翻倍",
+      control: { kind: "number", binding: "notification.retry_base_interval_seconds", inputId: "settings-retry-base", min: 1, max: 60 },
+    });
+    expect(mounted.container.querySelector(".field-help"), "仅 hint 的行应有 ? 触发器").not.toBeNull();
+    mounted.app.unmount();
+
+    const bare = mountRowClean({
+      id: "row-e",
+      label: "启用文件日志",
+      control: { kind: "switch", binding: "logging.file_enabled" },
+    });
+    expect(bare.container.querySelector(".field-help"), "无说明的行不应渲染 ? 触发器").toBeNull();
+    bare.app.unmount();
   });
 });
 

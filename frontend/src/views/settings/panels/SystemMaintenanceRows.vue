@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 维护操作面板体（schema 槽位）：定时自重启下拉与配置热重载动作（带确认与结果提示）。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import { computed, ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
@@ -54,24 +53,21 @@ async function reloadConfig() {
 
 <template>
   <div>
-    <SettingsRow description="按运行时长周期性重启本程序，以回收内存">
+    <SettingsRow help="按运行时长周期性重启本程序，以回收内存。先启动新进程再退出旧进程，修改即时生效。">
       <template #label>
         <label for="settings-auto-restart">定时自重启</label>
-        <FieldHelp text="按运行时长周期性重启本程序，以回收内存。先启动新进程再退出旧进程，修改即时生效。" />
       </template>
       <CustomSelect v-model="autoRestartHours" :options="autoRestartOptions" aria-label="定时自重启" />
     </SettingsRow>
-    <SettingsRow description="从磁盘重新读取配置文件并应用，无需重启">
+    <SettingsRow help="从磁盘重新读取配置文件并应用，无需重启。日常修改请使用下方的保存按钮。">
       <template #label>
         <!-- 行标题：该行控件是自带完整文本的动作按钮「重新加载配置」，标题
              与按钮名不同，强行 for 关联会改写按钮的可访问名（误报豁免） -->
         <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
         <label>配置热重载</label>
-        <FieldHelp text="从磁盘重新读取配置文件并应用，无需重启。日常修改请使用下方的保存按钮。" />
       </template>
-      <template #description>
-        <span v-if="reloadMsg" class="hint">{{ reloadMsg }}</span>
-      </template>
+      <!-- 热重载结果是动作反馈而非行说明：保留在控件列就地展示（role=status 播报） -->
+      <span v-if="reloadMsg" class="hint" role="status">{{ reloadMsg }}</span>
       <button type="button" class="btn btn-secondary btn-sm" @click="reloadConfig" :disabled="reloading">
         {{ reloading ? "加载中..." : "重新加载配置" }}
       </button>

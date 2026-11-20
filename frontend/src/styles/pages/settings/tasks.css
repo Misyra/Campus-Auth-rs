@@ -157,20 +157,7 @@
   color: var(--text-muted);
 }
 
-.ocr-description {
-  font-size: var(--text-md);
-  color: var(--text-secondary);
-  line-height: 1.6;
-  margin: 0;
-}
-
-.ocr-description code {
-  background: rgba(var(--accent-rgb), 0.1);
-  padding: 1px 5px;
-  border-radius: var(--radius-xs);
-  font-size: var(--text-sm);
-  color: var(--accent-text, var(--accent));
-}
+/* .ocr-description 已随「设置行文字减法」退役：OCR 行说明收进 ? 气泡（SettingsRow）。 */
 
 .ocr-hint {
   font-size: var(--text-md);

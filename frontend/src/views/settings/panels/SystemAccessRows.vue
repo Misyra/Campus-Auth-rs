@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /** 设置 · 访问与安全面板体（schema 槽位）：远程访问引导密码（密文展示 + 显隐切换）。 */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import { ref } from "vue";
 import { useConfig } from "@/composables/useConfig";
 
@@ -13,13 +12,13 @@ const showManagementPassword = ref(false);
 
 <template>
   <div>
-    <SettingsRow description="仅远程（非回环）访问时作为界面引导凭据，本机经托盘打开界面无需此密码">
+    <!-- 说明收进 ? 气泡：help 为详细说明（含环境变量注入路径），description 为行短说明 -->
+    <SettingsRow
+      help="远程打开界面时，引导页要求输入本密码以换取访问凭据。建议 ≥8 字符；Docker 部署可经环境变量 CAMPUS_AUTH_MANAGEMENT_PASSWORD 注入（此时此处留空即可）。随下方保存按钮一并提交。"
+      description="仅远程（非回环）访问时作为界面引导凭据，本机经托盘打开界面无需此密码"
+    >
       <template #label>
         <label for="settings-management-password">管理凭据（远程访问引导密码）</label>
-        <FieldHelp text="远程打开界面时，引导页要求输入本密码以换取访问凭据。建议 ≥8 字符；Docker 部署可经环境变量 CAMPUS_AUTH_MANAGEMENT_PASSWORD 注入（此时此处留空即可）。随下方保存按钮一并提交。" />
-      </template>
-      <template #description>
-        <span class="hint">仅远程（非回环）访问时作为界面引导凭据，本机经托盘打开界面无需此密码；建议 ≥8 字符</span>
       </template>
       <div class="management-password-row">
         <input

@@ -112,8 +112,8 @@
   color: var(--text-secondary);
 }
 
-/* 数据目录跟随说明换行，避免窄屏被长路径撑开。 */
-.browser-data-path code { white-space: normal; overflow-wrap: anywhere; }
+/* .browser-data-path 已随「设置行文字减法」退役：数据目录说明并入 ? 气泡文本
+   （BrowserSessionRows 的 persistentDescription 计算值）。 */
 
 @media (max-width: 640px) {
   .browser-warning-copy {

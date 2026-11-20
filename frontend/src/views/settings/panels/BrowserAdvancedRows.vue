@@ -5,7 +5,6 @@
  * 纯净模式开关经 confirm 走 pureModeApi（不直接写草稿），展开区与开关是同一手写单元。
  */
 import SettingsRow from "@/components/common/SettingsRow.vue";
-import FieldHelp from "@/components/common/FieldHelp.vue";
 import { onMounted } from "vue";
 import { useConfig } from "@/composables/useConfig";
 import { BROWSER_ARGS_DEFAULT } from "@/utils/constants";
@@ -38,24 +37,23 @@ async function togglePureMode() { await config.togglePureMode(); }
 
 <template>
   <div>
-    <SettingsRow description="开启后使用默认参数；关闭后可自定义窗口尺寸、用户代理和启动参数">
-      <template #label>
-        纯净模式（推荐）
-        <FieldHelp text="启用后忽略下方自定义参数。登录异常时建议先恢复纯净模式排查。" />
-      </template>
+    <SettingsRow
+      help="启用后忽略下方自定义参数。登录异常时建议先恢复纯净模式排查。"
+      description="开启后使用默认参数；关闭后可自定义窗口尺寸、用户代理和启动参数"
+    >
+      <template #label>纯净模式（推荐）</template>
       <label class="toggle setting-row-switch">
         <input type="checkbox" :checked="pureMode" @click.prevent="togglePureMode()" />
         <span class="toggle-slider"></span>
         <span class="sr-only">纯净模式（推荐）</span>
       </label>
       <template v-if="!pureMode" #details>
-        <SettingsRow description="登录页面的渲染分辨率">
+        <SettingsRow help="登录页面的渲染分辨率。默认 1280×720。">
           <template #label>
             <!-- 组标题：控件槽是宽/高两个各带 for 的输入框，标题不指向单一控件
                  （label-has-for 在此为行标题模式的误报） -->
             <!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
             <label>浏览器窗口尺寸</label>
-            <FieldHelp text="登录页面的渲染分辨率。默认 1280×720。" />
           </template>
           <div class="viewport-input-row">
             <div class="viewport-input-group">
@@ -83,10 +81,9 @@ async function togglePureMode() { await config.togglePureMode(); }
             </div>
           </div>
         </SettingsRow>
-        <SettingsRow description="伪装的浏览器标识">
+        <SettingsRow help="伪装的浏览器标识。留空使用当前通道的默认值。">
           <template #label>
             <label for="settings-browser-ua">用户代理（UA）</label>
-            <FieldHelp text="伪装的浏览器标识。留空使用当前通道的默认值。" />
           </template>
           <input
             id="settings-browser-ua"
@@ -95,21 +92,16 @@ async function togglePureMode() { await config.togglePureMode(); }
             placeholder="留空使用当前浏览器的默认值"
           />
         </SettingsRow>
-        <SettingsRow>
+        <SettingsRow
+          help="每行一个参数，附加到浏览器启动命令，# 开头为注释。--proxy-server、--load-extension、--remote-debugging-port 等安全敏感参数会被自动过滤；非 Chromium 引擎下 Chromium 专属参数不生效。"
+        >
           <template #label>
             <label for="settings-browser-args">额外启动参数</label>
-            <FieldHelp
-              text="每行一个参数，附加到浏览器启动命令，# 开头为注释。--proxy-server、--load-extension、--remote-debugging-port 等安全敏感参数会被自动过滤；非 Chromium 引擎下 Chromium 专属参数不生效。"
-            />
-          </template>
-          <template #description>
-            <p id="settings-browser-args-description">附加到浏览器启动命令，每行一个，# 开头为注释</p>
           </template>
           <template #details>
             <div class="setting-row-control form-group">
               <textarea
                 id="settings-browser-args"
-                aria-describedby="settings-browser-args-description"
                 v-model="config.config.browser.browser_args"
                 rows="4"
                 class="textarea--mono"

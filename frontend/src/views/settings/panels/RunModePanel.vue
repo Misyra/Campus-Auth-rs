@@ -21,6 +21,11 @@ const modeOptions = computed(() =>
   RUN_MODE_PRESETS.map((p) => ({ id: p.id, label: p.label, description: p.description })),
 );
 
+/** 当前模式的说明（收进行 ? 气泡）：自定义模式下无预设说明，气泡只留固定 help 文本 */
+const currentModeDescription = computed(
+  () => modeOptions.value.find((opt) => opt.id === currentMode.value)?.description,
+);
+
 /**
  * 切换模式：先弹确认并列出**将要改动的项**。
  *
@@ -58,8 +63,12 @@ async function switchMode(id: Exclude<RunModeId, "custom">): Promise<void> {
       </span>
     </div>
     <div class="card-body">
-      <SettingsRow label="配置预设" description="一次调整多项运行设置，应用前会列出具体改动">
-        <template #description>{{ modeOptions.find(opt => opt.id === currentMode)?.description }}</template>
+      <!-- 说明收进 ? 气泡：help 为固定说明，description 为当前模式说明（随切换更新） -->
+      <SettingsRow
+        label="配置预设"
+        help="一次调整多项运行设置，应用前会列出具体改动"
+        :description="currentModeDescription"
+      >
         <div class="run-mode-options" role="group" aria-label="配置预设">
           <button
             v-for="opt in modeOptions"

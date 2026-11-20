@@ -144,13 +144,12 @@ async function recognizeOcr() {
 
 <template>
   <div>
-    <SettingsRow label="OCR 依赖">
-      <template #description>
-        <p class="ocr-description">
-          仅在任务中使用
-          <code>ocr</code>
-          步骤时需要，约占用 120MB 磁盘空间。
-        </p>
+    <!-- 说明收进 ? 气泡；安装状态是行内状态而非说明，移入 details 区常驻展示 -->
+    <SettingsRow
+      label="OCR 依赖"
+      help="仅在任务中使用 ocr 步骤时需要，约占用 120MB 磁盘空间。"
+    >
+      <template #details>
         <div class="ocr-status-row">
           <span v-if="ocrStatusLoading" class="ocr-status detecting">检测中…</span>
           <span v-else-if="ocrStatusError" class="ocr-status error">
