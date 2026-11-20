@@ -320,10 +320,11 @@ export const profilesApi = {
  * 传 `false` 时为**自由浏览**模式（`?record=false`）：同样拉起持久浏览器并导航
  * 到门户地址，但不注入录制器——供已启用持久会话的方案单独「打开浏览器」手动
  * 登录（勾选门户记住密码），用完直接关窗即结束；该模式要求方案已启用持久会话
- * （后端 400 拦截），且 stop 只能以 discard 结束。stop 结束会话并把录制动作
- * 落盘方案（recorded_actions + persistent_session_enabled=true），带
- * `discard=true` 时仅关闭浏览器：不落盘录制、不写方案（响应仍返回真实
- * recorded_count，是否采纳由调用方决定）。会话全局互斥：已有活跃会话时 start
+ * （后端 400 拦截），且 stop 只能以 discard 结束。stop 结束会话：默认把录制动作
+ * 落盘方案（recorded_actions + persistent_session_enabled=true）；`apply=false`
+ * 仅结算取回动作数组、不写方案（「录制新任务」路径，避免误翻方案持久开关）；
+ * `discard=true` 仅关闭浏览器：不落盘录制、不写方案（响应仍返回真实
+ * recorded_count 与动作数组，是否采纳由调用方决定）。会话全局互斥：已有活跃会话时 start
  * 返回 409（前端显示固定文案「已有配置会话进行中」），无活跃会话时 stop 也返回
  * 409（后端 message 直显）。start 要等浏览器真实拉起并就绪，放宽客户端超时
  * （与重定向检测同量级）。
@@ -337,11 +338,17 @@ export const configSessionApi = {
       null,
       { timeout: 60000 },
     ),
-  /** options.discard 为 true 时追加 `?discard=true`（放弃路径）；缺省落盘采纳（完成配置路径） */
-  stop: (profileId: string, options?: { discard?: boolean }) =>
-    http.post<ConfigSessionStopResult>(
-      `/api/profiles/${pathSegment(profileId)}/config-session/stop${options?.discard ? "?discard=true" : ""}`,
-    ),
+  /** query 组装：discard（放弃）与 apply=false（任务录制，仅取动作不写方案）可并存；
+   *  两者缺省 = 落盘采纳（方案页「完成配置」路径） */
+  stop: (profileId: string, options?: { discard?: boolean; apply?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (options?.discard) qs.set("discard", "true");
+    if (options?.apply === false) qs.set("apply", "false");
+    const suffix = qs.size ? `?${qs.toString()}` : "";
+    return http.post<ConfigSessionStopResult>(
+      `/api/profiles/${pathSegment(profileId)}/config-session/stop${suffix}`,
+    );
+  },
 };
 
 /** 开机自启动 */

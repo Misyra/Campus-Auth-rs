@@ -717,26 +717,71 @@ export interface EgressAdapter {
   dns_servers: string[];
 }
 
-/**
- * 持久会话录制动作（配置会话 `profile_session_stop` 取回的单个动作）。
- *
- * 与后端 `RecordedAction`（src/config/schema.rs）/ Python Worker 的录制契约逐字对齐：
- * `type` / `strategy` 保持 string 而非枚举——两者都是 Worker 侧演进的受控词表
- * （当前 `type` 为 `click`/`change`，`strategy` 为 `id`/`name`/`data-testid`/…），
- * 前端只做展示，按字面值透传即可。
- */
-export interface RecordedAction {
-  /** 动作类型：`click`（按钮/提交类点击）或 `change`（`<select>` 选择） */
-  type: string;
+/** 各类录制动作共有的字段 */
+export interface RecordedActionBase {
+  /** 事件时间戳（毫秒；按此升序） */
+  ts: number;
+}
+
+/** `click`：按钮 / 提交类点击 */
+export interface RecordedClickAction extends RecordedActionBase {
+  type: "click";
   /** 目标元素选择器（Worker 按启发式优先级取首个命中） */
   selector: string;
   /** 选择器采用的启发式级别（与 selector 配对） */
   strategy: string;
-  /** 事件时间戳（毫秒；按此升序） */
-  ts: number;
-  /** `change` 动作的选中值；`click` 无此键 */
-  value?: string;
 }
+
+/**
+ * `fill`：键盘输入（任务录制新增）。
+ *
+ * 凭据框的值是 `{{USERNAME}}` / `{{PASSWORD}}` 占位符（运行时由变量解析管线注入），
+ * 其余字段为字面量——前端只透传，不展开、不改写。
+ */
+export interface RecordedFillAction extends RecordedActionBase {
+  type: "fill";
+  selector: string;
+  strategy: string;
+  /** 输入文本（占位符留给运行时解析） */
+  value: string;
+}
+
+/** `change`：`<select>` 选择 */
+export interface RecordedChangeAction extends RecordedActionBase {
+  type: "change";
+  selector: string;
+  strategy: string;
+  /** 选中值 */
+  value: string;
+}
+
+/**
+ * `navigate`：页面跳转标记（任务录制新增）。
+ *
+ * 跳转没有目标元素，Worker 可能不带选择器字段；跳转目标 URL 在 `value`（缺省时
+ * 只表示"发生过一次跳转"的标记）。
+ */
+export interface RecordedNavigateAction extends RecordedActionBase {
+  type: "navigate";
+  /** 跳转目标 URL；纯标记动作可缺省 */
+  value?: string;
+  selector?: string;
+  strategy?: string;
+}
+
+/**
+ * 持久会话 / 任务录制动作（配置会话 `profile_session_stop` 取回的单个动作）。
+ *
+ * 与后端 `RecordedAction`（src/config/schema.rs）/ Python Worker 的录制契约逐字对齐：
+ * `type` / `strategy` 是 Worker 侧演进的受控词表（`click`/`fill`/`change`/`navigate`，
+ * `strategy` 为 `id`/`name`/`data-testid`/…），前端只做展示与转换，按字面值透传即可；
+ * 词表再演进时在此补变体。
+ */
+export type RecordedAction =
+  | RecordedClickAction
+  | RecordedFillAction
+  | RecordedChangeAction
+  | RecordedNavigateAction;
 
 /** 配置方案 */
 export interface Profile {
@@ -974,18 +1019,19 @@ export interface ConfigSessionStartResult {
 }
 
 /**
- * POST /api/profiles/{id}/config-session/stop 结果：会话已结束且录制动作已由后端
- * 落盘方案（recorded_actions + persistent_session_enabled=true）。
- *
- * 响应只带计数不带动作数组——编辑器需要完整数组时应重新 GET 方案详情。
+ * POST /api/profiles/{id}/config-session/stop 结果：会话已结束。默认（apply=true
+ * 非 discard）录制动作与持久开关已写回方案；`apply=false`（任务录制路径）与
+ * `discard=true` 仅结算会话、不写方案。
  */
 export interface ConfigSessionStopResult {
   /** 本次会话录制的动作数（Worker 侧截断后落盘的数量） */
   recorded_count: number;
   /** 动作数超出单次上限被截断时为 true */
   truncated: boolean;
-  /** 后端是否已置位持久会话开关（契约恒为 true；前端据此反映开关） */
+  /** 后端是否已置位持久会话开关（apply=true 非 discard 时恒为 true；apply=false / discard 回方案当前值） */
   persistent_session_enabled: boolean;
+  /** 本次会话录制的动作序列（informational 回显；「录制新任务」经 `apply=false` 消费本字段生成任务） */
+  recorded_actions?: RecordedAction[];
 }
 
 /**

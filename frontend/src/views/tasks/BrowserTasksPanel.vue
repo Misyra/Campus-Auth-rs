@@ -9,6 +9,9 @@
  * 自动保存：字段变更 debounce 静默 PUT（见 useTasks），无保存按钮、
  * 无「放弃未保存的修改」确认；JSON 语法非法时不落盘只标红（并在退出时明说一句）。
  *
+ * 工具栏另有「录制新任务」入口（TaskRecordingDialog）：选方案 → 配置会话录制 →
+ * 动作转步骤 → 保存为浏览器任务，编排见 useTaskRecording。
+ *
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
  */
 import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
@@ -17,6 +20,8 @@ import IconApp from "@/components/common/IconApp.vue";
 import EmptyState from "@/components/common/EmptyState.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
+import TaskRecordingDialog from "./TaskRecordingDialog.vue";
+import { useTaskRecording } from "./useTaskRecording";
 import { computed, onMounted, ref, watch } from "vue";
 import { useTasks } from "@/composables/useTasks";
 import { useScripts } from "@/composables/useScripts";
@@ -37,6 +42,7 @@ const s = useScripts();
 const h = useHttpTasks();
 const repo = useRepoImport();
 const debug = useDebug();
+const recording = useTaskRecording();
 const { profiles } = useProfiles();
 
 // B1：拖拽排序必须互传全量——后端 order 接口会整体替换三组顺序，
@@ -204,6 +210,10 @@ onMounted(async () => {
         aria-label="搜索浏览器任务"
       />
       <CommunityTasksEntry />
+      <button type="button" class="btn btn-sm" title="录制浏览器操作自动生成任务" @click="recording.openDialog()">
+        <IconApp name="target" class="icon-sm" />
+        录制新任务
+      </button>
       <button type="button" class="btn btn-sm" title="从文件导入任务" @click="t.importTask()">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
@@ -527,6 +537,9 @@ onMounted(async () => {
       </div>
     </div>
   </div>
+
+  <!-- 录制新任务弹窗（Modal 经 portal 渲染，两态之外挂载） -->
+  <TaskRecordingDialog />
 </template>
 
 <style scoped>

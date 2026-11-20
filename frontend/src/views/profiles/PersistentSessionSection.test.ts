@@ -38,15 +38,14 @@ function jsonResponse(body: unknown, init: { status?: number } = {}): Response {
   } as unknown as Response;
 }
 
-/** 三个录制动作样例（点击 + select 混合，形状与 Worker 录制契约一致） */
+/** 三个录制动作样例（点击 + select 混合，形状与 Worker 录制契约一致；
+ *  RecordedAction 是按 type 判别的联合类型，两类动作须分支构造） */
 function makeActions(count: number): RecordedAction[] {
-  return Array.from({ length: count }, (_, i) => ({
-    type: i % 2 === 0 ? "click" : "change",
-    selector: `#login-submit-${i}`,
-    strategy: "id",
-    ts: 1700000000000 + i,
-    ...(i % 2 === 1 ? { value: "cmcc" } : {}),
-  }));
+  return Array.from({ length: count }, (_, i): RecordedAction =>
+    i % 2 === 0
+      ? { type: "click", selector: `#login-submit-${i}`, strategy: "id", ts: 1700000000000 + i }
+      : { type: "change", selector: `#login-submit-${i}`, strategy: "id", ts: 1700000000000 + i, value: "cmcc" },
+  );
 }
 
 let app: App | null = null;
