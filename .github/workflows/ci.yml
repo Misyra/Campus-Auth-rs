@@ -255,9 +255,11 @@ jobs:
         working-directory: frontend
         run: npm run lint:css
 
-      - name: 前端单元测试（vitest）
+      # --coverage 让 vite.config.ts coverage 块的 thresholds 真正参与判定：
+      # 此前 npm test 不带覆盖率，跌破阈值的提交 CI 照常全绿，门禁形同虚设
+      - name: 前端单元测试与覆盖率门禁（vitest）
         working-directory: frontend
-        run: npm test
+        run: npm run test -- --coverage
 
       - name: Python Worker 语法检查
         run: python -m compileall python_worker
