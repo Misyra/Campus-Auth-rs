@@ -193,7 +193,8 @@ pub struct ConfigSessionStopData {
     /// 其余情况回方案当前值（未写回，不虚报）
     pub persistent_session_enabled: bool,
     /// 本次会话录制的动作数组（informational：无论 discard 与否、apply 与否，
-    /// Worker 回包携带即原样返回；Worker 侧已有单次 50 条截断守卫，量级可控）。
+    /// Worker 回包携带即返回——已过凭据等值归一，值与方案凭据恒等时替换为
+    /// 占位符；Worker 侧已有单次 50 条截断守卫，量级可控）。
     /// 任务录制流程经 `apply=false` 消费本字段，前端不必再发一次 GET 方案详情
     pub recorded_actions: Vec<RecordedActionData>,
 }
@@ -1207,6 +1208,45 @@ pub struct ConfigSessionStopQuery {
     pub apply: Option<bool>,
 }
 
+/// 录制值等值归一：fill/change 值与方案凭据恒等时替换为对应占位符
+///
+/// P1-1b 结构性后备防线：Worker 侧启发式（`fillValueFor`）对非 `type=password`
+/// 密码框可能录下明文（如点门户「显示密码」把 type 切成 `text`、自绘密码框
+/// `type=text`），单靠前端启发式兜不住——本归一在 stop 结算处用方案快照明文
+/// 凭据对 fill/change 值做恒等比对，命中（原文或 URL 编码形态）一律替换
+/// `{{USERNAME}}`/`{{PASSWORD}}`。空凭据跳过（无可比对面）；占位符字面值不与
+/// 真实凭据恒等、原样透传；`click`/`navigate` 值不参与比对（navigate 恒为
+/// 落地页 URL）。URL 编码口径复用 `login::http_login::collect_secrets` 的
+/// `form_urlencoded::byte_serialize` 手段，不另造轮子
+fn normalize_recorded_credential_values(
+    actions: &mut [crate::config::schema::RecordedAction],
+    username: &str,
+    password: &str,
+) {
+    for action in actions.iter_mut() {
+        // 仅 fill/change 携带用户输入值；navigate 是页面导航 URL，click 无值
+        if !matches!(action.action_type.as_str(), "fill" | "change") {
+            continue;
+        }
+        let Some(value) = action.value.as_deref() else {
+            continue;
+        };
+        if !username.is_empty() && value_matches_credential(value, username) {
+            action.value = Some("{{USERNAME}}".to_string());
+        } else if !password.is_empty() && value_matches_credential(value, password) {
+            action.value = Some("{{PASSWORD}}".to_string());
+        }
+    }
+}
+
+/// 值与凭据恒等判定：原文或 URL 编码（`form_urlencoded::byte_serialize`）形态
+fn value_matches_credential(value: &str, credential: &str) -> bool {
+    if value == credential {
+        return true;
+    }
+    value == url::form_urlencoded::byte_serialize(credential.as_bytes()).collect::<String>()
+}
+
 /// POST /api/profiles/{id}/config-session/stop — 停止配置会话并结算录制
 ///
 /// 非 discard 且 apply=true（缺省）：解析 Worker 回传的 `recorded_actions`，经
@@ -1227,7 +1267,9 @@ pub struct ConfigSessionStopQuery {
 /// 无覆盖面，放行（取回的同样是空数组）。
 ///
 /// 响应 `recorded_actions` 数组为 informational：无论 discard 与否、apply 与否，
-/// Worker 回包携带即原样返回。
+/// Worker 回包携带即返回——结算处先经凭据等值归一（fill/change 值与方案凭据
+/// 恒等时替换为 `{{USERNAME}}`/`{{PASSWORD}}`，见
+/// [`normalize_recorded_credential_values`]），落盘与回显同一次覆盖。
 ///
 /// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
 /// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
@@ -1310,7 +1352,7 @@ pub async fn stop_config_session(
         .unwrap_or(false);
     // Worker 返回形状即方案存储形状（RecordedAction 契约逐字对齐），解析失败
     // 属于契约破裂，按内部错误处理而不静默丢录制
-    let recorded: Vec<crate::config::schema::RecordedAction> = resp
+    let mut recorded: Vec<crate::config::schema::RecordedAction> = resp
         .result
         .data
         .get("recorded_actions")
@@ -1319,6 +1361,15 @@ pub async fn stop_config_session(
         .transpose()
         .map_err(|e| ApiError::Internal(format!("录制动作解析失败: {e}")))?
         .unwrap_or_default();
+    // 等值归一先于序列化：落盘与响应回显一次覆盖（明文凭据在两处都不得留存）。
+    // 凭据取 `runtime_config_for_profile` 的解密快照——解密失败时密码为空、
+    // 归一按空凭据跳过（fail-open：不归一也不丢录制）
+    let credentials = config.runtime_config_for_profile(&id)?;
+    normalize_recorded_credential_values(
+        &mut recorded,
+        &credentials.profile.username,
+        &credentials.profile.password,
+    );
     let recorded_count = recorded.len() as u64;
     // 动作数组进响应：无论 discard 与否、apply 与否，Worker 回包携带即原样返回
     // ——apply=false 的任务录制流程靠它取动作序列，省一次 GET 方案详情。
@@ -3820,6 +3871,126 @@ mod tests {
         assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
         assert!(!dorm.persistent_session_enabled, "apply=false 不得打开开关");
         drop(guard);
+        assert!(bridge.owner().is_none(), "结算后归属应清空");
+    }
+
+    /// P1-1b 等值归一矩阵（纯函数）：明文 / URL 编码命中替换、空凭据跳过、
+    /// 占位符原样、click/navigate 不参与比对
+    #[test]
+    fn normalize_recorded_credential_values_归一矩阵() {
+        use crate::config::schema::RecordedAction;
+
+        fn action(kind: &str, value: Option<&str>) -> RecordedAction {
+            RecordedAction {
+                action_type: kind.into(),
+                selector: "#x".into(),
+                strategy: "id".into(),
+                ts: 1,
+                value: value.map(str::to_string),
+            }
+        }
+        let username = "stu001";
+        let password = "p@ss w0rd";
+
+        // 明文命中：fill 与 change 均参与，各替换为对应占位符
+        let mut actions = vec![
+            action("fill", Some("stu001")),
+            action("change", Some("p@ss w0rd")),
+        ];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value.as_deref(), Some("{{USERNAME}}"));
+        assert_eq!(actions[1].value.as_deref(), Some("{{PASSWORD}}"));
+
+        // URL 编码形态命中（form_urlencoded 口径：@ → %40、空格 → +）
+        let mut actions = vec![action("fill", Some("p%40ss+w0rd"))];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value.as_deref(), Some("{{PASSWORD}}"));
+
+        // 空凭据跳过：无凭据可比对，值原样保留
+        let mut actions = vec![action("fill", Some("stu001")), action("fill", None)];
+        normalize_recorded_credential_values(&mut actions, "", "");
+        assert_eq!(actions[0].value.as_deref(), Some("stu001"));
+        assert_eq!(actions[1].value, None);
+
+        // 占位符值原样：不与真实凭据恒等，透传
+        let mut actions = vec![
+            action("fill", Some("{{PASSWORD}}")),
+            action("fill", Some("{{USERNAME}}")),
+        ];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value.as_deref(), Some("{{PASSWORD}}"));
+        assert_eq!(actions[1].value.as_deref(), Some("{{USERNAME}}"));
+
+        // click/navigate 不参与比对：navigate 值与凭据恒等也原样保留
+        let mut actions = vec![
+            action("click", None),
+            action("navigate", Some(password)),
+        ];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value, None);
+        assert_eq!(actions[1].value.as_deref(), Some("p@ss w0rd"));
+
+        // 用户名命中优先于密码判定（同值凭据不产生歧义替换）
+        let mut actions = vec![action("fill", Some("stu001"))];
+        normalize_recorded_credential_values(&mut actions, "stu001", "stu001");
+        assert_eq!(actions[0].value.as_deref(), Some("{{USERNAME}}"));
+    }
+
+    /// P1-1b 等值归一（结算路径）：Worker 启发式漏判录下的明文凭据在 stop
+    /// 结算处归一为占位符——响应回显与方案落盘同一次覆盖，两处均无明文
+    #[tokio::test]
+    async fn config_session_stop_明文凭据归一为占位符() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [
+                    {"type": "fill", "selector": "#user", "strategy": "id", "ts": 1000, "value": "stu001"},
+                    {"type": "fill", "selector": "#pwd", "strategy": "id", "ts": 2000, "value": "p@ss w0rd"},
+                    {"type": "change", "selector": "#isp", "strategy": "name", "ts": 3000, "value": "p%40ss+w0rd"},
+                ],
+                "truncated": false,
+            })),
+        ])));
+        // 方案快照凭据：用户名原文命中，密码原文 / URL 编码形态各命中一条
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.username = "stu001".into();
+            dorm.password = "p@ss w0rd".into();
+        }
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let actions = v["data"]["recorded_actions"].as_array().unwrap();
+        assert_eq!(actions[0]["value"], "{{USERNAME}}", "回显：用户名原文命中");
+        assert_eq!(actions[1]["value"], "{{PASSWORD}}", "回显：密码原文命中");
+        assert_eq!(
+            actions[2]["value"], "{{PASSWORD}}",
+            "回显：密码 URL 编码形态命中"
+        );
+
+        // 落盘同一份归一结果：方案存储不留明文
+        {
+            let guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+            assert_eq!(dorm.recorded_actions.len(), 3);
+            assert_eq!(
+                dorm.recorded_actions[0].value.as_deref(),
+                Some("{{USERNAME}}")
+            );
+            assert_eq!(
+                dorm.recorded_actions[1].value.as_deref(),
+                Some("{{PASSWORD}}")
+            );
+            assert_eq!(
+                dorm.recorded_actions[2].value.as_deref(),
+                Some("{{PASSWORD}}")
+            );
+        }
         assert!(bridge.owner().is_none(), "结算后归属应清空");
     }
 
