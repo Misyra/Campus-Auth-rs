@@ -91,7 +91,7 @@ cd frontend && npm run build
 
 ### Lint
 
-启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（双平台矩阵，含 `rust-tests-unix` 真机）/ frontend `typegen:check + typecheck + eslint + stylelint + build + vitest`（vitest 含覆盖率阈值）/ `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路（ubuntu + macOS 双平台）/ 核心域覆盖率门禁，见 `.github/workflows/ci.yml`；另有 `audit.yml` 月度供应链审计与 `fuzz.yml` cargo-fuzz 每周冒烟）。
+启用 `clippy` 全部默认规则，CI（`.github/workflows/ci.yml`）要求 `cargo clippy --all-targets -- -D warnings` 零警告（另含 `cargo fmt --check` / `cargo test`（双平台矩阵，含 `rust-tests-unix` 真机）/ frontend `typegen:check + typecheck + eslint + stylelint + build + vitest`（vitest 含覆盖率阈值）/ `compileall` / `uv run pytest` / `e2e-login-chain` mock→二进制→Worker 全链路（windows + macOS 双平台）/ 核心域覆盖率门禁，见 `.github/workflows/ci.yml`；另有 `audit.yml` 月度供应链审计与 `fuzz.yml` cargo-fuzz 每周冒烟）。
 
 ### 前端样式
 
@@ -246,7 +246,7 @@ cargo test -- --nocapture
 - **属性测试（proptest）**：统一 512 cases 口径（CI 亲和，随机失败必可 shrink 复现），六组——bridge IPC 行解析（`bridge/process.rs`）、去重/抢占决策矩阵组合空间（`login/preemption.rs`）、会话结果分类（`login/session.rs`、`login/mod.rs`）、迁移幂等（`config/migration.rs`）、`PATCH /api/config` 载荷归一（`web/routes/config.rs`）
 - **Fuzz**：`fuzz/` 独立 crate 三 target——`fuzz_config_json`（SettingsData / ProfileData 任意 JSON 不 panic）、`fuzz_migrate`（迁移管线）、`fuzz_parse_ipc`（NDJSON 解析链全反序列化面）；CI `fuzz.yml` 每周冒烟
 - **覆盖率门禁**：CI 按域断言 `src/{config,login,engine,updater}` 行覆盖率阈值（= 实测基线 - 4pp，调整流程见 ci.yml job 注释）；前端 vitest coverage thresholds（lines 38.7 / statements 36.5 / functions 29 / branches 28.6，基线 - 5pp，见 `frontend/vite.config.ts`）
-- **E2E 双平台**：`e2e-login-chain`（mock 门户 → 真实二进制 → Worker Playwright + OCR → success_condition → 历史落盘）与 Rust 测试矩阵均跑 ubuntu + macOS
+- **E2E 双平台**：`e2e-login-chain`（mock 门户 → 真实二进制 → Worker Playwright + OCR → success_condition → 历史落盘）跑 windows + macOS；Rust 测试矩阵（`rust-tests-unix`）跑 ubuntu + macOS——两个 job 平台面不同，勿混写
 - **真浏览器 pytest**：`python_worker/tests/test_auto_login_browser.py` 真 chromium 驱动持久上下文自动登录回放；chromium 可执行文件缺失时整文件 skip（环境守卫），本地全量跑前先 `uv run playwright install chromium`
 - **供应链审计**：release 构建接 `cargo-auditable`；`audit.yml` 月度 `cargo audit`（失败即拦 + artifact）与 `npm audit`（runtime 严格 / dev 仅报告分级）
 
