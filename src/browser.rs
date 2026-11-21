@@ -39,14 +39,15 @@ fn app_paths_executable(exe_name: &str) -> Option<std::path::PathBuf> {
         HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegGetValueW, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     };
 
-    // 路径值远小于 4K 字符；不足时 RegGetValueW 返回错误而非截断误报
-    let mut bytes = vec![0u8; 8192];
+    // 路径值远小于 4K 字符；不足时 RegGetValueW 返回错误而非截断误报。
+    // 缓冲按宽字符分配（REG_SZ 值为 UTF-16），pcbdata 按字节计数：len / 2 即字符数
+    let mut buf = vec![0u16; 4096];
     let subkey = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}");
     let subkey_wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
     // 空值名（仅 NUL 结尾）读取键的默认值——App Paths 的登记形态
     let default_value_name = [0u16];
     for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
-        let mut len = bytes.len() as u32;
+        let mut len = (buf.len() * 2) as u32;
         let code = unsafe {
             RegGetValueW(
                 root,
@@ -54,7 +55,7 @@ fn app_paths_executable(exe_name: &str) -> Option<std::path::PathBuf> {
                 default_value_name.as_ptr(),
                 RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
                 std::ptr::null_mut(),
-                bytes.as_mut_ptr().cast(),
+                buf.as_mut_ptr().cast(),
                 &mut len,
             )
         };
@@ -62,7 +63,8 @@ fn app_paths_executable(exe_name: &str) -> Option<std::path::PathBuf> {
             // 未登记（ERROR_FILE_NOT_FOUND 等）或读取失败：换下一个根键
             continue;
         }
-        if let Some(path) = clean_app_paths_value(&bytes[..len as usize / 2]) {
+        let chars = (len as usize / 2).min(buf.len());
+        if let Some(path) = clean_app_paths_value(&buf[..chars]) {
             let path = std::path::PathBuf::from(path);
             if path.is_file() {
                 return Some(path);
