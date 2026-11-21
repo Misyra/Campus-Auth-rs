@@ -230,6 +230,30 @@ fn display_host_for(bind_host: &str) -> String {
     }
 }
 
+/// 当前构建的平台是否具备托盘能力（P2-8 的平台支持性判据）
+///
+/// 用 cfg 常量判定而非运行时探测：与 `tray::run_os_event_loop` 的三平台
+/// 分支口径一致（Windows 消息循环 / Linux gtk 主循环 / macOS 主队列投递）；
+/// 其余 OS 即使带 desktop feature 构建，托盘也无事件循环兜底，视同不支持
+#[cfg(feature = "desktop")]
+const fn tray_platform_supported() -> bool {
+    cfg!(any(windows, target_os = "linux", target_os = "macos"))
+}
+
+/// 无托盘提示的打印判据（纯函数，单测钉住 P2-8 / P3-13 口径）
+///
+/// `no_tray_effective` 为「配置关闭 或 平台不支持」的合并结果，由调用方
+/// 按构建形态组装；本函数只负责地址与环境判定。
+fn headless_hint_should_print(bind_host: &str, no_tray_effective: bool) -> bool {
+    // 回环判据用真实绑定地址（P3-13）：此前拿展示地址做字符串硬比较，
+    // `--host ::1` 等回环绑定会被误判为非回环而不打印；解析口径与监听侧
+    // parse_bind_addr 完全一致，杜绝两处判定漂移
+    app::parse_bind_addr(bind_host).is_loopback()
+        && no_tray_effective
+        && !app::is_docker_env()
+        && !cfg!(any(feature = "openwrt", feature = "android"))
+}
+
 /// 无浏览器 + 无托盘（且回环监听）时，把带引导秘钥的完整界面地址打到终端。
 ///
 /// 该组合下没有任何界面入口——托盘「复制界面链接」不存在、也不自动开浏览器，
@@ -237,19 +261,15 @@ fn display_host_for(bind_host: &str) -> String {
 /// 只写 stderr（终端可见），**不进日志文件与诊断包**：后端日志按设计只记录
 /// 不含 fragment 的基础 URL，引导秘钥不得落盘。
 fn print_headless_ui_hint(state: &LauncherState, port: u16, bind_host: &str) {
-    // no_tray 字段仅桌面构建存在；其余构建恒无托盘，视同「无托盘」成立
+    // P2-8：判据改「配置关闭 或 平台不支持托盘」——此前只看配置位，macOS
+    // 「配置想要托盘但平台运行时跳过」的组合下入口提示永不打印；托盘启用后
+    // macOS 平台支持成立，仅显式 --no-tray / 配置关闭 / 不支持平台走到提示分支
     #[cfg(feature = "desktop")]
-    let no_tray = state.app_config.no_tray;
+    let no_tray = state.app_config.no_tray || !tray_platform_supported();
+    // 非 desktop 构建恒无托盘，视同「无托盘」成立
     #[cfg(not(feature = "desktop"))]
     let no_tray = true;
-    // 回环判据用真实绑定地址（P3-13）：此前拿展示地址做字符串硬比较，
-    // `--host ::1` 等回环绑定会被误判为非回环而不打印；解析口径与监听侧
-    // parse_bind_addr 完全一致，杜绝两处判定漂移
-    if !app::parse_bind_addr(bind_host).is_loopback()
-        || !no_tray
-        || app::is_docker_env()
-        || cfg!(any(feature = "openwrt", feature = "android"))
-    {
+    if !headless_hint_should_print(bind_host, no_tray) {
         return;
     }
     let bootstrap = crate::web::auth::read_bootstrap_file(&state.app_config.base_path);
@@ -285,5 +305,29 @@ mod tests {
         assert!(!app::parse_bind_addr("192.168.1.5").is_loopback());
         // 监听侧对主机名回退回环绑定，提示判据保持同一结论
         assert!(app::parse_bind_addr("localhost").is_loopback());
+    }
+
+    /// P2-8 合并判据：仅「无托盘（配置关闭或平台不支持）且回环且非 Docker」
+    /// 才打印界面入口提示
+    #[test]
+    fn test_headless_hint_criterion() {
+        // 回环 + 无托盘 → 打印（--no-tray / 配置关闭 / 不支持平台的组合）
+        assert!(headless_hint_should_print("127.0.0.1", true));
+        assert!(headless_hint_should_print("::1", true));
+        // 有托盘（配置开启且平台支持）→ 不打印
+        assert!(!headless_hint_should_print("127.0.0.1", false));
+        // 非回环绑定（LAN / 0.0.0.0 全接口）→ 不打印
+        assert!(!headless_hint_should_print("192.168.1.5", true));
+        assert!(!headless_hint_should_print("0.0.0.0", true));
+    }
+
+    /// 平台支持性常量与 cfg 面钉住：desktop 构建仅三大托盘平台为真
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn test_tray_platform_supported_matches_cfg() {
+        assert_eq!(
+            tray_platform_supported(),
+            cfg!(any(windows, target_os = "linux", target_os = "macos"))
+        );
     }
 }
