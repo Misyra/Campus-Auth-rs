@@ -965,6 +965,9 @@ pub const BUNDLE_REDACTED: &str = "[已脱敏]";
 /// - settings.global.updater.proxy_url（更新代理，URL 口径）
 /// - active_profile.password（方案密码：内存明文或磁盘 ENC: 密文，一律置空）
 /// - active_profile.network.proxy_url（HTTP/SOCKS5 代理可含 Basic 认证，URL 口径）
+/// - active_profile.recorded_actions[].value（持久会话录制动作的值：fill/change
+///   是录制时的真实输入——含录制器启发式漏判时落入的明文密码，一律置空；
+///   navigate 的落地页 URL 保留排障、click 无值键不动）
 /// - llm.api_key_enc / llm.api_keys_enc.*（AI 任务生成的 API key 密文，按服务商槽位）
 ///
 /// 有意保留：profile.username（诊断必需的账号线索，非密钥）、telegram.chat_id
@@ -983,6 +986,7 @@ pub const BUNDLE_SANITIZED_FIELD_PATHS: &[&str] = &[
     "settings.global.updater.proxy_url",
     "active_profile.password",
     "active_profile.network.proxy_url",
+    "active_profile.recorded_actions[].value",
     "llm.api_key_enc",
     "llm.api_keys_enc.*",
 ];
@@ -1175,6 +1179,24 @@ fn sanitize_url_field(obj: &mut serde_json::Map<String, serde_json::Value>, key:
     }
 }
 
+/// 录制动作数组的值脱敏：`fill`/`change` 的值是录制时的真实输入（含录制器
+/// 启发式漏判时落入的明文密码，见 P1-1 组合链），一律替换 [`BUNDLE_REDACTED`]；
+/// `navigate` 的落地页 URL 保留排障、`click` 无值键不动（结构保留口径同上）
+fn redact_recorded_action_values(actions: &mut [serde_json::Value]) {
+    for action in actions {
+        let Some(obj) = action.as_object_mut() else {
+            continue;
+        };
+        if !matches!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("fill") | Some("change")
+        ) {
+            continue;
+        }
+        redact_string_field(obj, "value");
+    }
+}
+
 /// 构造 `config.sanitized.json`：当前配置快照深度脱敏（纯同步，供单测直调）
 ///
 /// 结构 = `{ settings, active_profile, llm }` 三节（settings.json 全局配置 +
@@ -1242,6 +1264,9 @@ pub fn sanitize_config_snapshot(
         redact_string_field(obj, "password");
         if let Some(network) = obj.get_mut("network").and_then(|v| v.as_object_mut()) {
             sanitize_url_field(network, "proxy_url");
+        }
+        if let Some(actions) = obj.get_mut("recorded_actions").and_then(|v| v.as_array_mut()) {
+            redact_recorded_action_values(actions);
         }
     }
 
@@ -2049,6 +2074,7 @@ mod tests {
     // ============ 诊断包：脱敏 ============
 
     use crate::ai::LlmSettings;
+    use crate::config::schema::RecordedAction;
     use crate::config::{NotificationChannel, NotificationHeader, ProfileData, SettingsData};
     use crate::network::settings::{NetworkMode, NetworkSettings};
 
@@ -2067,6 +2093,12 @@ mod tests {
     const PROXY_NETWORK: &str = "http://netuser:netpass@10.0.0.8:3128";
     const AI_KEY_GLM: &str = "ENC:glm-key-cipher";
     const AI_KEY_DSK: &str = "ENC:dsk-key-cipher";
+    /// 录制 fill 值中的明文敏感输入（模拟录制器启发式漏判形态，P1-1 组合链）
+    const RECORDED_FILL_SECRET: &str = "rec-plain-pw-777";
+    /// 录制 change 值（选择项同样可能内嵌真实输入）
+    const RECORDED_CHANGE_SECRET: &str = "rec-isp-choice-888";
+    /// 录制 navigate 落地页 URL（非凭据，应保留）
+    const RECORDED_NAVIGATE_URL: &str = "http://portal.example.edu/login";
 
     fn full_sensitive_settings() -> SettingsData {
         let mut settings = SettingsData::default();
@@ -2124,6 +2156,40 @@ mod tests {
                 proxy_url: PROXY_NETWORK.into(),
                 dns_servers: Vec::new(),
             }),
+            recorded_actions: vec![
+                RecordedAction {
+                    action_type: "fill".into(),
+                    selector: "#password".into(),
+                    strategy: "id".into(),
+                    ts: 1,
+                    value: Some(RECORDED_FILL_SECRET.into()),
+                    frame: None,
+                },
+                RecordedAction {
+                    action_type: "change".into(),
+                    selector: "#isp".into(),
+                    strategy: "id".into(),
+                    ts: 2,
+                    value: Some(RECORDED_CHANGE_SECRET.into()),
+                    frame: None,
+                },
+                RecordedAction {
+                    action_type: "navigate".into(),
+                    selector: String::new(),
+                    strategy: "structure".into(),
+                    ts: 3,
+                    value: Some(RECORDED_NAVIGATE_URL.into()),
+                    frame: None,
+                },
+                RecordedAction {
+                    action_type: "click".into(),
+                    selector: "#login-btn".into(),
+                    strategy: "id".into(),
+                    ts: 4,
+                    value: None,
+                    frame: None,
+                },
+            ],
             ..ProfileData::default()
         }
     }
@@ -2164,6 +2230,8 @@ mod tests {
             "netpass",
             AI_KEY_GLM,
             AI_KEY_DSK,
+            RECORDED_FILL_SECRET,
+            RECORDED_CHANGE_SECRET,
         ] {
             assert!(
                 !text.contains(forbidden),
@@ -2176,6 +2244,15 @@ mod tests {
             BUNDLE_REDACTED
         );
         assert_eq!(value["active_profile"]["password"], BUNDLE_REDACTED);
+        // 录制动作结构保留：4 条动作齐全且 type 原样（值脱敏见专项测试）
+        let actions = value["active_profile"]["recorded_actions"]
+            .as_array()
+            .expect("录制动作数组结构保留");
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[0]["type"], "fill");
+        assert_eq!(actions[1]["type"], "change");
+        assert_eq!(actions[2]["type"], "navigate");
+        assert_eq!(actions[3]["type"], "click");
         // 网络代理走 URL 口径：userinfo 剥除、host:port 保留
         assert_eq!(
             value["active_profile"]["network"]["proxy_url"],
@@ -2247,6 +2324,46 @@ mod tests {
         assert_eq!(
             value["settings"]["global"]["browser"]["bind_proxy"],
             "http://127.0.0.1:7890/"
+        );
+    }
+
+    /// P3-18：录制动作值脱敏——fill/change 值（录制时的真实输入，含启发式
+    /// 漏判落入的明文密码）一律占位；navigate 落地页 URL 保留、click 无值键
+    /// 不动；selector/strategy 等结构字段原样保留排障
+    #[test]
+    fn 脱敏_录制动作fill_change值置占位navigate保留() {
+        let value = sanitize_config_snapshot(
+            &SettingsData::default(),
+            &full_sensitive_profile(),
+            &LlmSettings::default(),
+        );
+        let actions = value["active_profile"]["recorded_actions"]
+            .as_array()
+            .expect("录制动作数组结构保留");
+        // fill：值占位、其余字段原样
+        assert_eq!(actions[0]["value"], BUNDLE_REDACTED);
+        assert_eq!(actions[0]["selector"], "#password");
+        assert_eq!(actions[0]["strategy"], "id");
+        // change：值占位
+        assert_eq!(actions[1]["value"], BUNDLE_REDACTED);
+        // navigate：落地页 URL 非凭据，原样保留排障
+        assert_eq!(actions[2]["value"], RECORDED_NAVIGATE_URL);
+        // click：无值键保持缺失（结构口径不变）
+        assert_eq!(actions[3].get("value"), None);
+    }
+
+    /// P3-18 边界：recorded_actions 为空数组或缺失时脱敏为 no-op
+    #[test]
+    fn 脱敏_录制动作空数组与缺省不受影响() {
+        let empty = sanitize_config_snapshot(
+            &SettingsData::default(),
+            &ProfileData::default(),
+            &LlmSettings::default(),
+        );
+        // ProfileData::default 的 recorded_actions 为空数组：结构原样、无值可脱
+        assert_eq!(
+            empty["active_profile"]["recorded_actions"],
+            serde_json::json!([])
         );
     }
 
@@ -2445,6 +2562,8 @@ mod tests {
             SEND_KEY,
             TG_TOKEN,
             AI_KEY_GLM,
+            RECORDED_FILL_SECRET,
+            RECORDED_CHANGE_SECRET,
         ] {
             assert!(
                 !config.contains(forbidden),
