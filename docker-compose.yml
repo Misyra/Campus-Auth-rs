@@ -37,9 +37,11 @@ services:
       # - RUST_LOG=info
       # 可选：GitHub 代理（国内网络加速 uv/playwright 下载）
       # - GITHUB_MIRROR=https://ghproxy.example.com
-    # 健康检查（与 Dockerfile HEALTHCHECK 互补，compose 可覆盖）
+    # 健康检查（与 Dockerfile HEALTHCHECK 互补，compose 可覆盖）。CMD-SHELL 让
+    # 端口在容器运行时按 $CAMPUS_AUTH_PORT 展开（$$ 转义 compose 自身插值），
+    # 与 Dockerfile HEALTHCHECK 同口径——否则改端口后容器恒 unhealthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:50721/api/health"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${CAMPUS_AUTH_PORT:-50721}/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
