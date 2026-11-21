@@ -25,6 +25,7 @@ const {
   steps,
   skippedUnknown,
   truncated,
+  recordedCount,
   requestClose,
   startRecording,
   abandonRecording,
@@ -139,7 +140,7 @@ async function onSave(): Promise<void> {
     <div v-else class="rec-stage">
       <div v-if="truncated" class="note note--warn" data-testid="record-truncated">
         <IconApp name="alert-triangle" class="icon-sm" />
-        <span>录制的动作数超出单次上限，仅保留前 {{ steps.length }} 个动作，超出部分未记录。</span>
+        <span>录制的动作数超出单次上限，仅保留前 {{ recordedCount }} 个动作，超出部分未记录。</span>
       </div>
       <div v-if="skippedUnknown > 0" class="note note--warn" data-testid="record-skipped">
         <IconApp name="alert-triangle" class="icon-sm" />

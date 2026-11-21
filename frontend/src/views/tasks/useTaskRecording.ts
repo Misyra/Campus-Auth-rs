@@ -58,6 +58,8 @@ const steps = ref<RecordedTaskStep[]>([]);
 const skippedUnknown = ref(0);
 /** Worker 侧截断标记（动作数超出单次上限） */
 const truncated = ref(false);
+/** stop 响应的截断保留数：截断提示文案的固定口径，不随预览删步漂移（P3-27） */
+const recordedCount = ref(0);
 
 /** start 发起序号：await 返回后据此判定本轮是否仍主导状态机（被取消/被新一轮取代） */
 let startRunId = 0;
@@ -80,6 +82,7 @@ function openDialog(): void {
   steps.value = [];
   skippedUnknown.value = 0;
   truncated.value = false;
+  recordedCount.value = 0;
   open.value = true;
 }
 
@@ -196,6 +199,9 @@ async function finishRecording(): Promise<void> {
   try {
     const result = await configSessionApi.stop(profileId.value, { apply: false });
     truncated.value = result.truncated;
+    // 截断保留数取 stop 响应的 recorded_count（P3-27）：预览删步会让 steps.length
+    // 漂移，「保留前 N 个」的 N 是 Worker 落盘事实，不随列表编辑变化
+    recordedCount.value = result.recorded_count;
     const conversion = convertRecordedActions(result.recorded_actions ?? []);
     if (!conversion.ok) {
       // 空录制：apply=false 不写方案，本次会话无任何残留，直接重试即可
@@ -263,6 +269,7 @@ async function saveRecordedTask(name: string, description: string): Promise<void
     steps.value = [];
     skippedUnknown.value = 0;
     truncated.value = false;
+    recordedCount.value = 0;
   } catch (error) {
     // 保存失败停在预览态：录制内容还在，可直接重试保存
     phase.value = "preview";
@@ -279,6 +286,7 @@ export function useTaskRecording() {
     steps,
     skippedUnknown,
     truncated,
+    recordedCount,
     openDialog,
     requestClose,
     startRecording,

@@ -502,4 +502,39 @@ describe("TaskRecordingDialog", () => {
     expect(document.querySelector<HTMLInputElement>('[data-testid="record-desc"]')?.value).toBe("自定义描述");
     expect(document.querySelector('[data-testid="record-error"]')?.textContent).toContain("保存失败");
   });
+
+  it("截断提示用 stop 响应的保留数：删除步骤后文案不漂移（P3-27）", async () => {
+    stubFetch((url) => {
+      if (url.includes("/config-session/start")) {
+        return Promise.resolve(jsonResponse({ data: { started: true } }));
+      }
+      if (url.includes("/config-session/stop")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: { recorded_count: 5, truncated: true, persistent_session_enabled: false, recorded_actions: recordedActions() },
+          }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    mountDialog();
+    await flush();
+    const rec = useTaskRecording();
+    rec.profileId.value = "dorm";
+    await flush();
+    click("record-start");
+    await settle();
+    click("record-finish");
+    await settle();
+
+    // 截断提示的 N = stop 响应 recorded_count（Worker 落盘事实）
+    const note = document.querySelector('[data-testid="record-truncated"]');
+    expect(note?.textContent).toContain("仅保留前 5 个动作");
+
+    // 删除一个步骤后：列表 4 步，提示仍是「前 5 个」——N 不随编辑漂移
+    document.querySelectorAll<HTMLButtonElement>('[data-testid="record-step-remove"]')[0].click();
+    await flush();
+    expect(document.querySelectorAll('[data-testid="record-steps"] li')).toHaveLength(4);
+    expect(document.querySelector('[data-testid="record-truncated"]')?.textContent).toContain("仅保留前 5 个动作");
+  });
 });
