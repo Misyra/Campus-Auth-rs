@@ -125,8 +125,7 @@ fn spawn_recovery_watcher(deps: RecoveryDeps) -> JoinHandle<()> {
             // 依据）：Running 表示监测中，重启后需恢复；pause_active 表示监测
             // 处于暂停态（手动暂停与定时窗口的合并值，取舍见下方恢复分支）
             let snap = status.borrow();
-            let was_monitoring =
-                snap.engine_state == crate::status::EngineState::Running;
+            let was_monitoring = snap.engine_state == crate::status::EngineState::Running;
             let was_paused = snap.pause_active;
             drop(snap);
 
@@ -247,11 +246,9 @@ fn scheduled_pause_window_active(config: &Arc<ConfigService>) -> bool {
         to_time(cfg.pause.start_hour, cfg.pause.start_minute),
         to_time(cfg.pause.end_hour, cfg.pause.end_minute),
     ) {
-        (Some(start), Some(end)) => crate::notification::filter::in_quiet_window(
-            chrono::Local::now().time(),
-            start,
-            end,
-        ),
+        (Some(start), Some(end)) => {
+            crate::notification::filter::in_quiet_window(chrono::Local::now().time(), start, end)
+        }
         (None, _) | (_, None) => false,
     }
 }
@@ -320,13 +317,20 @@ mod tests {
         let mut profile = profiles.get_profile("default").unwrap();
         profile.auth_url = "http://127.0.0.1:9/login".to_string();
         profile.trigger_url = String::new();
-        profiles.update_profile("default", profile, false).await.unwrap();
+        profiles
+            .update_profile("default", profile, false)
+            .await
+            .unwrap();
 
         let status = Arc::new(StatusManager::new());
         let metrics = Metrics::new();
         let monitor = Arc::new(
-            MonitorService::new(config.clone(), Arc::new(BenignDetect), Some(metrics.clone()))
-                .unwrap(),
+            MonitorService::new(
+                config.clone(),
+                Arc::new(BenignDetect),
+                Some(metrics.clone()),
+            )
+            .unwrap(),
         );
         let history = Arc::new(LoginHistoryService::new(&base));
         let bridge = crate::bridge::BridgeSupervisor::new(
