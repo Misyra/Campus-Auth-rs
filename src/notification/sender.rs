@@ -46,6 +46,16 @@ const USER_AGENT: &str = concat!("Campus-Auth/", env!("CARGO_PKG_VERSION"));
 #[cfg(all(not(test), not(target_os = "android")))]
 const OS_NOTIFICATION_APP_NAME: &str = "认证喵";
 
+/// Windows toast 的固定 AUMID（AppUserModelID，应用归属标识）
+///
+/// Windows 侧应用归属由 AUMID 决定：notify-rust 4.x 忽略 `appname()`，`app_id`
+/// 未设置时回退 PowerShell 的 AUMID（`Toast::POWERSHELL_APP_ID`），通知便显示为
+/// 「Windows PowerShell」而非本程序（P3-36）。固定 AUMID 让归属不再指向无关
+/// 程序；无开始菜单快捷方式 / AppUserModelId 注册表登记时 Windows 以原始字符串
+/// 展示——后续若提供安装器或快捷方式，用同值登记即可升级为「认证喵」名与图标。
+#[cfg(all(not(test), windows))]
+const OS_NOTIFICATION_WINDOWS_AUMID: &str = "CampusAuth.CampusAuth";
+
 /// 测试桩：隔离 `notify-rust` 真发调用点（本机/CI 弹真通知会打扰用户）
 ///
 /// 仅测试构建存在，生产构建零开销。进程级共享状态，触碰桩的测试须先取
@@ -100,10 +110,19 @@ fn show_os_notification_blocking(title: &str, body: &str) -> Result<(), String> 
     }
     #[cfg(all(not(test), not(target_os = "android")))]
     {
-        notify_rust::Notification::new()
+        let mut notification = notify_rust::Notification::new();
+        notification
             .summary(title)
             .body(body)
-            .appname(OS_NOTIFICATION_APP_NAME)
+            .appname(OS_NOTIFICATION_APP_NAME);
+        // Windows：归属由 AUMID 决定，必须显式指定（见常量 doc）；macOS 的
+        // notify-rust 经 NSUserNotification 投递、归属取当前进程的 bundle 标识，
+        // 裸二进制（非 .app bundle 分发）下系统以 Finder 名义展示——修正需要
+        // bundle 分发（超出口径，成文不修）；Linux freedesktop 读 appname，
+        // 上方已设置
+        #[cfg(target_os = "windows")]
+        notification.app_id(OS_NOTIFICATION_WINDOWS_AUMID);
+        notification
             .show()
             .map(|_handle| ())
             .map_err(|e| format!("系统通知发送失败: {e}"))
