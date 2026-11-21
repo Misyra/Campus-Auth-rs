@@ -721,6 +721,14 @@ export interface EgressAdapter {
 export interface RecordedActionBase {
   /** 事件时间戳（毫秒；按此升序） */
   ts: number;
+  /**
+   * 动作发生时所在的 iframe CSS 选择器链（自顶向下逐层；顶层 frame 内的动作缺省）。
+   *
+   * 防御性可选字段：仅**非顶层 frame** 内捕获的动作携带（后端 `RecordedAction.frame`，
+   * 供 iframe 内录制回放的 frame 定位，与 Rust 侧 schema 契约一致）；旧后端与顶层
+   * 动作无此字段，前端转换与展示一律按缺省顶层处理，不因缺失报错。
+   */
+  frame?: string;
 }
 
 /** `click`：按钮 / 提交类点击 */
