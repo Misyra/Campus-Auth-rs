@@ -384,6 +384,10 @@ impl PasswordCrypto {
             }
             let mut arr = [0u8; KEY_LEN];
             arr.copy_from_slice(&bytes);
+            // P3-17：读取路径长度校验通过后 best-effort 收紧权限——手动把密钥
+            // 拷贝到新机器等场景会以 0644 等宽权限落盘长期可读；失败仅 warn
+            // 不阻断读取（与生成 / Python 继承两条写入路径同一口径）
+            Self::set_key_permissions(key_path);
             return Ok(Zeroizing::new(arr));
         }
         // `.enc_key.rs` 不存在：优先继承 Python 旧版密钥，避免两版各持一密钥导致
@@ -481,11 +485,12 @@ impl PasswordCrypto {
         Ok(key)
     }
 
-    /// 收紧密钥文件权限（尽力而为，失败 warn 留痕：密钥已写入，仅权限未收紧）
+    /// 收紧密钥文件权限（尽力而为，失败 warn 留痕：密钥已写入/已可读，仅权限未收紧）
     ///
     /// Unix 0600；Windows 借 icacls 移除继承权限并授予当前用户完全控制
     /// （仅授 (R) 会导致后续轮转密钥时写入被拒，需授 (F)）。
-    /// 生成与 Python 继承两条写入路径共用，避免继承路径遗漏权限收紧。
+    /// 生成与 Python 继承两条写入路径、以及既有合法密钥的读取路径（P3-17：
+    /// 手动拷贝到新机器会以宽权限落盘）共用，避免任一路径遗漏权限收紧。
     /// icacls 调用的成败必须检查：域账号解析失败等环境问题会让 ACL 收紧
     /// 静默失效，warn 留痕（含退出码）便于排查。
     fn set_key_permissions(key_path: &Path) {
@@ -788,6 +793,32 @@ mod tests {
     }
 
     // ============ 密钥文件损坏处理 ============
+
+    /// P3-17：已存在的合法密钥文件读取路径应收紧权限
+    ///
+    /// 手动拷贝密钥到新机器等场景会以 0644 宽权限落盘长期可读；读取路径
+    /// （不生成、不换钥）校验通过后 best-effort 收紧为 0600（模式照搬
+    /// web::auth 秘钥文件「覆写宽权限文件后必须收紧」的测试口径）
+    #[cfg(unix)]
+    #[test]
+    fn test_existing_key_read_path_tightens_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let key_path = tmp.path().join(".enc_key.rs");
+        // 模拟外部拷贝：直接以 0644 落盘一份长度合法的密钥
+        std::fs::write(&key_path, [7u8; KEY_LEN]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let crypto = PasswordCrypto::new(key_path.clone());
+        // 首次加解密走密钥读取路径（文件已存在且合法，不触发生成/换钥）
+        let encrypted = crypto.encrypt("secret").unwrap();
+        assert_eq!(
+            &*crypto.decrypt_to_zeroizing("p", &encrypted).unwrap(),
+            "secret"
+        );
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "读取既有合法密钥后应收紧为 0600");
+    }
 
     #[test]
     fn test_corrupt_key_file_generates_new_key() {
