@@ -195,6 +195,22 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
     Ok(data(info))
 }
 
+/// 安卓构建的端内重启/关闭拒绝文案（P2-9）：`Some` = 拒绝并返回 400，`None` = 放行
+///
+/// 桌面退出链（spawn 后继进程 + 30s exit watchdog 硬杀全进程）放在安卓上会带走
+/// 承载认证守护的前台服务、残留 `.runtime_port`，重启路径还会 spawn
+/// `app_process64 --restarting` 垃圾进程；应用的停止/重启一律经系统方式
+/// （最近任务划掉 / 系统设置强行停止），端内按钮必须拒绝。对照 uninstall /
+/// autostart 的 android 门先例。
+fn android_lifecycle_rejection() -> Option<String> {
+    if !cfg!(feature = "android") {
+        return None;
+    }
+    Some(String::from(
+        "安卓端不支持端内重启或关闭：请通过系统方式（最近任务或系统设置）停止应用",
+    ))
+}
+
 /// POST /api/system/restart — 重启应用（spawn 带 `--restarting` 的新进程后优雅退出）
 ///
 /// 新进程带 `--restarting` 标记，launcher 会先等待旧进程释放实例锁再启动，
@@ -219,6 +235,11 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
     )
 )]
 pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    // P2-9 安卓门：桌面重启链对安卓是进程级硬杀（前台服务连坐 + 端口文件残留）
+    if let Some(message) = android_lifecycle_rejection() {
+        tracing::info!("安卓构建：拒绝端内重启请求");
+        return Err(ApiError::BadRequest(message));
+    }
     if state.updater.has_pending_update() {
         // 生命周期事件：重启是关键用户操作，info 留痕（分支措辞与实际行为一致，
         // 便于从日志区分"生成后继"与"助手替换后重启"两种重启路径）
@@ -249,6 +270,11 @@ pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, A
     )
 )]
 pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    // P2-9 安卓门：exit watchdog 硬杀全进程会带走前台服务，停止应用交由系统方式
+    if let Some(message) = android_lifecycle_rejection() {
+        tracing::info!("安卓构建：拒绝端内关闭请求");
+        return Err(ApiError::BadRequest(message));
+    }
     // 生命周期事件：关闭是关键用户操作，info 留痕
     tracing::info!("收到关闭请求，开始优雅关闭");
     // 通知 launcher 开始优雅关闭
@@ -1349,6 +1375,28 @@ pub async fn stop_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P2-9 门钉住：端内重启/关闭必须且仅在 android 构建被拒
+    ///
+    /// 桌面退出链（spawn 后继 + exit watchdog）在安卓会硬杀承载前台服务的整个
+    /// 进程并残留 `.runtime_port`；移除该门会让 android 构建静默走桌面退出路径，
+    /// 此处以纯函数断言把「feature → 门」的映射锁定，供 `--features android`
+    /// 构建复核（桌面测试恒验证放行分支）
+    #[test]
+    fn android_gate_rejects_in_app_restart_shutdown() {
+        let rejection = android_lifecycle_rejection();
+        assert_eq!(
+            rejection.is_some(),
+            cfg!(feature = "android"),
+            "端内重启/关闭门必须且仅在 android 构建生效"
+        );
+        if let Some(message) = rejection {
+            assert!(
+                message.contains("系统方式"),
+                "拒绝文案须指明经系统方式停止应用: {message}"
+            );
+        }
+    }
 
     /// `/api/browsers` 的 custom 条目必须反映真实可用性
     ///
