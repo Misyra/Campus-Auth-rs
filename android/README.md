@@ -58,17 +58,19 @@ object AuthNative {
     init { System.loadLibrary("campus_auth") }
     external fun nativeInit(baseDir: String): Int   // 返回端口，0 = 失败
     external fun nativePort(): Int
+    external fun nativeBootstrapSecret(): String?  // 界面 #auth= 引导秘钥；未初始化/缺失返回 null
     external fun nativeStatus(): String             // JSON
-    external fun nativeStop(): Int
+    external fun nativeStop(): Int                  // 异步受理：非 0 = 已请求停止，0 = 受理失败
 }
 ```
 
 Rust 实现侧须知：
 
 - 这些是 Kotlin `object` 的**实例方法**（非 `@JvmStatic`），JNI 符号按实例方法约定：`Java_rs_campusauth_app_AuthNative_<方法名>(JNIEnv*, jobject, ...)`；
-- `nativeInit` 必须幂等：核心已运行时直接返回现有端口，不得重复起服务（Activity 重建会再次调用）；
-- `nativePort` / `nativeStatus` / `nativeStop` 必须容忍「未初始化」状态（返回 0 / 占位 JSON / 0）——开机自启路径会先拉起前台服务轮询状态，`nativeInit` 要等用户打开 App 才执行；
-- `baseDir` 为应用私有目录（`filesDir`），核心的运行时目录布局（config / tasks / events 等）应挂在其下。
+- `nativeInit` 必须幂等：核心已运行时直接返回现有端口，不得重复起服务（Activity 重建会再次调用）；停止后再次调用会重新引导（生命周期可重启）；
+- `nativePort` / `nativeStatus` / `nativeBootstrapSecret` / `nativeStop` 必须容忍「未初始化」状态（返回 0 / 占位 JSON / null / 幂等受理）——开机自启路径会先拉起前台服务轮询状态，`nativeInit` 要等用户打开 App 才执行；
+- `baseDir` 为应用私有目录（`filesDir`），核心的运行时目录布局（config / tasks / events 等）应挂在其下；
+- `nativeStop` 为**异步受理**：转交后台执行全链优雅关闭后立即返回，调用方（前台服务 onDestroy 的主线程）不得假设关闭已完成。
 
 ## 前台服务（specialUse）与保活
 
@@ -85,7 +87,8 @@ Rust 实现侧须知：
 ## 已知限制（P0）
 
 - **核心初始化只在 MainActivity**：开机自启仅拉起服务壳，通知显示「核心初始化中」直到用户打开一次 App；TODO(P2) 评估把 `nativeInit` 下沉到服务侧（需 Rust 侧保证幂等）。
-- **`#auth=` fragment 语义偏差**：前端该 fragment 的既有契约是 bootstrap 秘钥（经 `/api/auth/exchange` 换取），而会话 token 恰好也是 64 位 hex，放进 fragment 会被前端先误判为秘钥发起一次必败的 exchange（401），随后自动回落 local-token 免引导兜底——行为正确但多一次往返；TODO(P1) 与前端定稿 token 注入的正式通道。
 - 通知小图标临时借用平台 `android.R.drawable.stat_notify_sync`，TODO(P1) 换正式应用图标（含 launcher icon）。
 - `nativeStatus()` 的 JSON 字段未定稿，通知文案 P0 尽力取 `status` 字段、取不到原样截断展示。
 - 未做四端同版机制（与 `Cargo.toml` / `frontend/package.json` / `openapi.json` 的版本联动），TODO(P3)。
+
+> 「`#auth=` fragment 语义偏差」限制已随 P2-11 收敛移除：界面引导统一走前端既有 bootstrap 契约（MainActivity 经 `nativeBootstrapSecret()` 读取秘钥拼 fragment），Rust 侧同步关闭回环 local-token 免引导端点（Android 回环为全设备应用共享，免引导等于向任意第三方 App 发放 token）。

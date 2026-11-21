@@ -26,6 +26,13 @@ object AuthNative {
     /** 当前 axum 监听端口；未初始化时返回 0 */
     external fun nativePort(): Int
 
+    /**
+     * 界面引导（bootstrap）秘钥，用于拼 `#auth=<secret>` fragment 经前端
+     * exchange 换取 token——安卓构建已关闭 local-token 免引导端点（回环为
+     * 全设备应用共享，本地免引导不再成立）；未初始化 / 文件缺失时返回 null
+     */
+    external fun nativeBootstrapSecret(): String?
+
     /** 核心状态快照，JSON 字符串（字段契约 TODO(P1) 与 Rust 侧定稿） */
     external fun nativeStatus(): String
 

@@ -9,6 +9,8 @@
 //!   后台任务 → Axum serve → Engine 启动动作」，启动语义为桌面 launcher 完整模式
 //!   的子集；实例锁 / Engine 崩溃恢复（engine_watch）/ 定时自重启 / 后台更新检查
 //!   均未纳入，见各 TODO(P1)。
+//! - JNI 面：nativeInit / nativePort / nativeStatus / nativeStop /
+//!   nativeBootstrapSecret（P2-11 起 WebView 界面的 `#auth=` 引导秘钥来源）。
 //! - 生命周期（P2-12 收敛）：`init → 运行 → stop` 单程语义改为**可重启**——
 //!   nativeStop 异步受理（取走实例转交 runtime 后立即返回，不在 FGS onDestroy
 //!   的主线程上同步等待全链优雅关闭），再次 nativeInit 先等上一轮关闭彻底完成
@@ -45,6 +47,8 @@ const STATUS_PLACEHOLDER: &str = r#"{"ok":true}"#;
 
 /// Android 实例运行态：nativeInit 成功后驻留 [`INSTANCE`]，nativeStop 取出并逆序关闭
 struct AndroidInstance {
+    /// 运行时 base 目录（安卓应用 filesDir）：nativeBootstrapSecret 等二次查询的来源
+    base_path: std::path::PathBuf,
     /// Axum 实际监听端口（prepare_axum_listener 绑定结果；默认端口被占时由内核分配回退）
     port: u16,
     /// 应用级关闭令牌（容器内 uptime / 登录 shutdown 均为其 child，取消即联动传播）
@@ -248,6 +252,38 @@ pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeStatus(
     }
 }
 
+/// 读取界面引导（bootstrap）秘钥（`config/.auth_bootstrap` 内容），未初始化 /
+/// 文件缺失 / 损坏时返回 null
+///
+/// P2-11：安卓构建已关闭回环 local-token 免引导端点（`web::auth` 的
+/// `local_token_allowed` 恒 false——Android 的 127.0.0.1 为全设备应用共享，
+/// 免引导等于向同设备任意第三方应用发放 token），WebView 界面的 token 引导
+/// 收敛到既有 `#auth=<bootstrap>` fragment 通道：Kotlin 在 nativeInit 成功后
+/// 调本入口取秘钥拼 `http://127.0.0.1:<port>/#auth=<secret>`，前端 exchange
+/// 握手零改动。与桌面托盘/launcher 的 `read_bootstrap_file` 同源。
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeBootstrapSecret(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let secret = lock_instance()
+        .as_ref()
+        .and_then(|instance| crate::web::auth::read_bootstrap_file(&instance.base_path));
+    let Some(secret) = secret else {
+        // 未初始化 / 秘钥文件缺失或损坏：返回 null，Kotlin 侧回退不带 fragment
+        // 的普通 URL（界面会显示引导失败态）
+        return std::ptr::null_mut();
+    };
+    match env.new_string(secret.as_str()) {
+        // into_raw 把 local reference 交给 JVM 管理（本函数返回值即该引用）
+        Ok(s) => s.into_raw(),
+        Err(e) => {
+            eprintln!("{FFI_LOG_TAG} nativeBootstrapSecret 创建 jstring 失败: {e}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// 请求停止控制平面（1 = 已受理或本就未运行，0 = 受理失败）
 ///
 /// **异步受理**（P2-12）：取走实例槽位后把全链优雅关闭转交 tokio runtime，
@@ -377,6 +413,7 @@ async fn bootstrap_android(base_path: &Path) -> anyhow::Result<AndroidInstance> 
             .map_err(|e| anyhow::anyhow!("Web 控制台启动失败: {e}"))?;
         tracing::info!(port, "Web 控制台已启动: http://127.0.0.1:{port}");
         Ok(AndroidInstance {
+            base_path: base_path.to_path_buf(),
             port,
             shutdown_token: shutdown_token.clone(),
             startup: Some(startup),

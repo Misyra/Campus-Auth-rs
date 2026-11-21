@@ -20,6 +20,12 @@
 //!   （默认 Docker compose 即此形态：容器内绑 0.0.0.0、宿主只发布到
 //!   127.0.0.1——服务端无法区分宿主与局域网的流量，信任边界由部署方声明）；
 //!   未豁免的远程仍只认管理密码，不存在远程免鉴权发 token 的入口；
+//!   **安卓例外（P2-11，2026-11-21）**：上述取舍的前提是「回环连接方 ≈ 同
+//!   用户本地进程」；Android 的 127.0.0.1 是全设备应用共享的地址空间，「同机
+//!   进程」扩为「同设备应用全集」，任意第三方 App 无需权限即可取 token——
+//!   android 构建下本端点恒 404，WebView 界面改经 `#auth=<bootstrap>`
+//!   fragment 引导（Kotlin 经 JNI `nativeBootstrapSecret` 读秘钥拼 URL，见
+//!   `src/ffi_android.rs`），前端 exchange 通道零改动；
 //! - 界面 URL 仍以 `#auth=<bootstrap>` fragment 携带握手秘钥（fragment 不会被
 //!   浏览器发往服务器、不进服务器日志）；前端经 `POST /api/auth/exchange`
 //!   用 bootstrap 换 token，随后应自行清除地址栏 fragment（本地首次打开失败
@@ -280,7 +286,16 @@ pub struct ExchangeBody {
 /// 后者（`--allow-unauthenticated-bind`）服务的是「容器内绑 0.0.0.0、宿主只发布到
 /// 127.0.0.1」的默认 Docker 部署：容器里看不到宿主端口映射，无法自行区分宿主回环
 /// 与局域网访问，只能由部署方显式声明信任边界。把端口发布到 LAN 时必须去掉该豁免。
+///
+/// **安卓构建恒 false（P2-11）**：桌面回环取舍的信任前提是「回环连接方 ≈ 同用户
+/// 本地进程」；Android 的 127.0.0.1 为全设备应用共享，任意第三方 App 无需权限即可
+/// 连上拿 token（配合 `/api/scripts/run` 即任意脚本执行），「同机进程」在安卓语境
+/// 扩为「同设备应用全集」——本地免引导不再成立，界面引导收敛到
+/// `#auth=<bootstrap>` fragment（见模块文档安卓例外条）。
 fn local_token_allowed(policy: HostPolicy, allow_unauthenticated_bind: bool) -> bool {
+    if cfg!(feature = "android") {
+        return false;
+    }
     policy == HostPolicy::LoopbackOnly || allow_unauthenticated_bind
 }
 
@@ -288,7 +303,9 @@ fn local_token_allowed(policy: HostPolicy, allow_unauthenticated_bind: bool) -> 
 ///
 /// 取舍见模块文档：回环绑定视为「本机可信」（与能读配置/执行脚本的同用户权限
 /// 等价）；非回环且未显式豁免时一律 404——远程仍只认管理密码，不存在
-/// 远程免鉴权入口。响应同样是 `{"data":{"token":"..."}}` + `Cache-Control: no-store`。
+/// 远程免鉴权入口。android 构建同样 404（信任边界重裁，见
+/// [`local_token_allowed`]）。响应为 `{"data":{"token":"..."}}` +
+/// `Cache-Control: no-store`。
 pub async fn local_token_handler(State(state): State<AppState>) -> Response {
     if !local_token_allowed(state.host_policy, state.allow_unauthenticated_bind) {
         return error_response(
@@ -545,12 +562,22 @@ mod tests {
         assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
-    /// 本地代发端点：回环监听，或显式豁免无凭据的非回环绑定（Docker 默认 compose）
+    /// 本地代发端点：桌面构建回环监听 / 显式豁免可用；安卓构建恒关闭（P2-11）
+    ///
+    /// 安卓回环为全设备应用共享，「本机可信」取舍不随平台成立——见
+    /// `local_token_allowed` 文档；`--features android` 构建下两端点形态均须拒绝
     #[test]
     fn test_local_token_allowed() {
-        assert!(local_token_allowed(HostPolicy::LoopbackOnly, false));
-        assert!(!local_token_allowed(HostPolicy::AllowAny, false));
-        assert!(local_token_allowed(HostPolicy::AllowAny, true));
+        if cfg!(feature = "android") {
+            // P2-11：回环与显式豁免一律关闭，第三方 App 无免鉴权取 token 入口
+            assert!(!local_token_allowed(HostPolicy::LoopbackOnly, false));
+            assert!(!local_token_allowed(HostPolicy::AllowAny, false));
+            assert!(!local_token_allowed(HostPolicy::AllowAny, true));
+        } else {
+            assert!(local_token_allowed(HostPolicy::LoopbackOnly, false));
+            assert!(!local_token_allowed(HostPolicy::AllowAny, false));
+            assert!(local_token_allowed(HostPolicy::AllowAny, true));
+        }
     }
 
     /// query 参数提取：正常 / 缺失 / 空 / 多参数混合

@@ -16,17 +16,16 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import java.net.HttpURLConnection
-import java.net.URL
-import org.json.JSONObject
 import kotlin.concurrent.thread
 
 /**
  * 主界面：系统 WebView 加载本机 axum 服务，展示既有 Vue 前端。
  *
- * 启动顺序（P0）：请求通知运行时权限 → 拉起前台服务 → [AuthNative.nativeInit]
- * 拿监听端口 → 后台线程同步 GET `/api/auth/local-token` 取 token → 带 `#auth=`
- * fragment 打开界面。
+ * 启动顺序：请求通知运行时权限 → 拉起前台服务 → 后台线程 [AuthNative.nativeInit]
+ * 拿监听端口（前置②：Rust 契约明示数秒量级，主线程同步调用会 ANR 并推迟
+ * startForeground 出系统窗口）→ 经 JNI 读取 bootstrap 秘钥 → 回主线程带
+ * `#auth=` fragment 打开界面（P2-11：安卓回环为全设备应用共享，local-token
+ * 免引导端点已在 Rust 侧关闭，引导改走前端既有 exchange 握手通道）。
  *
  * 本界面不管理核心生命周期：前台服务独立于 UI 存活，onDestroy 只销毁 WebView、
  * 不停服务。
@@ -54,18 +53,9 @@ class MainActivity : Activity() {
         // 2) 先拉起前台服务：服务独立于本界面存活，先于核心初始化就位
         ContextCompat.startForegroundService(this, Intent(this, AuthForegroundService::class.java))
 
-        // 3) 初始化 Rust 核心，拿到 axum 监听端口
-        //    P0 在主线程同步调用：预期核心启动耗时毫秒级；若日后变重需移后台线程
-        val port = AuthNative.nativeInit(filesDir.absolutePath)
-        if (port <= 0) {
-            showCoreError()
-            return
-        }
-        // 核心就绪后服务才开始轮询状态，避免对未初始化的 native 层空转
-        AuthForegroundService.markNativeReady()
-
-        // 4) 后台线程取 token，取到后回 UI 线程加载界面
-        fetchTokenAndLoad(port)
+        // 3) 初始化 Rust 核心：后台线程执行（前置②），完成后回 UI 线程经
+        //    #auth fragment 加载界面
+        initCoreAndLoad()
     }
 
     /** WebView 基础配置：仅 JS + DOM 存储；不加载 file:// 页面，不开文件访问 */
@@ -97,38 +87,42 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 后台线程同步取 token（兼作服务就绪探针），回 UI 线程加载界面 */
-    private fun fetchTokenAndLoad(port: Int) {
-        thread(start = true, name = "local-token-fetch") {
-            val token = fetchLocalToken(port)
+    /**
+     * 后台线程初始化核心，完成后回主线程经 `#auth=<bootstrap>` fragment 加载界面
+     *
+     * 前置②：nativeInit 为数秒量级的同步调用，必须离开主线程；失败时同样回
+     * 主线程展示错误页（不更新 UI 的后台线程直接 return）
+     */
+    private fun initCoreAndLoad() {
+        thread(start = true, name = "core-init") {
+            val port = try {
+                AuthNative.nativeInit(filesDir.absolutePath)
+            } catch (_: Throwable) {
+                // .so 缺失（UnsatisfiedLinkError）等 JNI 层异常按启动失败处理
+                0
+            }
+            if (port <= 0) {
+                runOnUiThread { if (!isFinishing && !isDestroyed) showCoreError() }
+                return@thread
+            }
+            // 核心就绪后前台服务才开始轮询状态，避免对未初始化的 native 层空转；
+            // 仅 volatile 写，可安全地在后台线程执行
+            AuthForegroundService.markNativeReady()
+            // P2-11：安卓构建已关闭 local-token 免引导端点（回环为全设备应用
+            // 共享，免引导等于向任意第三方 App 发放 token），界面引导改经 JNI
+            // 读取 bootstrap 秘钥拼 #auth fragment——前端既有 exchange 通道零改动
+            val secret = try {
+                AuthNative.nativeBootstrapSecret()
+            } catch (_: Throwable) {
+                null
+            }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                // TODO(P1) 契约澄清：`#auth=` 的既有语义是 bootstrap 秘钥（64hex，经
-                //  /api/auth/exchange 换取），会话 token 放进去会被前端误判为秘钥并
-                //  先尝试一次必败的 exchange（401），随后自动回落 local-token 免引导
-                //  兜底——行为正确但多一次往返。与前端定稿 token 注入的正式通道后调整。
-                val fragment = if (token != null) "#auth=$token" else ""
+                // 秘钥读取失败（理论上 init 成功后不会发生）：退化为无 fragment
+                // 打开，前端会呈现引导失败态并给出粘贴秘钥的恢复入口
+                val fragment = if (!secret.isNullOrEmpty()) "#auth=$secret" else ""
                 webView.loadUrl("http://127.0.0.1:$port/$fragment")
             }
-        }
-    }
-
-    /** 同步 GET /api/auth/local-token（响应 `{"data":{"token":"..."}}`）；失败返回 null */
-    private fun fetchLocalToken(port: Int): String? {
-        var connection: HttpURLConnection? = null
-        return try {
-            connection =
-                URL("http://127.0.0.1:$port/api/auth/local-token").openConnection() as HttpURLConnection
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            connection.requestMethod = "GET"
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            JSONObject(body).optJSONObject("data")?.optString("token")?.takeIf { it.isNotEmpty() }
-        } catch (_: Exception) {
-            // 服务未就绪 / 响应异常：不阻塞界面加载，前端回环下会自行取用 token
-            null
-        } finally {
-            connection?.disconnect()
         }
     }
 
