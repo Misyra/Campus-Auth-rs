@@ -419,9 +419,10 @@ struct MacTrayState {
     /// 字段仅承担保命职责、不做业务读取，dead_code 豁免即为此）
     #[allow(dead_code)]
     menu_items: Vec<Box<dyn IsMenuItem>>,
-    /// 运行态图标（绿色）
+    /// 运行态图标（品牌黑猫剪影；macOS template 渲染下按系统深浅显黑/白）
     active_icon: Option<Icon>,
-    /// 停止态图标（灰色）
+    /// 停止态图标（灰色变体；仅 Windows / Linux 起视觉区分作用，macOS
+    /// template 渲染只取 alpha、与运行态同观感）
     inactive_icon: Option<Icon>,
     /// 「状态」信息行（动态改文本）
     status_item: MenuItem,
@@ -533,6 +534,12 @@ fn build_mac_tray_on_main(status: Arc<StatusManager>, action_tx: mpsc::Sender<Tr
     let built = match active_icon.as_ref() {
         Some(icon) => TrayIconBuilder::new()
             .with_icon(icon.clone())
+            // 菜单栏图标走系统模板渲染：AppKit 只取 alpha 填色，浅色菜单栏
+            // 显黑、深色自动显白。品牌图标是纯黑剪影，非模板下发灰且深色
+            // 菜单上近乎不可见（2026-11-22 真机目检反馈「图标有点灰」，即
+            // 停止态灰图标的观感）；运行/停止语义由菜单状态行与 tooltip
+            // 表达，不依赖图标颜色
+            .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .with_tooltip("认证喵 Campus-Auth")
             .build(),
