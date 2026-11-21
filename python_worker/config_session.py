@@ -96,6 +96,8 @@ _RECORDER_SELECTOR_MAX_CHARS = 512
 # - 文本输入录为 fill：密码框值恒替换为 {{PASSWORD}} 占位符（绝不捕获真实
 #   输入值，密码永不落明文），用户名启发式命中的框恒替换为 {{USERNAME}}，
 #   其余文本框录实际值字面量（空值不上报）；contenteditable 可忽略不录；
+#   密码框判定覆盖 autocomplete 含 password 的自绘形态（type=text），且
+#   首判结果在录制会话内对该元素锁定（防「显示密码」开关中途切换 type）；
 # - 每个新文档（主框架、非 about:blank）上报一条 navigate 导航标记
 #   （value=location.href，selector 恒为空串），回放侧跳过与门户地址相同的
 #   首条（门户页由回放主流程先行打开）；
@@ -203,8 +205,9 @@ _RECORDER_JS_TEMPLATE = r"""
   };
 
   // ── 文本输入捕获（fill）──
-  // 密码框值恒为占位符（绝不捕获真实输入值，密码永不落明文）；用户名启发式
-  // 命中的框恒为 {{USERNAME}}（凭据不在页面明文里留痕）；其余文本框录实际值。
+  // 密码框值恒为占位符（绝不捕获真实输入值，密码永不落明文）——判定含
+  // autocomplete 形态并在会话内锁定首判结果；用户名启发式命中的框恒为
+  // {{USERNAME}}（凭据不在页面明文里留痕）；其余文本框录实际值。
   const TEXT_TYPES = ["text", "password", "tel", "email", "number", "search", "url"];
   const usernameRe = new RegExp("(" + USERNAME_HINTS.join("|") + ")", "i");
   const isTextField = (el) => {
@@ -224,9 +227,36 @@ _RECORDER_JS_TEMPLATE = r"""
     }
     return false;
   };
+  // 密码框判定扩展到 type 之外：自绘密码框常为 type=text +
+  // autocomplete="current-password"/"new-password"（无 type=password 可依赖）。
+  // autocomplete 值含 password 一律按密码框对待（大小写不敏感、子串语义——
+  // token 前后缀变体全覆盖）：宁可多录一个占位符，也不让真密码以字面量落盘
+  const isPasswordField = (el) => {
+    if ((el.getAttribute("type") || "").toLowerCase() === "password") return true;
+    return (el.getAttribute("autocomplete") || "").toLowerCase().indexOf("password") !== -1;
+  };
+  // 首判锁定（WeakMap，录制会话内对该元素恒定）：防「显示密码」开关中途切换
+  // ——首判为密码框的元素，type 被切成 text 后仍保持占位符，真值不再进入录制。
+  // 反向迟到升级：首判为字面量的元素中途切成密码形态（type/autocomplete 被
+  // 门户 JS 改写）时按当前形态升为占位符——同一输入会话取最终值时，早前字面量
+  // 已被占位符顶替（Python 侧同目标 fill 合并取最终值）
+  const fillKindCache = new WeakMap();
+  const classifyFill = (el) => {
+    let kind = fillKindCache.get(el);
+    if (kind === undefined) {
+      kind = isPasswordField(el) ? "password" : (isUsernameField(el) ? "username" : "literal");
+      fillKindCache.set(el, kind);
+    }
+    if (kind === "literal" && isPasswordField(el)) {
+      kind = "password";
+      fillKindCache.set(el, kind);
+    }
+    return kind;
+  };
   const fillValueFor = (el) => {
-    if ((el.getAttribute("type") || "").toLowerCase() === "password") return PASSWORD_VALUE;
-    if (isUsernameField(el)) return USERNAME_VALUE;
+    const kind = classifyFill(el);
+    if (kind === "password") return PASSWORD_VALUE;
+    if (kind === "username") return USERNAME_VALUE;
     return el.value || "";
   };
 

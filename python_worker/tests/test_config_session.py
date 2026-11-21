@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -600,10 +603,16 @@ def test_recorder_js_fill_capture_scope():
     js = build_recorder_init_script()
     assert f'const PASSWORD_VALUE = "{RECORDER_PLACEHOLDER_PASSWORD}";' in js
     assert f'const USERNAME_VALUE = "{RECORDER_PLACEHOLDER_USERNAME}";' in js
-    # 密码分支先于字面值读取：password 框的 el.value 永远不会进入 fill 载荷
-    assert (
-        '(el.getAttribute("type") || "").toLowerCase() === "password") return PASSWORD_VALUE;'
-    ) in js
+    # 密码判定先于字面值读取且覆盖 autocomplete 形态（自绘密码框 type=text）：
+    # isPasswordField 命中即返回占位符，el.value 永远不会进入 fill 载荷
+    assert "const isPasswordField = (el) => {" in js
+    assert '=== "password") return true;' in js
+    assert '(el.getAttribute("autocomplete") || "").toLowerCase().indexOf("password") !== -1' in js
+    # 首判锁定（WeakMap）：「显示密码」开关中途把 type 切成 text 后仍保持占位符
+    assert "const fillKindCache = new WeakMap();" in js
+    assert 'kind = isPasswordField(el) ? "password"' in js
+    # 迟到升级：首判为字面量的元素中途切成密码形态时升为占位符
+    assert 'if (kind === "literal" && isPasswordField(el)) {' in js
     # 文本类 type 词表 + textarea；checkbox/radio/file/hidden 等非文本类不录
     assert '"text", "password", "tel", "email", "number", "search", "url"' in js
     assert 'el.tagName === "TEXTAREA"' in js
@@ -972,3 +981,220 @@ def test_recorder_js_delete_wiring_and_server_sync():
     assert "if (window.top !== window) return;" in js
     # pending fill 条目随输入实时更新最终值
     assert "if (pendingFill.panelEntry) pendingFill.panelEntry.value = value;" in js
+
+
+# ── 录制器 JS 行为测试（Node 基座：最小 DOM/window 桩执行注入脚本）──
+#
+# 字符串断言只能钉住代码形状，防抖结算、密码首判锁定这类**行为**需要真执行
+# 注入脚本。基座只实现录制器触达的最小面（面板挂载推迟到 DOMContentLoaded、
+# 永不触发；navigate 上报以 about:blank 关掉），事件由场景代码手动派发，
+# binding 上报整体捕获后回 Python 断言。无 Node 环境跳过（对齐
+# test_task_recorder_contract 的守卫模式）。
+
+_RECORDER_JS_STUBS = r"""
+const listeners = {};
+const payloads = [];
+globalThis.window = {
+  top: null,
+  parent: null,
+  frameElement: null,
+  addEventListener(type, cb) { (listeners[type] = listeners[type] || []).push(cb); },
+};
+window["__campusRecordAction"] = (json) => {
+  payloads.push(JSON.parse(json));
+  return [];
+};
+__WINDOW_TOPOLOGY__
+globalThis.document = {
+  readyState: "loading",
+  addEventListener(type, cb) { (listeners[type] = listeners[type] || []).push(cb); },
+  getElementById() { return null; },
+  createElement() { return null; },
+  body: null,
+  documentElement: null,
+};
+globalThis.location = { href: "about:blank" };
+
+function makeEl(overrides) {
+  const el = {
+    nodeType: 1,
+    tagName: "INPUT",
+    id: "",
+    name: "",
+    textContent: "",
+    attrs: {},
+    value: "",
+    children: [],
+    parentElement: null,
+    getAttribute(key) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, key) ? this.attrs[key] : null;
+    },
+    closest() { return null; },
+    contains() { return false; },
+  };
+  return Object.assign(el, overrides || {});
+}
+
+// depth 层元素链（叶 + 包裹层）+ body 根：structure 策略测试用
+function makeTree(depth, leafOverrides) {
+  let node = makeEl(leafOverrides);
+  const leaf = node;
+  for (let i = 1; i < depth; i++) {
+    const parent = makeEl({ tagName: "DIV" });
+    parent.children = [node];
+    node.parentElement = parent;
+    node = parent;
+  }
+  const body = makeEl({ tagName: "BODY" });
+  body.children = [node];
+  node.parentElement = body;
+  return { leaf, body };
+}
+
+function fire(type, ev) {
+  (listeners[type] || []).forEach((cb) => cb(ev));
+}
+
+function inputEvent(el) {
+  return { target: el, composedPath: () => [el] };
+}
+"""
+
+# 顶层 frame 默认拓扑；iframe 场景由测试改写（window.top/parent/frameElement）
+_RECORDER_JS_TOPOLOGY_TOP = "window.top = window;\nwindow.parent = window;"
+
+_RECORDER_JS_EPILOGUE = "console.log(JSON.stringify(payloads));\nprocess.exit(0);\n"
+
+
+def _run_recorder_js(scenario: str, *, topology: str = _RECORDER_JS_TOPOLOGY_TOP) -> list:
+    """Node 基座执行录制器 init 脚本 + 场景代码，返回 binding 捕获的上报列表。"""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("当前环境未安装 Node.js（录制器 JS 行为测试需要）")
+    harness = "\n".join((
+        _RECORDER_JS_STUBS.replace("__WINDOW_TOPOLOGY__", topology),
+        build_recorder_init_script(),
+        scenario,
+        _RECORDER_JS_EPILOGUE,
+    ))
+    with tempfile.TemporaryDirectory(prefix="recorder-js-") as tmpdir:
+        harness_path = Path(tmpdir) / "recorder_harness.js"
+        harness_path.write_text(harness, encoding="utf-8")
+        result = subprocess.run(
+            [node, str(harness_path)], capture_output=True, text=True, check=False,
+        )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return json.loads(result.stdout.strip())
+
+
+def _fill_payloads(payloads: list) -> list:
+    return [p for p in payloads if p["type"] == "fill"]
+
+
+def test_recorder_username_hints_exclude_password_terms():
+    """用户名关键词表不得包含 password/pwd——命中会把密码框错判成用户名占位符的邻域。"""
+    lowered = " ".join(RECORDER_USERNAME_HINTS).lower()
+    assert "password" not in lowered
+    assert "pwd" not in lowered
+
+
+def test_recorder_js_autocomplete_password_field_records_placeholder(tmp_path):
+    """autocomplete 密码框（type=text 自绘形态）录占位符，真实值不进 fill 载荷。"""
+    payloads = _run_recorder_js(
+        "const pwd = makeEl({ id: 'pwd', attrs: { type: 'text', autocomplete: 'Current-Password' } });"
+        "pwd.value = 'real-secret-1';"
+        "fire('input', inputEvent(pwd));"
+        "fire('blur', { target: pwd });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1
+    assert fills[0]["value"] == RECORDER_PLACEHOLDER_PASSWORD
+    assert all(p.get("value") != "real-secret-1" for p in payloads)
+
+
+def test_recorder_js_new_password_autocomplete_records_placeholder():
+    """autocomplete="new-password" 同样命中（改密场景的自绘密码框）。"""
+    payloads = _run_recorder_js(
+        "const pwd = makeEl({ id: 'pwd', attrs: { type: 'text', autocomplete: 'new-password' } });"
+        "pwd.value = 'new-pass-2';"
+        "fire('input', inputEvent(pwd));"
+        "fire('blur', { target: pwd });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1
+    assert fills[0]["value"] == RECORDER_PLACEHOLDER_PASSWORD
+
+
+def test_recorder_js_type_switch_mid_session_keeps_placeholder():
+    """「显示密码」开关中途把 type 切成 text：首判锁定的密码框仍录占位符。
+
+    同一输入会话（防抖窗口内）后续按键合并取最终值——最终值必须仍是占位符，
+    补输的真实后缀不得以字面量进入任何 fill 载荷。
+    """
+    payloads = _run_recorder_js(
+        "const pwd = makeEl({ id: 'pwd', attrs: { type: 'password' } });"
+        "pwd.value = 'sec';"
+        "fire('input', inputEvent(pwd));"
+        # 「显示密码」开关：type 被切成 text 后继续补输
+        "pwd.attrs.type = 'text';"
+        "pwd.value = 'sec-ret';"
+        "fire('input', inputEvent(pwd));"
+        "fire('blur', { target: pwd });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1, "同目标连续 fill 合并为一条"
+    assert fills[0]["value"] == RECORDER_PLACEHOLDER_PASSWORD
+    assert all(p.get("value") not in ("sec", "sec-ret") for p in payloads)
+
+
+def test_recorder_js_first_judgment_lock_survives_attr_removal():
+    """首判锁定的密码框即使 type/autocomplete 全被移除也保持占位符。"""
+    payloads = _run_recorder_js(
+        "const pwd = makeEl({ id: 'pwd', attrs: { type: 'password', autocomplete: 'current-password' } });"
+        "pwd.value = 'x';"
+        "fire('input', inputEvent(pwd));"
+        "delete pwd.attrs.type;"
+        "delete pwd.attrs.autocomplete;"
+        "pwd.value = 'leak-attempt';"
+        "fire('input', inputEvent(pwd));"
+        "fire('blur', { target: pwd });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1
+    assert fills[0]["value"] == RECORDER_PLACEHOLDER_PASSWORD
+    assert all(p.get("value") != "leak-attempt" for p in payloads)
+
+
+def test_recorder_js_late_password_shape_upgrade_records_placeholder():
+    """迟到升级：首判为字面量的元素中途切成密码形态 → 会话最终值升为占位符。"""
+    payloads = _run_recorder_js(
+        "const late = makeEl({ id: 'late', attrs: {} });"
+        "late.value = 'first-chars';"
+        "fire('input', inputEvent(late));"
+        # 门户 JS 中途把字段切成密码形态
+        "late.attrs.type = 'password';"
+        "late.value = 'rest-of-secret';"
+        "fire('input', inputEvent(late));"
+        "fire('blur', { target: late });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1, "同目标连续 fill 合并取最终值"
+    assert fills[0]["value"] == RECORDER_PLACEHOLDER_PASSWORD
+
+
+def test_recorder_js_username_and_literal_fields_unaffected():
+    """启发式补洞不影响既有口径：用户名框录 {{USERNAME}}、普通框录字面值。"""
+    payloads = _run_recorder_js(
+        "const user = makeEl({ id: 'user', name: 'username' });"
+        "user.value = 'student-001';"
+        "fire('input', inputEvent(user));"
+        "fire('blur', { target: user });"
+        "const plain = makeEl({ id: 'search' });"
+        "plain.value = 'hello';"
+        "fire('input', inputEvent(plain));"
+        "fire('blur', { target: plain });"
+    )
+    fills = _fill_payloads(payloads)
+    assert [f["value"] for f in fills] == [
+        RECORDER_PLACEHOLDER_USERNAME, "hello",
+    ]
