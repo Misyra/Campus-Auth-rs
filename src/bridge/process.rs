@@ -488,13 +488,34 @@ fn extract_leading_id(head: &str) -> Option<u64> {
     head[start..i].parse().ok()
 }
 
+/// 超长行前缀提取请求 id 时扫描的字节数上限（G18，仿 Worker 侧同款口径）
+const OVERSIZED_HEAD_SCAN_LEN: usize = 512;
+
+/// 计算超长行前缀的 UTF-8 安全截断长度（P3-6）
+///
+/// 512B 截断点可能落在多字节 UTF-8 字符中间（长录制响应含中文 selector 是
+/// 现实场景）：回退到字符边界后再解码，避免 `from_utf8` 整行硬失败——
+/// `id` 位于行首 ASCII 前缀，回退至多损失 3 字节尾字符，可提取信息无损。
+fn utf8_safe_head_len(prefix: &[u8]) -> usize {
+    let mut end = prefix.len().min(OVERSIZED_HEAD_SCAN_LEN);
+    // 回退到 UTF-8 字符边界（字节口径）：边界位置的下一字节不是多字节
+    // 序列的续字节（10xxxxxx）；切片末尾视为边界——前缀本身截断在字符
+    // 中间时交给 from_utf8 判非法，与「前缀含真正非法字节」同一处理
+    while end > 0 && end < prefix.len() && prefix[end] & 0xC0 == 0x80 {
+        end -= 1;
+    }
+    end
+}
+
 /// 超长 IPC 响应行的结算（G18）
 ///
 /// 从有界前缀提取请求 id，构造错误 [`IpcResponse`]（消息说明超出单行上限）
 /// 回传 Supervisor 结算对应在途请求；提取不到 id 时无法定位请求，仅保留
-/// 上方读取路径的 warn 日志。
+/// 上方读取路径的 warn 日志。P3-6：截断点先回退到 UTF-8 字符边界——
+/// 多字节字符恰在 512 处被切断不再整行放弃（否则 `profile_session_stop`
+/// 长录制响应要挂满命令超时）；前缀含真正非法字节仍按无 id 处理。
 async fn settle_oversized_line(prefix: &[u8], ipc_tx: &mpsc::Sender<ParsedMessage>) {
-    let head = &prefix[..prefix.len().min(512)];
+    let head = &prefix[..utf8_safe_head_len(prefix)];
     let head = match std::str::from_utf8(head) {
         Ok(s) => s,
         Err(_) => {
@@ -867,6 +888,44 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// P3-6：512B 截断点落在多字节字符中间时回退到字符边界（不再整行放弃）
+    #[test]
+    fn test_utf8_safe_head_len_retreats_to_char_boundary() {
+        // 510 个 ASCII + 3 字节汉字（字节 510..513）：512 恰落在「中」的中间
+        // → 回退到 510；截断后的前缀必为合法 UTF-8
+        let mut prefix = vec![b'x'; 510];
+        prefix.extend("中".as_bytes());
+        let head_len = utf8_safe_head_len(&prefix);
+        assert_eq!(head_len, 510);
+        assert!(std::str::from_utf8(&prefix[..head_len]).is_ok());
+        // 多字节字符紧邻边界（字节 511..514）：512 落在第 2 字节 → 回退 1
+        let mut p2 = vec![b'y'; 511];
+        p2.extend("中".as_bytes());
+        assert_eq!(utf8_safe_head_len(&p2), 511);
+        // 短前缀 / 恰为字符边界 / 空前缀：原长度返回
+        assert_eq!(utf8_safe_head_len(br#"{"id":1}"#), 8);
+        assert_eq!(utf8_safe_head_len(b""), 0);
+    }
+
+    /// P3-6：超长响应行的中文内容恰在 512B 处截断多字节字符 → 回退到边界
+    /// 后仍可提取 id 并结算（不再整行放弃，否则在途请求挂满命令超时）
+    #[tokio::test]
+    async fn test_settle_oversized_line_multibyte_cut_extracts_id() {
+        let (tx, mut rx) = mpsc::channel(8);
+        // 43 字节 ASCII 头 + 中文（3B/字）：512 落在字节 511..514 的汉字中间
+        let mut prefix = br#"{"id":77,"result":{"success":true,"data":""#.to_vec();
+        prefix.extend("中".repeat(200).as_bytes());
+        assert!(prefix.len() > 512, "用例前提：前缀须超限");
+        settle_oversized_line(&prefix, &tx).await;
+        match rx.recv().await {
+            Some(ParsedMessage::Response(resp)) => {
+                assert_eq!(resp.id, 77, "多字节截断不应妨碍 id 提取");
+                assert!(!resp.result.success, "超限结算必为失败信封");
+            }
+            other => panic!("多字节截断前缀仍应结算，得到 {other:?}"),
+        }
+    }
+
     // ============ 属性测试（proptest）：随机输入下解析器永不 panic、产出有界 ============
     //
     // 生成器策略覆盖面：
@@ -1216,11 +1275,14 @@ mod tests {
         }
 
         /// 【不变量 P10】settle_oversized_line 对任意字节序列不 panic，且：
-        /// 产消息 ⟺ 前 512 字节为合法 UTF-8 且前缀可提取 id；产出的必为
-        /// success=false 的 Response，id 与提取结果一致（G18 结算口径）
+        /// 产消息 ⟺ **字符边界安全前缀**（截断点回退后）为合法 UTF-8 且可
+        /// 提取 id；产出的必为 success=false 的 Response，id 与提取结果一致
+        /// （G18 结算口径；P3-6：512 截断点落在多字节字符中间时回退到边界，
+        /// 不再整行放弃——期望值与实现共用 `utf8_safe_head_len`，该回退逻辑
+        /// 由 `test_utf8_safe_head_len_retreats_to_char_boundary` 独立钉住）
         #[test]
         fn prop_settle_oversized_line_bounded_settlement(prefix in arb_oversized_prefix()) {
-            let head_len = prefix.len().min(512);
+            let head_len = utf8_safe_head_len(&prefix);
             let expect = std::str::from_utf8(&prefix[..head_len])
                 .ok()
                 .and_then(extract_leading_id);
