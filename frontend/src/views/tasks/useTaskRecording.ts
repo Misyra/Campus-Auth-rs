@@ -169,8 +169,14 @@ async function abandonRecording(): Promise<void> {
     await configSessionApi.stop(profileId.value, { discard: true });
     errorMsg.value = "";
   } catch (error) {
-    errorMsg.value =
-      error instanceof ApiError && error.status === 409 ? "" : extractApiError(error, "结束配置会话失败");
+    if (error instanceof ApiError && error.status === 409) {
+      // 409（浏览器已没了）目的已达成，静默收场（沿用清空就地错误的旧口径）
+      errorMsg.value = "";
+    } else {
+      // 其余失败改走全局 toast（P3-28）：requestClose 随后关闭弹窗，就地 errorMsg
+      // 无人可见——浏览器可能仍开着，用户需要跨弹窗可见的提示才知道「放弃没成功」
+      toastOnly(false, extractApiError(error, "放弃录制失败，浏览器可能仍未关闭，请稍后重试或手动关闭"));
+    }
   } finally {
     phase.value = "select";
   }

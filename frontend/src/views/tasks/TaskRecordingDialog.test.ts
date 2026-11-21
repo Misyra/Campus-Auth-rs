@@ -423,4 +423,35 @@ describe("TaskRecordingDialog", () => {
     expect(useToast().toast.message).toBe("");
     expect(rec.phase.value).toBe("select");
   });
+
+  it("放弃录制 stop 非 409 失败：失败提示走全局 toast（弹窗关闭后仍可见），不写就地 errorMsg", async () => {
+    stubFetch((url) => {
+      if (url.includes("/config-session/start")) {
+        return Promise.resolve(jsonResponse({ data: { started: true } }));
+      }
+      if (url.includes("/config-session/stop")) {
+        return Promise.resolve(
+          jsonResponse({ error: { code: "INTERNAL", message: "结算异常" } }, { status: 500 }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    mountDialog();
+    await flush();
+    const rec = useTaskRecording();
+    rec.profileId.value = "dorm";
+    await flush(); // 等重渲染解除按钮禁用态，否则 click() 落在 disabled 按钮上无效
+    click("record-start");
+    await settle();
+    click("record-abandon");
+    await settle();
+
+    // 失败结论经全局 toast 透出（requestClose 路径下弹窗随即关闭，就地提示无人可见）；
+    // 后端 message 优先展示（extractApiError 语义），无 message 时才用「浏览器可能仍未关闭」兜底
+    expect(useToast().toast.message).toContain("结算异常");
+    expect(useToast().toast.success).toBe(false);
+    // 不写就地 errorMsg：回到选方案阶段，role=alert 区域不出现
+    expect(rec.phase.value).toBe("select");
+    expect(document.querySelector('[data-testid="record-error"]')).toBeNull();
+  });
 });
