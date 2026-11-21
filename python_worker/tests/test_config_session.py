@@ -951,12 +951,12 @@ def test_recorder_js_panel_self_defense():
         "面板根所有事件 stopPropagation（拦门户冒泡监听）"
     # document 捕获先于面板根触发，录制器必须各自判断事件源是否在面板内
     assert "const inPanel = (t) => !!(panelRoot && t && panelRoot.contains(t));" in js
-    assert js.count("if (inPanel(ev.target)) return;") == 3, "click/blur/keydown 自防"
-    assert js.count("if (inPanel(el)) return;") == 2, "change/input（fill 管道）自防"
+    assert js.count("if (inPanel(realTarget(ev))) return;") == 2, "click/keydown 自防"
+    assert js.count("if (inPanel(el)) return;") == 3, "change/input/blur 自防（el 即 realTarget(ev)）"
     # click 自防先于 closest 匹配：面板 × 按钮自身就是 button，命中即被录成点击
     click_seg = js.split('document.addEventListener("click"')[1].split("}, true);")[0]
-    assert "if (inPanel(ev.target)) return;" in click_seg
-    assert click_seg.index("if (inPanel(ev.target)) return;") < click_seg.index('t.closest("button')
+    assert "if (inPanel(realTarget(ev))) return;" in click_seg
+    assert click_seg.index("if (inPanel(realTarget(ev))) return;") < click_seg.index('t.closest("button')
 
 
 def test_recorder_js_delete_wiring_and_server_sync():
@@ -1254,7 +1254,49 @@ def test_recorder_js_click_listener_flush_precedes_closest():
     click_seg = js.split('document.addEventListener("click"')[1].split("}, true);")[0]
     assert click_seg.index("flushFill();") < click_seg.index('t.closest("button'), \
         "结算必须先于按钮判定，否则非按钮导航丢 pendingFill"
-    assert click_seg.index("if (inPanel(ev.target)) return;") < click_seg.index("flushFill();"), \
+    assert click_seg.index("if (inPanel(realTarget(ev))) return;") < click_seg.index("flushFill();"), \
         "面板自防仍先于结算"
     # pagehide 兜底监听存在
     assert 'window.addEventListener("pagehide"' in js
+
+
+def test_recorder_js_shadow_dom_input_captured_via_composed_path():
+    """shadow DOM：事件 target 被 retarget 成宿主，composedPath()[0] 才是真实输入。"""
+    payloads = _run_recorder_js(
+        # open shadow root 场景：input 事件冒出边界后 target = 宿主 div
+        "const host = makeEl({ id: 'host', tagName: 'DIV' });"
+        "const inner = makeEl({ id: 'shadow-user', name: 'username' });"
+        "inner.value = '202312345';"
+        "fire('input', { target: host, composedPath: () => [inner] });"
+        "fire('blur', { target: inner });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1, "宿主 retarget 不得吞掉 shadow 内输入"
+    assert fills[0]["selector"] == "#shadow-user"
+    assert fills[0]["value"] == RECORDER_PLACEHOLDER_USERNAME
+
+
+def test_recorder_js_shadow_dom_without_composed_path_falls_back():
+    """无 composedPath（合成事件/极端老浏览器）：回落 ev.target 保持旧行为。"""
+    payloads = _run_recorder_js(
+        "const host = makeEl({ id: 'host', tagName: 'DIV' });"
+        "const inner = makeEl({ id: 'shadow-user', name: 'username' });"
+        "inner.value = '202312345';"
+        "fire('input', { target: host });"
+        "fire('blur', { target: inner });"
+    )
+    # 宿主不是文本元素：旧口径下不捕获（回落语义与历史一致）
+    assert _fill_payloads(payloads) == []
+
+
+def test_recorder_js_shadow_dom_click_captured_via_composed_path():
+    """shadow DOM 内按钮点击同样经 composedPath 取真实目标。"""
+    payloads = _run_recorder_js(
+        "const host = makeEl({ id: 'btn-host', tagName: 'DIV' });"
+        "const shadowBtn = makeEl({ id: 'shadow-btn', tagName: 'BUTTON' });"
+        "shadowBtn.closest = () => shadowBtn;"
+        "fire('click', { target: host, composedPath: () => [shadowBtn] });"
+    )
+    clicks = [p for p in payloads if p["type"] == "click"]
+    assert len(clicks) == 1
+    assert clicks[0]["selector"] == "#shadow-btn"

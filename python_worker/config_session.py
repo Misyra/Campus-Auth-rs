@@ -104,6 +104,8 @@ _RECORDER_SELECTOR_MAX_CHARS = 512
 #   （value=location.href，selector 恒为空串），回放侧跳过与门户地址相同的
 #   首条（门户页由回放主流程先行打开）；
 # - 事件用捕获相位（第三参 true）注册，门户 JS stopPropagation 也不影响录制；
+# - shadow DOM：监听器取 ev.composedPath()[0] 作真实事件源（open shadow root
+#   表单输入/点击不被宿主 retarget 吞掉；无 composedPath 回落 ev.target）；
 # - select 的 textContent 是全部选项拼接，作为选择器目标是垃圾，text 策略
 #   仅对点击路径（button 类元素）生效；
 # - 悬浮面板（仅主框架渲染）：右下角可折叠实时步骤列表 + 逐条删除——
@@ -337,6 +339,17 @@ _RECORDER_JS_TEMPLATE = r"""
   const SUMMARY_MAX = 96;
   // 面板自防判断：事件源在面板根内（含根自身）即为面板交互
   const inPanel = (t) => !!(panelRoot && t && panelRoot.contains(t));
+  // shadow DOM：事件穿过 shadow 边界后 target 被 retarget 成宿主元素，
+  // composedPath()[0] 才是真实事件源（open shadow root 的组件库门户表单）；
+  // 无 composedPath（极端老浏览器/合成事件）回落 ev.target 保持旧行为
+  const realTarget = (ev) => {
+    const path = ev && ev.composedPath;
+    if (typeof path === "function") {
+      const cp = path.call(ev);
+      if (cp && cp.length) return cp[0];
+    }
+    return ev ? ev.target : null;
+  };
   // 动作身份 = (type, ts, selector)：面板条目与汇聚器列表的精确对应关系
   // （同毫秒多动作靠 type/selector 区分，删除寻址不误伤）
   const sameIdentity = (a, b) =>
@@ -488,7 +501,7 @@ _RECORDER_JS_TEMPLATE = r"""
 
   // 捕获范围：<select> 的 change（ISP 选择类）+ 按钮/提交类点击 + 文本输入
   document.addEventListener("change", (ev) => {
-    const el = ev.target;
+    const el = realTarget(ev);
     if (!el) return;
     if (inPanel(el)) return;  // 面板自防：面板内目标绝不录入
     if (el.tagName === "SELECT") {
@@ -500,7 +513,7 @@ _RECORDER_JS_TEMPLATE = r"""
     if (pendingFill && pendingFill.el === el) flushFill();
   }, true);
   document.addEventListener("input", (ev) => {
-    const el = ev.target;
+    const el = realTarget(ev);
     if (inPanel(el)) return;  // 面板自防：fill 管道忽略面板内目标
     if (!isTextField(el)) return;
     const value = fillValueFor(el);
@@ -527,26 +540,27 @@ _RECORDER_JS_TEMPLATE = r"""
     renderPanel();
   }, true);
   document.addEventListener("blur", (ev) => {
-    if (inPanel(ev.target)) return;  // 面板自防（blur 不冒泡，防御性统一拦截）
-    if (pendingFill && pendingFill.el === ev.target) flushFill();
+    const el = realTarget(ev);
+    if (inPanel(el)) return;  // 面板自防（blur 不冒泡，防御性统一拦截）
+    if (pendingFill && pendingFill.el === el) flushFill();
   }, true);
   document.addEventListener("keydown", (ev) => {
     // 回车是门户主流提交方式：表单提交后文档随导航销毁，blur/空闲定时器都
     // 来不及结算，必须在导航开始前把待结算 fill 推出去；面板内按键（如键盘
     // 激活删除按钮）不是门户表单提交，不结算
-    if (inPanel(ev.target)) return;
+    if (inPanel(realTarget(ev))) return;
     if (pendingFill && ev.key === "Enter") flushFill();
   }, true);
   document.addEventListener("click", (ev) => {
     // 面板自防：面板内点击（含删除按钮）绝不录入，也不结算输入会话
-    if (inPanel(ev.target)) return;
+    if (inPanel(realTarget(ev))) return;
     // 输入会话结算先于按钮判定：链接/JS 导航类点击（<a>「短信登录」、
     // window.open 等）不走按钮分支，文档随导航销毁时防抖窗口内未结算的
     // fill 会整体丢失——结算不依赖「点了什么」，任何门户可见性点击都可能
     // 触发导航；按钮点击（含回车在表单上合成的提交点击）同样受益，保持
     // 「输入 → 提交」时序
     flushFill();
-    const t = ev.target;
+    const t = realTarget(ev);
     const el = t && t.closest
       ? t.closest("button, [type=submit], input[type=submit], [role=button]")
       : null;
