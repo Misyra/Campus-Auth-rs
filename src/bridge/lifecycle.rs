@@ -18,7 +18,7 @@ use super::state::{BridgeInner, SupervisorCommand};
 use super::{
     BridgeError, BridgeSupervisor, DEFAULT_SHUTDOWN_TIMEOUT_SECS,
     DEFAULT_WORKER_STARTUP_TIMEOUT_SECS, IpcMessage, IpcRequest, IpcResponse, SHUTDOWN_REQUEST_ID,
-    SessionType, WorkerState, merge_worker_status, orphan, process, spawn_worker,
+    SessionType, WorkerProcess, WorkerState, merge_worker_status, orphan, process, spawn_worker,
 };
 
 /// 连续 spawn 失败熔断阈值：达到后 ensure_worker 直接快速失败（不再 spawn）
@@ -421,7 +421,12 @@ pub(super) async fn kill_worker_now(this: &BridgeSupervisor) {
     }
 }
 
-/// 优雅关闭 Worker（shutdown 命令 → 等超时 → kill）
+/// 优雅关闭 Worker（shutdown 命令 → 等超时 → kill）——**无条件**回收路径
+///
+/// 供 supervisor 主循环退出（服务停止）与显式 [`SupervisorCommand::Shutdown`]
+/// 调用：不复核在途状态，必须完成回收，否则进程句柄与后台 task 泄漏。
+/// 空闲回收路径见 [`handle_idle_timeout`]——其判定与 take process 在同一
+/// 临界区内完成（P3-4），在途即放弃本次回收交下一轮判定。
 pub(super) async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
     let process = this
         .inner
@@ -429,6 +434,14 @@ pub(super) async fn handle_shutdown(this: &Arc<BridgeSupervisor>) {
         .unwrap_or_else(|e| e.into_inner())
         .process
         .take();
+    shutdown_worker_process(this, process).await;
+}
+
+/// 取走 process 后的实际关闭流程：发送 shutdown → 等超时强杀 → drain → 复位状态
+///
+/// 两条关闭路径共用：无条件回收（[`handle_shutdown`]）与空闲回收
+/// （[`handle_idle_timeout`] 判定临界区内 take）。
+async fn shutdown_worker_process(this: &BridgeSupervisor, process: Option<WorkerProcess>) {
     if let Some(proc) = process {
         // 先发送 shutdown 命令，等待 Worker 自行退出
         let _ = proc.stdin_tx.try_send(IpcMessage::Request(IpcRequest {
@@ -473,7 +486,7 @@ fn drain_pending_requests(this: &BridgeSupervisor, reason: &str) {
     }
 }
 
-/// 空闲计时器触发：若仍处于 Idle 则回收 Worker
+/// 空闲计时器触发：若仍处于 Idle 且无在途则回收 Worker
 ///
 /// 历史遗留 F3：`Idle` 只代表会话槽位空闲，OCR 等轻量在途请求**不占槽位、
 /// 不改 worker_state**，仅体现在 `pending_requests` 中。存在在途请求时不能
@@ -481,8 +494,16 @@ fn drain_pending_requests(this: &BridgeSupervisor, reason: &str) {
 /// 空闲计时器顺延一个完整空闲周期；待请求结束后再由计时器正常回收。
 /// P2-2：配置浏览器/录制会话归属存续期间同样豁免（会话存续期不在空闲
 /// 预算内，对齐调试会话「静置不被回收」语义）。
+/// P3-4：回收判定与 take process 在**同一临界区**内完成。execute_inner 的
+/// 原子临界区（互斥检查 → 注册 pending → 发送 → 占用会话槽位）与本块锁
+/// 同一 Mutex、严格串行——新命令要么在本判定前完成注册（被在途检查拦截、
+/// 顺延回收），要么在 take 之后才进入（进程已取走，走既有
+/// `SupervisorNotRunning` / ensure_worker 重新 spawn 语义）。旧实现「检查块
+/// 释放锁后 handle_shutdown 另行 take」存在毫秒级窗口：命令恰在两者之间
+/// 注册 pending 并写入 stdin，随后被整段杀掉（在途请求以 WorkerCrashed
+/// 失败、后到命令误报 SupervisorNotRunning）。
 pub(super) async fn handle_idle_timeout(this: &Arc<BridgeSupervisor>) {
-    let should_shutdown = {
+    let process = {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !matches!(inner.worker_state, WorkerState::Idle) {
             return;
@@ -521,10 +542,11 @@ pub(super) async fn handle_idle_timeout(this: &Arc<BridgeSupervisor>) {
             );
             return;
         }
-        inner.process.is_some()
+        // 判定通过：同一临界区内 take，关闭流程在锁外执行（P3-4）
+        inner.process.take()
     };
-    if should_shutdown {
-        handle_shutdown(this).await;
+    if process.is_some() {
+        shutdown_worker_process(this, process).await;
     }
 }
 
@@ -651,7 +673,7 @@ mod tests {
 
     use super::*;
     use crate::bridge::test_support::make_bridge;
-    use crate::bridge::{ConfigSessionOwner, WorkerProcess};
+    use crate::bridge::ConfigSessionOwner;
 
     /// B3：连续 spawn 失败熔断——达到阈值后 ensure_worker 快速失败而非再等 30s。
     #[tokio::test]
@@ -810,6 +832,78 @@ mod tests {
         assert!(
             inner.idle_timer.is_none(),
             "进程已亡时不得因残留归属表项顺延计时器"
+        );
+    }
+
+    /// P3-4：空闲到期时 Worker 存活且有在途请求（竞态后置状态）→ 放弃本次
+    /// 回收：process 原位保留、计时器顺延，在途请求不被 drain。
+    ///
+    /// 旧实现「检查块释放锁后 handle_shutdown 另行 take」存在毫秒级窗口：
+    /// 命令恰在两者之间注册 pending 并写入 stdin，随后被整段杀掉。新实现
+    /// 判定与 take 同临界区（std Mutex 临界区内无 await 点，单测无法在临界区
+    /// 内部插入交错），本用例钉住竞态的后置状态——只要 pending 非空，无论
+    /// 命令何时注册，回收都必须让路。
+    #[tokio::test]
+    async fn p3_4_在途请求与进程并存_到期放弃回收() {
+        use tokio::sync::oneshot;
+
+        let (bridge, _dir) = make_bridge().await;
+        let mut rx = {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+            inner.process = Some(WorkerProcess::test_stub());
+            let (tx, rx) = oneshot::channel();
+            inner.pending_requests.insert(200, tx);
+            rx
+        };
+        handle_idle_timeout(&bridge).await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                inner.process.is_some(),
+                "存在在途请求时不得回收 Worker（放弃本次回收交下一轮判定）"
+            );
+            assert!(
+                inner.pending_requests.contains_key(&200),
+                "在途请求不应被 drain"
+            );
+            assert!(inner.idle_timer.is_some(), "放弃回收应顺延空闲计时器");
+            if let Some(h) = inner.idle_timer.take() {
+                h.abort();
+            }
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "在途请求不应被结算为 WorkerCrashed"
+        );
+    }
+
+    /// P3-4：无在途、无存续配置会话时正常回收——判定临界区内 take process，
+    /// 关闭流程复位状态（能力缓存 / 调试标记随进程终结）。
+    #[tokio::test]
+    async fn p3_4_空闲到期正常回收_进程取走状态复位() {
+        let (bridge, _dir) = make_bridge().await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+            inner.process = Some(WorkerProcess::test_stub());
+            inner.worker_capabilities = Some(serde_json::json!({ "ocr": true }));
+            inner.debug_session_open = true;
+        }
+        handle_idle_timeout(&bridge).await;
+        let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            inner.process.is_none(),
+            "正常回收路径应取走 process 并完成关闭"
+        );
+        assert_eq!(inner.worker_state, WorkerState::Idle);
+        assert!(
+            inner.worker_capabilities.is_none(),
+            "能力缓存应随进程失效"
+        );
+        assert!(
+            !inner.debug_session_open,
+            "调试会话标记应随进程终结"
         );
     }
 }
