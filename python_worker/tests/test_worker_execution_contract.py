@@ -730,6 +730,46 @@ def test_debug_start_skips_navigation_when_no_start_url(monkeypatch, tmp_path):
     assert core._debug_sessions, "会话应正常建成（不再因无效 URL 中断启动）"
 
 
+def test_debug_start_rejected_while_profile_session_alive(monkeypatch, tmp_path):
+    """配置会话存续期启动调试会话 → 结构化拒绝（对齐 _ensure_no_debug_session 模式）。
+
+    调试启动会重建共享浏览器并改写会话类型标记，与配置会话的独占浏览器
+    双开互扰；反向（调试会话存续期 profile_session_start）已被 Rust 会话矩阵
+    拦截，此处钉住 Python 半边的单向缺口补齐。
+    """
+    from config_session import ProfileSessionState, RecorderSink
+
+    page = _FakeDebugPage()
+    core = _debug_start_core(monkeypatch, tmp_path, page)
+    core._profile_session = ProfileSessionState(
+        session_id="occupied",
+        user_data_dir=str(tmp_path / "udd"),
+        portal_url="http://portal.example/",
+        record=True,
+        sink=RecorderSink(),
+    )
+
+    with pytest.raises(WorkerError) as ei:
+        asyncio.run(
+            core.handle_debug_start(
+                {"task_config": {"task_id": "t", "url": "", "steps": [], "variables": {}}}
+            )
+        )
+    assert "配置会话进行中" in ei.value.message
+    assert "调试" in ei.value.message
+    assert not core._debug_sessions, "拒绝时不得建立任何调试会话"
+    assert core._profile_session is not None, "占用方不受影响"
+
+    # 槽位释放后即可正常启动（守卫不残留副作用）
+    core._profile_session = None
+    asyncio.run(
+        core.handle_debug_start(
+            {"task_config": {"task_id": "t", "url": "", "steps": [], "variables": {}}}
+        )
+    )
+    assert core._debug_sessions, "槽位释放后调试会话正常建成"
+
+
 def test_login_system_variables_skip_missing_keys(monkeypatch):
     """登录命令未提供的 Profile 键不注入（避免空串覆盖任务自定义变量）。
 

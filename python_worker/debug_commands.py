@@ -3,7 +3,9 @@
 自 playwright_worker.py 迁出（Mixin 化）：方法签名与行为逐字段保留，经
 WorkerCore 多继承挂回（见 playwright_worker.py 的组装）。职责边界：
 
-- debug_start / debug_step / debug_run_all / debug_status / debug_stop 命令编排；
+- debug_start / debug_step / debug_run_all / debug_status / debug_stop 命令编排
+  （debug_start 另含配置会话存续守卫——补齐 Rust 会话矩阵单向拦截的
+  Python 半边缺口）；
 - ``_ensure_no_debug_session``：B3 纵深防御（Python 半）的守卫入口，任务/捕获
   类命令经 ``self`` 复用；
 - 截图治理：``_capture_debug_frame``（步骤补拍）、``_defer_task_screenshot_cleanup``
@@ -72,6 +74,14 @@ class DebugCommandsMixin:
         cancel_id = params.get("cancel_id", "")
         if self._debug_sessions:
             raise WorkerError(Outcome.UNKNOWN_ERROR, "已存在活跃调试会话，请先停止再启动")
+        # 配置会话存续守卫（对齐 _ensure_no_debug_session 模式）：配置会话
+        # 持有独占浏览器与录制状态，调试启动会重建共享浏览器并改写会话类型
+        # 标记，双开互扰；反向（调试会话存续期 profile_session_start）已被
+        # Rust 会话矩阵拦截，此处补齐 Python 半边的单向缺口
+        if self._profile_session is not None:
+            raise WorkerError(
+                Outcome.UNKNOWN_ERROR, "配置会话进行中，无法启动调试会话，请先停止配置会话"
+            )
         session_id = uuid.uuid4().hex
         self._session_type = "debug"
         cancel_event = cancel_registry.register(cancel_id) if cancel_id else None
