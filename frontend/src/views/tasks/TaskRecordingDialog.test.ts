@@ -537,4 +537,40 @@ describe("TaskRecordingDialog", () => {
     expect(document.querySelectorAll('[data-testid="record-steps"] li')).toHaveLength(4);
     expect(document.querySelector('[data-testid="record-truncated"]')?.textContent).toContain("仅保留前 5 个动作");
   });
+
+  it("预览删空全部步骤：出现空态占位且保存按钮禁用（P3-32）", async () => {
+    stubFetch((url) => {
+      if (url.includes("/config-session/start")) {
+        return Promise.resolve(jsonResponse({ data: { started: true } }));
+      }
+      if (url.includes("/config-session/stop")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: { recorded_count: 2, truncated: false, persistent_session_enabled: false, recorded_actions: recordedActions().slice(0, 2) },
+          }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    mountDialog();
+    await flush();
+    const rec = useTaskRecording();
+    rec.profileId.value = "dorm";
+    await flush();
+    click("record-start");
+    await settle();
+    click("record-finish");
+    await settle();
+    expect(document.querySelectorAll('[data-testid="record-steps"] li')).toHaveLength(2);
+
+    // 删空：列表退场、空态占位进场、保存按钮禁用（无步骤可存）
+    for (const button of [...document.querySelectorAll<HTMLButtonElement>('[data-testid="record-step-remove"]')]) {
+      button.click();
+      await flush();
+    }
+    expect(document.querySelector('[data-testid="record-steps"]')).toBeNull();
+    const empty = document.querySelector('[data-testid="record-steps-empty"]');
+    expect(empty?.textContent).toContain("没有可保存的步骤");
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="record-save"]')?.disabled).toBe(true);
+  });
 });

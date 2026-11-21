@@ -10,6 +10,7 @@
  */
 import Modal from "@/components/common/Modal.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import IconApp from "@/components/common/IconApp.vue";
 import { computed, ref, watch } from "vue";
 import { useTaskRecording } from "./useTaskRecording";
@@ -147,8 +148,8 @@ async function onSave(): Promise<void> {
         <span>{{ skippedUnknown }} 个动作不属于可转换的类型，已跳过；其余动作已正常转换。</span>
       </div>
 
-      <p class="rec-hint">以下步骤由录制动作转换而来，误录的步骤可在此删除，保存后也可在编辑器中继续调整：</p>
-      <ol class="rec-steps" data-testid="record-steps">
+      <p v-if="steps.length" class="rec-hint">以下步骤由录制动作转换而来，误录的步骤可在此删除，保存后也可在编辑器中继续调整：</p>
+      <ol v-if="steps.length" class="rec-steps" data-testid="record-steps">
         <li v-for="(step, i) in steps" :key="step.id" class="rec-step">
           <span class="rec-step-index" aria-hidden="true">{{ i + 1 }}</span>
           <span class="badge badge--sm badge--info">{{ stepTypeLabel(step.type) }}</span>
@@ -165,6 +166,16 @@ async function onSave(): Promise<void> {
           </button>
         </li>
       </ol>
+      <!-- 删空全部步骤后的空态占位（P3-32）：保存按钮已禁用，占位说明下一步去向 -->
+      <EmptyState
+        v-else
+        small
+        dashed
+        icon="list"
+        title="没有可保存的步骤"
+        description="步骤已全部删除：可点「不保存」关闭后重新录制，或保留至少一个步骤再保存"
+        data-testid="record-steps-empty"
+      />
 
       <div class="form-group">
         <label for="record-name">任务名称</label>
