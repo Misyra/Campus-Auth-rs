@@ -2,6 +2,17 @@
 
 > 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.1”。
 
+## 开发中（2026-11-21 全面审查修复战役）
+
+> 用户拍板「全部都做，多代理并行」：同日全面审查（报告 `docs/reports/code-review-2026-11-21.md`，本地不提交）发现的 P1×1 + P2×15 + P3×43(+1 nit) 全量修复，并入安卓 P1 前置①②③ 与 uv 哨兵提级项；八个域子代理并行（录制链 Python / 录制契约 Rust / Bridge 基座 / macOS 托盘与 launcher / Rust 杂项 / 前端 / 安卓 / CI 构建），文件集互不重叠、逐项独立 commit，changelog 与计划勾账由主会话集中记账。审查方法与逐项证据见报告原文。
+
+- **AGENTS.md 平台矩阵修正（9c845bc）**：两处把 `e2e-login-chain` 写成 ubuntu + macOS——实际 windows + macOS（ci.yml:275-278），ubuntu + macOS 是 `rust-tests-unix` 矩阵；两节各自写清勿混。
+- **CI 前端覆盖率门禁接通（be130fe）**：ci.yml 前端 vitest 步改 `npm run test -- --coverage`——此前 `npm test` 无 --coverage，vite.config.ts 的 thresholds（lines 38.7 / statements 36.5 / functions 29 / branches 28.6）是死配置，AGENTS.md 声称的「vitest 含覆盖率阈值」防线从未生效；本地实测 811/811 且 statements 48.96 / branches 37.56 / functions 39.82 / lines 51.42 全高于阈值，vitest 5 + coverage-v8 5.1.0（同版 pin）无需 enabled 开关。
+- **openwrt/release 超时补齐（9be9148）**：openwrt.yml 三 job 补 timeout-minutes（build 60 / upload-release 15 / sdk-packages 60），release.yml openwrt caller job 补 90——QEMU/SDK 死等不再拖满 runner 默认 6 小时（T0d-1 各 job 超时纪律此前只落到 ci.yml）。
+- **.dockerignore 构建上下文瘦身（03a989d）**：补 fuzz / android / tests 三条目——本机 fuzz/target 2.9G、jniLibs 421M 均 gitignored 构建产物，此前全部打进 docker build 上下文；Dockerfile COPY 面核实不含三目录，不影响构建。
+- **compose 健康检查随端口（f8a6f38）**：docker-compose.yml healthcheck 改 `CMD-SHELL` + `$${CAMPUS_AUTH_PORT:-50721}`，与 Dockerfile HEALTHCHECK 同口径——此前硬编码 50721，用户改端口后容器永久 unhealthy。
+- **Docker TZ 文档与示例（913b97f）**：compose environment 示例加 `TZ=Asia/Shanghai`，docker/README 新增「时区（TZ）」节——镜像默认 UTC，cron 定时与免打扰时段按 `chrono::Local` 判定，不设 TZ 国内用户定时偏 8 小时；tzdata 在 bookworm 属 Priority: required，slim 镜像自带 zoneinfo、glibc 直读 TZ，无需额外安装。
+
 ## 开发中（2026-11-21 录制生成独立任务）
 
 > 用户提出「录制能不能填入账号密码，改成独立的任务形式，用户只需完整录制」：录制器升级为完整操作录制（含键盘输入），并可一键转换为标准浏览器任务。全程后台子代理并行开发（Worker / Rust / 前端 / 契约四批）+ 主代理接线收口，端到端实测全通。
