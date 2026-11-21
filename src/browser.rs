@@ -34,9 +34,9 @@ fn clean_app_paths_value(raw: &[u16]) -> Option<String> {
 /// 登记残留指向已卸载路径时不误报（要求文件存在才返回）
 #[cfg(target_os = "windows")]
 fn app_paths_executable(exe_name: &str) -> Option<std::path::PathBuf> {
-    use windows_sys::Win32::Foundation::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    // HKEY 根键常量与取值 API 同在 Registry 模块（platform_windows 同源）
     use windows_sys::Win32::System::Registry::{
-        RegGetValueW, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegGetValueW, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     };
 
     // 路径值远小于 4K 字符；不足时 RegGetValueW 返回错误而非截断误报
