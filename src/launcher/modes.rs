@@ -64,8 +64,8 @@ pub(super) async fn launch_full(state: &mut LauncherState) -> Result<()> {
     // Engine 崩溃恢复
     let watch_handle = watch_engine(state);
 
-    // 启动托盘（在专用 OS 线程上构建图标与菜单）
-    // macOS 的禁用拦截收敛在 TrayManager::spawn 内部单点执行（W6 用户决策）
+    // 启动托盘（在专用 OS 线程上构建图标与菜单；macOS 经主队列投递到
+    // 主线程构建，见 TrayManager::spawn 的平台分工注释）
     #[cfg(feature = "desktop")]
     if let Some(tray) = state.tray_manager.as_ref() {
         state.tray_handle = Some(tray.spawn());
@@ -97,7 +97,8 @@ pub(super) async fn launch_full(state: &mut LauncherState) -> Result<()> {
 pub(super) async fn launch_lightweight(state: &mut LauncherState) -> Result<()> {
     let watch_handle = watch_engine(state);
 
-    // 启动托盘（轻量模式也显示托盘；macOS 由 spawn 内部单点拦截返回空句柄）
+    // 启动托盘（轻量模式也显示托盘；macOS 轻量模式已在配置合并处降级为
+    // 完整模式，此分支在 macOS 实际不可达，保留平台对称性）
     #[cfg(feature = "desktop")]
     if let Some(tray) = state.tray_manager.as_ref() {
         state.tray_handle = Some(tray.spawn());

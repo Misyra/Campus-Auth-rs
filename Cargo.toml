@@ -176,6 +176,25 @@ windows-sys = { version = "0.61", features = [
 # 托盘/菜单事件经 glib 主循环分发（与 tray-icon 内部依赖同版本，共享 gtk 状态）
 gtk = { version = "0.18", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS 托盘启用（架构批）：主线程交还 AppKit 事件循环（NSApplication run loop），
+# 托盘/菜单构建与动态更新经 GCD 主队列投递。版本与 tray-icon 0.24 / muda 0.19
+# 内部的 objc2 依赖线严格同版（objc2 0.6 / 框架 crate 0.3），避免大范围 update。
+# dispatch2 即 objc2 生态的 dispatch 绑定（上游 crates.io 无 objc2-dispatch 包名，
+# 该项目内 crate 实名 dispatch2；0.3.1 已随 objc2-core-foundation 传入锁文件，
+# 显式声明不引入新版本解析）。AppKit 只启用本仓用到的三个模块特性，
+# NSResponder 是 generated 代码中 NSApplication impl 块的编译门槛
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+# MainThreadMarker（AppKit 主线程标记）经 objc2 直接暴露；与 tray-icon / muda
+# 各自声明的 objc2 0.6 同线，锁文件无新增解析
+objc2 = "0.6"
+dispatch2 = "0.3"
+
 [target.'cfg(not(target_os = "android"))'.dependencies]
 # 系统通知（os 通道）：Windows toast / macOS 通知中心 / Linux freedesktop 由它统一实现
 # 安卓端无桌面通知基础设施，不参与构建（os 通道发送恒失败静默，见 notification/sender.rs）

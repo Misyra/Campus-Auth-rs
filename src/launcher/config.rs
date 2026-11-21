@@ -16,9 +16,10 @@ pub(super) fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result
     let port = cli.port.unwrap_or(startup.port).max(1);
     // CLI --mode 显式指定时优先生效；缺省时沿用 settings.json 的 app.runtime_mode
     let runtime_mode = cli.mode.clone().unwrap_or(startup.mode);
-    // macOS：托盘已禁用（用户决策，W6——tray-icon 要求主线程 NSApplication
-    // 事件循环，主线程运行 tokio runtime 无法满足）；轻量模式在 mac 上会既无
-    // 托盘也无 Web 入口，统一降级为完整模式保证可用
+    // macOS：托盘已随 2026-11-21 架构批启用（主线程交还 AppKit，见 main.rs），
+    // 但轻量降级**维持**——恢复轻量模式属后续决策，本批只保证完整模式在
+    // macOS 的可用性；非桌面 / openwrt / android 构建无托盘，轻量模式会既无
+    // 托盘也无 Web 入口，同样统一降级为完整模式
     #[cfg(any(
         target_os = "macos",
         not(feature = "desktop"),

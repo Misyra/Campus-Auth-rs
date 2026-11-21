@@ -333,8 +333,9 @@ async fn run_after_logging(
     };
 
     // 8. 创建系统托盘
-    // macOS 也照常创建（纯通道结构，无副作用），真正的禁用拦截在
-    // TrayManager::spawn 内部单点执行——macOS 返回空句柄，托盘永不启动
+    // TrayManager 为纯通道结构（无平台副作用），平台分工在 spawn 的
+    // OS 线程内收敛：Windows/Linux 直接构建，macOS 经 GCD 主队列投递到
+    // 主线程（主线程由 main.rs 的 macOS 分支交给 NSApplication 事件循环）
     // Docker 环境无显示服务器，强制禁用托盘
     #[cfg(feature = "desktop")]
     let no_tray_effective = state.app_config.no_tray

@@ -1,10 +1,14 @@
 //! 系统托盘模块：图标加载、菜单构建、事件转发与异步泵任务
 //!
 //! 设计要点：
-//! - 托盘图标与菜单事件循环运行在**独立的 OS 线程**上（`tray-icon` 要求）。
-//! - OS 线程只负责构建菜单、显示图标，并把菜单选择通过通道转发为 [`TrayAction`]，
-//!   所有真正的业务逻辑（Engine 命令派发、更新检查、打开浏览器）都在 tokio 泵任务中
-//!   完成，保持 OS 线程极简。
+//! - 托盘图标与菜单事件循环运行在**独立的 OS 线程**上（Windows / Linux，
+//!   `tray-icon` 要求）；**macOS 例外**——AppKit 要求托盘/菜单构建与事件分发
+//!   都在进程主线程，OS 线程在该平台退化为命令代理，AppKit 调用经 GCD 主队列
+//!   投递到主线程（主线程由 `main.rs` 的 macOS 分支交给 NSApplication 事件循环，
+//!   2026-11-21 托盘启用架构批）。
+//! - OS 线程只负责构建菜单、显示图标（macOS 为投递代理），并把菜单选择通过
+//!   通道转发为 [`TrayAction`]，所有真正的业务逻辑（Engine 命令派发、更新检查、
+//!   打开浏览器）都在 tokio 泵任务中完成，保持 OS 线程极简。
 //! - 退出时由泵任务发送 [`crate::engine::EngineCommand::Shutdown`]，随后通知 OS 线程退出
 //!   并 join。
 
@@ -143,21 +147,15 @@ impl TrayManager {
     ///
     /// 返回 [`ServiceHandle`]，调用其 [`ServiceHandle::stop`] 可优雅停止并 join OS 线程。
     ///
-    /// **macOS 平台禁用**（用户决策，known-issues W6）：tray-icon 要求托盘构建与
-    /// NSApplication 事件循环都在主线程，而本应用主线程运行 tokio runtime，无法满足；
-    /// 非主线程构建有崩溃风险。macOS 下本方法返回空句柄、不创建任何托盘资源，
-    /// 单点拦截保证任何调用路径都开不起来。轻量模式在 macOS 已降级为完整模式。
+    /// **平台事件循环分工**（三平台各自的线程约束，收敛于 [`run_os_thread`]）：
+    /// - Windows：托盘直接构建在专用 OS 线程，线程内 pump 消息循环
+    /// - Linux：构建前 `gtk::init`，线程内持续 gtk 主循环
+    /// - macOS：**专用线程只作命令代理**——AppKit 要求托盘/菜单构建与事件分发
+    ///   都在进程主线程（tray-icon 非主线程构建返回 `NotMainThread`，muda 的
+    ///   `Menu::new` 在非主线程直接 panic），故构建、动态更新与清理一律经
+    ///   GCD 主队列投递到主线程执行（主线程由 `main.rs` 的 macOS 分支交给
+    ///   `NSApplication` 事件循环，2026-11-21 托盘启用架构批）
     pub fn spawn(self: &Arc<Self>) -> ServiceHandle {
-        if cfg!(target_os = "macos") {
-            info!("macOS 暂不支持系统托盘（known-issues W6），已跳过启动");
-            let (stop_tx, _stop_rx) = watch::channel(false);
-            return ServiceHandle {
-                stop_tx,
-                join_handle: tokio::spawn(async {}),
-                name: "tray",
-            };
-        }
-
         let action_rx = self
             .action_rx
             .lock()
@@ -284,20 +282,235 @@ fn run_os_thread(
     action_tx: mpsc::Sender<TrayAction>,
     os_cmd_rx: std_mpsc::Receiver<OsCommand>,
 ) {
-    // Linux：tray-icon 后端基于 gtk/libappindicator，构建图标前必须完成
-    // gtk::init，且 gtk 主循环要在同一线程持续运行（见下方 gtk::main）——
-    // 否则菜单/图标事件永远不会分发，托盘完全无响应
-    #[cfg(target_os = "linux")]
-    if let Err(e) = gtk::init() {
-        error!("gtk 初始化失败，托盘不可用: {e}");
-        return;
+    // macOS：本线程不执行任何 AppKit 调用，只作命令代理——托盘构建/动态
+    // 更新/清理全部经 GCD 主队列投递到进程主线程执行（AppKit 线程模型与
+    // 三平台分工见 TrayManager::spawn 的注释；muda 的 Menu::new 在非主
+    // 线程直接 panic，是原 macOS 禁用的根因之一）。构建与事件循环在此
+    // 结束，Windows/Linux 的直接构建路径在 macOS 构建下整体编译剔除
+    #[cfg(target_os = "macos")]
+    {
+        run_macos_proxy_loop(status, action_tx, os_cmd_rx);
+        debug!("系统托盘线程退出（macOS 代理路径）");
     }
 
-    // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
-    // menu_items 绑定本身保持对象存活到线程结束；status_item / toggle_item 用于动态改文本
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Linux：tray-icon 后端基于 gtk/libappindicator，构建图标前必须完成
+        // gtk::init，且 gtk 主循环要在同一线程持续运行（见下方 gtk::main）——
+        // 否则菜单/图标事件永远不会分发，托盘完全无响应
+        #[cfg(target_os = "linux")]
+        if let Err(e) = gtk::init() {
+            error!("gtk 初始化失败，托盘不可用: {e}");
+            return;
+        }
+
+        // 菜单项对象必须比 Menu/TrayIcon 存活更久（muda 内部持有引用）
+        // menu_items 绑定本身保持对象存活到线程结束；status_item / toggle_item 用于动态改文本
+        let (menu, menu_items, status_item, toggle_item) = build_menu();
+        let _ = &menu_items;
+        // 首次按当前状态设置文本与状态行强调态
+        let first_snapshot = status.borrow();
+        status_item.set_text(status_menu_label(&first_snapshot));
+        if status_item.is_enabled() != status_item_enabled(first_snapshot.engine_state) {
+            status_item.set_enabled(status_item_enabled(first_snapshot.engine_state));
+        }
+        toggle_item.set_text(monitor_toggle_label(first_snapshot.engine_state));
+        drop(first_snapshot);
+
+        // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
+        // 停止态用同一 logo 的灰色版保持品牌识别（此前是纯红色块，无信息量）
+        let (rgba, w, h) = load_tray_rgba();
+        let active_icon = make_icon(rgba.clone(), w, h);
+        let mut inactive_rgba = rgba;
+        for px in inactive_rgba.chunks_mut(4) {
+            px[0] = 150;
+            px[1] = 150;
+            px[2] = 150;
+        }
+        let inactive_icon = make_icon(inactive_rgba, w, h);
+
+        let built = match active_icon.as_ref() {
+            Some(icon) => TrayIconBuilder::new()
+                .with_icon(icon.clone())
+                .with_menu(Box::new(menu))
+                .with_tooltip("认证喵 Campus-Auth")
+                .build(),
+            None => {
+                error!("无法加载或生成托盘图标");
+                return;
+            }
+        };
+
+        let tray = match built {
+            Ok(t) => {
+                info!("系统托盘已创建");
+                Rc::new(t)
+            }
+            Err(e) => {
+                error!("系统托盘创建失败: {e}");
+                return;
+            }
+        };
+
+        // 注册全局菜单事件处理器：转发为 TrayAction（不阻塞 OS 线程）
+        let action_tx_tray = action_tx.clone();
+        let status_for_menu = Arc::clone(&status);
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            let id: String = event.id().0.clone();
+            // monitor_toggle 的具体动作（启动/停止）由当前引擎状态决定，
+            // 这样菜单项 id 固定，文本可随状态切换
+            if let Some(action) = menu_action_for(id.as_str(), &status_for_menu.borrow()) {
+                // OS 线程用 try_send（非阻塞）转发；通道满/关闭时丢弃
+                if action_tx.try_send(action).is_err() {
+                    warn!("托盘泵任务已退出，丢弃菜单事件");
+                }
+            }
+        }));
+
+        // 注册全局托盘图标事件处理器：左键单击打开 Web 控制台
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            if let TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+                && button == tray_icon::MouseButton::Left
+                && button_state == tray_icon::MouseButtonState::Up
+                && let Err(e) = action_tx_tray.try_send(TrayAction::OpenWeb)
+            {
+                debug!("托盘点击事件转发失败（通道满或泵任务已退出）: {e}");
+            }
+        }));
+
+        // 阻塞等待泵任务 / Drop 发来的命令（退出或刷新托盘），保持线程存活。
+        // 按值移交所有权（Linux timeout_add_local 闭包要求 'static，见 run_os_event_loop）。
+        run_os_event_loop(
+            tray,
+            status,
+            active_icon,
+            inactive_icon,
+            status_item,
+            toggle_item,
+            os_cmd_rx,
+        );
+
+        // 清理：清除全局处理器（释放 action_tx 引用）
+        MenuEvent::set_event_handler::<fn(MenuEvent)>(None);
+        TrayIconEvent::set_event_handler::<fn(TrayIconEvent)>(None);
+        debug!("系统托盘线程退出");
+    }
+}
+
+// ============================================================
+// macOS 平台实现：主线程经 GCD 主队列投递，OS 线程仅作命令代理
+// ============================================================
+
+/// macOS 侧托盘状态（主线程独占持有，不满足 `Send`）
+///
+/// `TrayIcon` / `MenuItem` / `Menu` 内部为 `Rc`，跨线程移动即违反线程安全，
+/// 故常驻主线程、经 [`MAC_TRAY_STATE`]（主线程 thread_local）存取；主队列
+/// 闭包一律只捕获 `Send` 数据（`Arc<StatusManager>` / 动作通道两端），非
+/// Send 的托盘对象全部经 thread_local 就地访问
+#[cfg(target_os = "macos")]
+struct MacTrayState {
+    /// 托盘图标句柄（drop 即摘除菜单栏图标，必须与进程同寿命）
+    tray: Rc<TrayIcon>,
+    /// 顶层菜单项容器（muda 内部持引用，须与 Menu/TrayIcon 同寿命——
+    /// 字段仅承担保命职责、不做业务读取，dead_code 豁免即为此）
+    #[allow(dead_code)]
+    menu_items: Vec<Box<dyn IsMenuItem>>,
+    /// 运行态图标（绿色）
+    active_icon: Option<Icon>,
+    /// 停止态图标（灰色）
+    inactive_icon: Option<Icon>,
+    /// 「状态」信息行（动态改文本）
+    status_item: MenuItem,
+    /// 「启动/停止监测」切换项（动态改文本）
+    toggle_item: MenuItem,
+}
+
+// 主线程托盘状态存取点（仅经主队列闭包读写）。
+// 主队列闭包执行于进程主线程，`thread_local!` 在此处解析到的就是主线程
+// 实例；`const` 初始化避免首次访问的懒初始化开销。（`thread_local!` 宏
+// 展开不支持 `///` 文档注释，故用行内注释）
+#[cfg(target_os = "macos")]
+thread_local! {
+    static MAC_TRAY_STATE: std::cell::RefCell<Option<MacTrayState>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// macOS 专用 OS 线程体：命令代理
+///
+/// 把泵任务 / Drop 发来的 [`OsCommand`] 翻译成主队列投递：
+/// - 构建（一次性）与刷新经 `dispatch_async`（无需回执，主队列串行保序）
+/// - 退出清理同样异步投递——主队列 FIFO 保证清理块先于 `main.rs` 优雅关闭
+///   尾部投递的 `NSApp.stop` 块执行，托盘资源不会滞留到进程终结
+///
+/// 本线程自身不触碰任何 AppKit 对象
+#[cfg(target_os = "macos")]
+fn run_macos_proxy_loop(
+    status: Arc<StatusManager>,
+    action_tx: mpsc::Sender<TrayAction>,
+    os_cmd_rx: std_mpsc::Receiver<OsCommand>,
+) {
+    use dispatch2::DispatchQueue;
+
+    // 构建投递主队列：NSApplication 事件循环开始排水后执行（main.rs 的
+    // macOS 分支先 sharedApplication 再进入 run，本块必然晚于应用实例创建，
+    // 无「run loop 未启动」竞态——投递块在 run() 排水主队列时自然执行）
+    let status_for_build = status.clone();
+    DispatchQueue::main().exec_async(move || {
+        build_mac_tray_on_main(status_for_build, action_tx);
+    });
+
+    loop {
+        match os_cmd_rx.recv() {
+            Ok(OsCommand::Quit) => {
+                DispatchQueue::main().exec_async(clear_mac_tray_on_main);
+                break;
+            }
+            Ok(OsCommand::RefreshTray) => {
+                let status = status.clone();
+                DispatchQueue::main().exec_async(move || {
+                    MAC_TRAY_STATE.with(|cell| {
+                        let state = cell.borrow();
+                        let Some(st) = state.as_ref() else {
+                            return;
+                        };
+                        // StatusManager::borrow 直接返回快照值
+                        let snap = status.borrow();
+                        update_tray(
+                            &st.tray,
+                            &snap,
+                            &st.active_icon,
+                            &st.inactive_icon,
+                            &st.status_item,
+                            &st.toggle_item,
+                        );
+                    });
+                });
+            }
+            // 发送端已丢弃（泵任务退出后 Drop 路径）：与 Quit 同清理
+            Err(_) => {
+                DispatchQueue::main().exec_async(clear_mac_tray_on_main);
+                break;
+            }
+        }
+    }
+    debug!("macOS 托盘代理线程退出");
+}
+
+/// macOS 主线程托盘构建（仅在主队列闭包内执行）
+///
+/// 与 Windows/Linux 在 OS 线程的直接构建**有意保持重复**而非抽公共函数：
+/// 三平台的构建时序约束各不相同（gtk::init / 消息循环 pump / 主队列），
+/// 抽象收敛会让行为稳定的另外两平台承担 macOS 架构改造的回归风险；
+/// 两份构建的字段与文案由既有单测（`monitor_toggle_label` 等）钉住一致性
+#[cfg(target_os = "macos")]
+fn build_mac_tray_on_main(status: Arc<StatusManager>, action_tx: mpsc::Sender<TrayAction>) {
+    // muda 的 Menu/MenuItem 在 macOS 要求主线程（非主线程 Menu::new 直接
+    // panic）——本函数只经主队列投递调用
     let (menu, menu_items, status_item, toggle_item) = build_menu();
-    let _ = &menu_items;
-    // 首次按当前状态设置文本与状态行强调态
     let first_snapshot = status.borrow();
     status_item.set_text(status_menu_label(&first_snapshot));
     if status_item.is_enabled() != status_item_enabled(first_snapshot.engine_state) {
@@ -306,8 +519,7 @@ fn run_os_thread(
     toggle_item.set_text(monitor_toggle_label(first_snapshot.engine_state));
     drop(first_snapshot);
 
-    // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
-    // 停止态用同一 logo 的灰色版保持品牌识别（此前是纯红色块，无信息量）
+    // 加载图标（缺失则回退到生成色块），准备运行/停止两种形态
     let (rgba, w, h) = load_tray_rgba();
     let active_icon = make_icon(rgba.clone(), w, h);
     let mut inactive_rgba = rgba;
@@ -329,10 +541,9 @@ fn run_os_thread(
             return;
         }
     };
-
     let tray = match built {
         Ok(t) => {
-            info!("系统托盘已创建");
+            info!("系统托盘已创建（macOS 主队列）");
             Rc::new(t)
         }
         Err(e) => {
@@ -341,22 +552,21 @@ fn run_os_thread(
         }
     };
 
-    // 注册全局菜单事件处理器：转发为 TrayAction（不阻塞 OS 线程）
+    // 全局事件处理器注册（闭包只捕获 Send 数据，转发动作到 tokio 泵通道，
+    // 与 Windows/Linux 同一注册点语义）。AppKit 在主线程分发菜单/图标事件，
+    // try_send 非阻塞，不拖慢事件循环
     let action_tx_tray = action_tx.clone();
     let status_for_menu = Arc::clone(&status);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         let id: String = event.id().0.clone();
-        // monitor_toggle 的具体动作（启动/停止）由当前引擎状态决定，
-        // 这样菜单项 id 固定，文本可随状态切换
-        if let Some(action) = menu_action_for(id.as_str(), &status_for_menu.borrow()) {
-            // OS 线程用 try_send（非阻塞）转发；通道满/关闭时丢弃
-            if action_tx.try_send(action).is_err() {
-                warn!("托盘泵任务已退出，丢弃菜单事件");
-            }
+        // monitor_toggle 的具体动作（启动/停止）由当前引擎状态决定；
+        // try_send 非阻塞转发，通道满/关闭时丢弃
+        if let Some(action) = menu_action_for(id.as_str(), &status_for_menu.borrow())
+            && action_tx.try_send(action).is_err()
+        {
+            warn!("托盘泵任务已退出，丢弃菜单事件");
         }
     }));
-
-    // 注册全局托盘图标事件处理器：左键单击打开 Web 控制台
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
         if let TrayIconEvent::Click {
             button,
@@ -371,22 +581,32 @@ fn run_os_thread(
         }
     }));
 
-    // 阻塞等待泵任务 / Drop 发来的命令（退出或刷新托盘），保持线程存活。
-    // 按值移交所有权（Linux timeout_add_local 闭包要求 'static，见 run_os_event_loop）。
-    run_os_event_loop(
-        tray,
-        status,
-        active_icon,
-        inactive_icon,
-        status_item,
-        toggle_item,
-        os_cmd_rx,
-    );
+    // 状态入库：托盘对象自此常驻主线程 thread_local（drop TrayIcon 即摘除
+    // 菜单栏图标，故存活期必须覆盖到进程退出前的清理投递）
+    MAC_TRAY_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(MacTrayState {
+            tray,
+            menu_items,
+            active_icon,
+            inactive_icon,
+            status_item,
+            toggle_item,
+        });
+    });
+}
 
-    // 清理：清除全局处理器（释放 action_tx 引用）
+/// macOS 主线程托盘清理（仅在主队列闭包内执行）
+///
+/// drop [`MacTrayState`]（AppKit 随之摘除菜单栏图标）并清除全局事件
+/// 处理器——与 Windows/Linux 线程退出路径的清理同口径
+#[cfg(target_os = "macos")]
+fn clear_mac_tray_on_main() {
+    MAC_TRAY_STATE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
     MenuEvent::set_event_handler::<fn(MenuEvent)>(None);
     TrayIconEvent::set_event_handler::<fn(TrayIconEvent)>(None);
-    debug!("系统托盘线程退出");
+    debug!("macOS 托盘已清理");
 }
 
 /// 菜单 id → [`TrayAction`] 纯映射（monitor_toggle 依当前引擎状态二选一）。
@@ -415,6 +635,9 @@ fn menu_action_for(id: &str, snap: &StatusSnapshot) -> Option<TrayAction> {
 /// 参数一律按值传递（`Rc`/`Arc`/`MenuItem` 均为廉价 clone）：Linux 的
 /// `timeout_add_local` 闭包要求 `'static`，传引用会导致 E0521（D 项重构曾
 /// 因此仅 Linux 编译失败，Windows 本地无法发现——跨平台改动必须过 unix job）。
+/// macOS 不经本函数：代理线程直接驱动主队列（见 [`run_macos_proxy_loop`]），
+/// 整体不参与编译，避免参数在 macOS 构建下集体未使用
+#[cfg(not(target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
 fn run_os_event_loop(
     tray: Rc<TrayIcon>,
@@ -451,9 +674,10 @@ fn run_os_event_loop(
         toggle_item,
         os_cmd_rx,
     );
-    // 其余平台（macOS 等）：托盘暂不支持（tray-icon 要求主线程事件循环，
-    // 见 known-issues W6），仅保持线程等待退出命令
-    #[cfg(all(not(windows), not(target_os = "linux")))]
+    // 其余平台（macOS 之外的假想桌面目标）：macOS 已有专属主队列分支，
+    // 此处仅保留编译完备性兜底——三平台之外无已知构建目标，且 TrayIcon
+    // 构建在这类平台会以 Err 优雅失败；仅保持线程等待退出命令
+    #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
     run_fallback_loop(
         tray,
         status,
@@ -538,8 +762,9 @@ fn run_linux_loop(
     gtk::main();
 }
 
-/// 其余平台事件循环：阻塞等待退出/刷新命令
-#[cfg(all(not(windows), not(target_os = "linux")))]
+/// 其余平台事件循环：阻塞等待退出/刷新命令（macOS 之外三平台无主队列
+/// 机制的假想兜底，见 `run_os_event_loop` 尾部分支注释）
+#[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
 #[allow(clippy::too_many_arguments)]
 fn run_fallback_loop(
     tray: Rc<TrayIcon>,
