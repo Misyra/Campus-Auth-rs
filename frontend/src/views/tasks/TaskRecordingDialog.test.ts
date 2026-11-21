@@ -14,7 +14,10 @@
  * - 预览阶段单步删除（删错步骤后保存载荷同步收缩）；
  * - 空录制（响应无动作数组）→ 回到选方案 + 就地提示（不回读方案详情——
  *   apply=false 下方案未被写入，回读只会拿到旧录制）；
- * - 放弃录制 → stop 带 discard=true（后端不落盘）。
+ * - 放弃录制 → stop 带 discard=true（后端不落盘）；
+ * - starting 窗口取消（P2-14）：start 在途关闭弹窗 → 立即关窗不发 stop（会话未登记，
+ *   发了也 409），start 落地后补发一次 stop(discard) 收尾，不进录制态；补发撞 409
+ *   （会话实际未落地）静默收场不弹失败提示。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createApp, nextTick, type App } from "vue";
@@ -22,6 +25,7 @@ import TaskRecordingDialog from "./TaskRecordingDialog.vue";
 import { useTaskRecording } from "./useTaskRecording";
 import { useProfiles } from "@/composables/useProfiles";
 import { useToast } from "@/composables/useToast";
+import { useConfirm } from "@/composables/useConfirm";
 import type { ProfileSummary } from "@/api/types";
 
 /** 构造 JSON 响应（与 PersistentSessionSection.test.ts 同款桩） */
@@ -322,5 +326,101 @@ describe("TaskRecordingDialog", () => {
     expect(stopUrls).toHaveLength(1);
     expect(stopUrls[0]).toContain("discard=true");
     expect(document.querySelector('[data-testid="record-start"]')).not.toBeNull();
+  });
+
+  // ===== starting 窗口取消（P2-14）：start 在途关弹窗不得留下孤儿会话 =====
+
+  /** 手动放行的延迟响应：模拟 Worker 冷启动数秒的 start 在途窗口 */
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  it("start 在途关闭弹窗：立即关窗不发 stop，start 落地后补发一次 stop(discard) 收尾", async () => {
+    const start = deferred<undefined>();
+    const stopUrls: string[] = [];
+    stubFetch((url) => {
+      if (url.includes("/config-session/start")) {
+        return start.promise.then(() => jsonResponse({ data: { started: true } }));
+      }
+      if (url.includes("/config-session/stop")) {
+        stopUrls.push(url);
+        return Promise.resolve(
+          jsonResponse({ data: { recorded_count: 0, truncated: false, persistent_session_enabled: false } }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    mountDialog();
+    await flush();
+    const rec = useTaskRecording();
+    rec.profileId.value = "dorm";
+    await flush(); // 等重渲染解除按钮禁用态，否则 click() 落在 disabled 按钮上无效
+    click("record-start");
+    await settle();
+    expect(rec.phase.value).toBe("starting");
+
+    // 关闭弹窗：starting 阶段确认文案按「取消打开」语义表述
+    const closePromise = rec.requestClose();
+    await flush();
+    const { confirmState } = useConfirm();
+    expect(confirmState.visible).toBe(true);
+    expect(confirmState.title).toContain("取消打开");
+    useConfirm().resolveConfirm(true);
+    await closePromise;
+
+    // 弹窗即时关闭；start 仍在途时不发 stop（此刻 stop 必 409 且会落地成孤儿会话）
+    expect(rec.open.value).toBe(false);
+    expect(rec.phase.value).toBe("select");
+    expect(stopUrls).toHaveLength(0);
+
+    // start 落地：补发一次 stop(discard=true) 收尾，且不推进到录制态
+    start.resolve(undefined);
+    await settle();
+    expect(stopUrls).toHaveLength(1);
+    expect(stopUrls[0]).toContain("discard=true");
+    expect(rec.phase.value).toBe("select");
+    expect(rec.open.value).toBe(false);
+  });
+
+  it("start 在途取消后补发 stop 撞 409（会话未落地）：静默收场，不弹失败提示", async () => {
+    const stopUrls: string[] = [];
+    const start = deferred<undefined>();
+    stubFetch((url) => {
+      if (url.includes("/config-session/start")) {
+        return start.promise.then(() => jsonResponse({ data: { started: true } }));
+      }
+      if (url.includes("/config-session/stop")) {
+        stopUrls.push(url);
+        return Promise.resolve(
+          jsonResponse({ error: { code: "CONFLICT", message: "无活跃配置会话" } }, { status: 409 }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    mountDialog();
+    await flush();
+    const rec = useTaskRecording();
+    rec.profileId.value = "dorm";
+    await flush();
+    click("record-start");
+    await settle();
+
+    const closePromise = rec.requestClose();
+    await flush();
+    useConfirm().resolveConfirm(true);
+    await closePromise;
+    expect(rec.open.value).toBe(false);
+
+    start.resolve(undefined);
+    await settle();
+    // 补发的 stop 已发出；409 = 会话实际未落地，目的已达成 → 无失败 toast
+    expect(stopUrls).toHaveLength(1);
+    expect(stopUrls[0]).toContain("discard=true");
+    expect(useToast().toast.message).toBe("");
+    expect(rec.phase.value).toBe("select");
   });
 });

@@ -16,6 +16,8 @@
  * 409 口径与 PersistentSessionSection 一致：start 409 用固定文案「已有配置会话进行中」
  * （占用可能来自方案页/其他页面，统一行动指引比逐场景解释更有用）；stop 409 =
  * 会话已消失（浏览器被手动关闭/后端超时回收），透传后端 message 并退回选择阶段。
+ * starting 窗口（start 在途）的放弃只记取消轮次，由 startRecording await 返回后补发
+ * stop(discard) 收尾——立即 stop 必 409 且 start 照常落地，会留下无面板可收的孤儿会话。
  */
 
 import { ref } from "vue";
@@ -57,6 +59,16 @@ const skippedUnknown = ref(0);
 /** Worker 侧截断标记（动作数超出单次上限） */
 const truncated = ref(false);
 
+/** start 发起序号：await 返回后据此判定本轮是否仍主导状态机（被取消/被新一轮取代） */
+let startRunId = 0;
+/**
+ * starting 阶段被放弃的 start 轮次集合（P2-14）。start 在途时会话尚未登记，立即
+ * stop 必 409 且 start 随后照常落地——留下一个前端已无面板可结束的孤儿会话。改为
+ * 只记取消意图，start await 返回后补发一次 stop(discard) 收尾。按轮次记账而非布尔
+ * 标记：取消后重开弹窗再发起时，旧轮次的收尾不因新轮次清标记而丢失。
+ */
+const cancelledStartRuns = new Set<number>();
+
 const { toastOnly } = useToast();
 const { confirm } = useConfirm();
 
@@ -74,13 +86,17 @@ function openDialog(): void {
 /**
  * 关闭弹窗。会话占用中先确认：录制会话全局唯一，直接关掉弹窗会留下一个看不见的
  * 占用（方案页也无法再发起会话），因此关闭 = 放弃录制（discard 结束）；取消则留在弹窗。
+ * starting 阶段的确认文案按「取消打开」语义表述——浏览器还没就绪，谈不上"放弃录制"。
  */
 async function requestClose(): Promise<void> {
   if (SESSION_ACTIVE_PHASES.has(phase.value)) {
+    const starting = phase.value === "starting";
     const ok = await confirm({
-      title: "放弃录制",
-      message: "录制会话进行中，关闭将结束会话并放弃本次录制。确定关闭吗？",
-      confirmText: "放弃并关闭",
+      title: starting ? "取消打开录制浏览器" : "放弃录制",
+      message: starting
+        ? "正在打开录制浏览器，关闭将取消本次录制（浏览器若已拉起会被关闭）。确定关闭吗？"
+        : "录制会话进行中，关闭将结束会话并放弃本次录制。确定关闭吗？",
+      confirmText: starting ? "取消并关闭" : "放弃并关闭",
       danger: true,
     });
     if (!ok) return;
@@ -92,15 +108,33 @@ async function requestClose(): Promise<void> {
 /**
  * 发起录制会话（record 缺省 true）。409 用固定文案：占用可能来自方案页、其他页面
  * 或本页刷新丢失的观测状态，与 PersistentSessionSection 同一句话。
+ *
+ * start 在途期间被放弃（P2-14）：会话登记晚于 start 落地，此刻立即 stop 必 409、
+ * 且 start 照常落地成孤儿会话——abandonRecording 只记取消轮次，await 返回后由此处
+ * 补发一次 stop(discard) 收尾；409 = 会话实际未落地，目的已达成，静默。收尾失败经
+ * 全局 toast 透出（弹窗已关，就地 errorMsg 无人可见）。
  */
 async function startRecording(): Promise<void> {
   if (!profileId.value || phase.value !== "select") return;
   phase.value = "starting";
   errorMsg.value = "";
+  const runId = ++startRunId;
   try {
     await configSessionApi.start(profileId.value);
+    if (runId !== startRunId) {
+      // 本轮已被取代（取消后重开重发）：不推进状态机，只做本轮自己的取消收尾
+      if (cancelledStartRuns.delete(runId)) await discardCancelledSession();
+      return;
+    }
+    if (cancelledStartRuns.delete(runId)) {
+      // 弹窗在 start 在途时被关闭：会话此刻已登记，补发 stop 收尾后不再进录制态
+      await discardCancelledSession();
+      return;
+    }
     phase.value = "recording";
   } catch (error) {
+    cancelledStartRuns.delete(runId);
+    if (runId !== startRunId) return; // 已被取代：失败结论属于旧流程，不写新弹窗状态
     phase.value = "select";
     if (error instanceof ApiError && error.status === 409) {
       errorMsg.value = "已有配置会话进行中";
@@ -110,9 +144,26 @@ async function startRecording(): Promise<void> {
   }
 }
 
+/** 取消轮次的收尾：stop(discard) 只关浏览器不落盘；409（会话未落地）静默，其余失败走全局 toast */
+async function discardCancelledSession(): Promise<void> {
+  try {
+    await configSessionApi.stop(profileId.value, { discard: true });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) return;
+    toastOnly(false, extractApiError(error, "取消录制失败，配置浏览器可能仍未关闭"));
+  }
+}
+
 /** 放弃：discard 结束只关浏览器，后端不落盘录制、不改方案；409（浏览器已没了）目的已达成，静默收场 */
 async function abandonRecording(): Promise<void> {
   if (!SESSION_ACTIVE_PHASES.has(phase.value)) return;
+  if (phase.value === "starting") {
+    // 会话尚未登记：立即 stop 必 409，改为记取消轮次，由 startRecording 的
+    // await 返回后补发收尾；弹窗可即时关闭（等浏览器冷启动是纯空等）
+    cancelledStartRuns.add(startRunId);
+    phase.value = "select";
+    return;
+  }
   phase.value = "finishing";
   try {
     await configSessionApi.stop(profileId.value, { discard: true });
