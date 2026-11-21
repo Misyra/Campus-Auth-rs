@@ -10,12 +10,13 @@
 
 - [x] **P1 录制明文密码双层防线**：Worker 启发式（autocomplete 密码语义 + WeakMap 首判锁定，84b0e22）+ Rust stop 结算等值归一（原文 + URL 编码恒等替换占位符，06f8eea）+ 诊断包脱敏登记 recorded_actions（703e27f）——三条扩散路径（方案落盘 / 任务仓库外发 / 诊断包）全封堵
 - [x] **录制链 P2 五连修**：空闲回收豁免（c9ec922）/ iframe frame 契约三侧贯通（a5663f6 + 04fc505）/ shadow DOM composedPath（bc344cb）/ 点导航丢 pendingFill（5d7accc）/ starting 孤儿会话按轮次记账（2e17a06）
-- [x] **macOS 系统托盘启用（f5cc2e1，架构批，known-issues W6 收口）**：主线程交还 AppKit + 托盘经 GCD 主队列投递；真机冒烟退出链 SIGTERM 1s 零残留（`NSApp.stop` 无事件唤醒不生效的真机发现与 exit 收法见 changelog）——**菜单栏图标与左右键交互待用户人工目检**；轻量模式 macOS 恢复留目检后决策
+- [x] **macOS 系统托盘启用（f5cc2e1，架构批，known-issues W6 收口）**：主线程交还 AppKit + 托盘经 GCD 主队列投递；真机冒烟退出链 SIGTERM 1s 零残留（`NSApp.stop` 无事件唤醒不生效的真机发现与 exit 收法见 changelog）——**人工目检完成（2026-11-22）**：功能全过（图标常驻 / 左键控制台 / 右键菜单 / Dock 不出现，`lsappinfo` type=UIElement 佐证）；图标观感按反馈「有点灰」收口为模板渲染（be74a7c，浅色黑 / 深色白，停止态不再灰化）；轻量模式 macOS 恢复留后续
 - [x] **回环免引导连接风暴根治（68641ba）**：WS 鉴权门 + `onAuthReady` 事件 + unauthorized 诚实分类（不再弹「请检查后端」误导 toast）+ 状态轮询降级复位
 - [x] **CI 两项假防线**：clippy --all-targets 必红收口（54a0a31，验证口径教训）+ vitest 覆盖率门禁接通（be130fe）
 - [x] **安卓壳层四项 + 前置①②③**：restart/shutdown android 门（d02e0c2）/ WebView 文件选择与下载含 blob（684f590）/ local-token 安卓下架 + `nativeBootstrapSecret` fragment 引导（a49fb36）/ FGS nativeStop 异步可重启（7b6aac8）/ 密钥路径挂 `CAMPUS_AUTH_BASE_DIR`（ac73d85）；BootReceiver 双状态源④按计划留 P2
 - [x] **其余 P3 全量**：IPv6 剥括号（43acd2e）/ Docker TZ 文档（913b97f）/ XDG 转义与 Linux 观测（d9ad14f + b11a2eb）/ App Paths 注册表（b317e20）/ 通知 AUMID（e9d1bbb）/ uv 哨兵（a19bde4）/ 诊断脱敏等，逐项见 changelog 同名分节
-- [ ] **终检与复验**：统一门禁全绿（fmt 已收口 56b2e1e；android target / 前端含覆盖率门禁已过）+ clippy --all-targets 与全量 cargo test 收口中 + 实例复验（连接风暴复测、录制弹窗回归）+ 托盘目检交用户；CI 全矩阵（含 e2e-login-chain / rust-tests-unix 真机）待 PR 触发
+- [ ] **终检与复验**：统一门禁全绿（fmt 已收口 56b2e1e；android target / 前端含覆盖率门禁已过）+ clippy --all-targets 与全量 cargo test 收口中 + 实例复验（连接风暴复测、录制弹窗回归）+ 托盘目检完成（2026-11-22，观感反馈已修 be74a7c）；CI 全矩阵（含 e2e-login-chain / rust-tests-unix 真机）待 PR 触发
+- [ ] **日志按日文件名 UTC/本地错位（2026-11-22 实机发现，P3）**：`tracing_appender::rolling::daily` 文件名取 UTC 日期（rolling.rs:198 `OffsetDateTime::now_utc`）——02:18 CST 启动仍写 `app.log.2026-11-21`，而 `is_active_log_file` 按**本地**今天比对（logging.rs:294），本地 00:00–08:00 窗口内正在写的活跃文件被误判可清理（过期/配额清理可能删在写文件）；文件名日期标签对 UTC+8 用户恒滞后一天。修法方向：活跃判定改与 appender 同源的 UTC 口径，或清理守卫直接比对当前 writer 持有的目标文件名
 
 ## 录制生成独立任务（2026-11-21 立项，**已落地**）
 
