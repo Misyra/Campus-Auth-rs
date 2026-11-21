@@ -5749,7 +5749,7 @@
    "name": "AGPL-3.0-only"
   },
   "title": "Campus-Auth Web API",
-  "version": "5.2.0-beta.1"
+  "version": "5.2.0-beta.2"
  },
  "openapi": "3.1.0",
  "paths": {

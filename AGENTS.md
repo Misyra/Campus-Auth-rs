@@ -6,7 +6,7 @@ Campus-Auth（中文名「认证喵」）是一个校园网自动认证工具。
 
 安卓端（`feat/android` 分支开发中）：复用同一 Rust 控制平面——`android` feature 经 cargo-ndk 编 cdylib（`src/ffi_android.rs` JNI 薄层）+ `android/` Kotlin 壳以系统 WebView 加载本机 axum 内嵌前端；P0 编译已打通，收敛清单与阶段计划见 `docs/plan-next.md`「安卓端开发」。
 
-当前主程序版本：5.2.0-beta.1（用户可见更新见 `docs/updatelog.md`，逐项更改见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `openapi.json` 三端同版）。Python Worker 版本独立固定为 1.0.0。
+当前主程序版本：5.2.0-beta.2（用户可见更新见 `docs/updatelog.md`，逐项更改见 `docs/changelog.md`；`Cargo.toml` / `frontend/package.json` / `openapi.json` 三端同版）。Python Worker 版本独立固定为 1.0.0。
 
 ## 技术栈
 

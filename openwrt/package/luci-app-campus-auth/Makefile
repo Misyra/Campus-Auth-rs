@@ -2,7 +2,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-campus-auth
-PKG_VERSION:=5.2.0-beta.1
+PKG_VERSION:=5.2.0-beta.2
 PKG_RELEASE:=1
 
 # 程序保留 SemVer；包管理器使用能排在同版正式版之前的预发布格式。

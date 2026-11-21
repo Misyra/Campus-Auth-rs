@@ -1,6 +1,6 @@
 # 更改日志
 
-> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.1”。
+> 本文件记录每一次代码、配置、接口与文档更改，供开发和问题追溯；面向用户的版本更新摘要见 `docs/updatelog.md`。历史轮次继续保留于本文件（`docs/archive/` 已于 2026-09-17 删除，历史归档材料随之不可追溯），活跃计划见 `docs/plan-next.md` + `docs/known-issues.md`。最新活跃为“v5.2.0-beta.2”。
 
 ## 开发中（2026-11-21 全面审查修复战役）
 
@@ -41,6 +41,7 @@
 - **引擎与 uv 哨兵（e92dc48 + a19bde4）**：run_loop.rs 两处 `load_all_profiles` 经 spawn_blocking 移出主循环 worker（cf9ffe8 收敛批次漏网收口，engine 54 全过含真实走盘切换链测试）；uv 镜像探测 `rank_mirror_urls` enumerate 回收真实 idx + `order_from_probe_results` 越界过滤（三个调用方单点收口，哨兵 usize::MAX 防御测试钉住）——plan-next 已挂账 P2 的 panic 隐患收口（a8ccfa8 测速按钮扩大触达面后提级项）。E 批收口验证：`cargo test --lib` **1513 全过**、Windows/Linux cfg 分支 scratch 交叉编译通过、P3-39 文件勘误（实际 `src/browser.rs`）、autostart utoipa description 留后续契约批次更新。
 - **统一终检收口（56b2e1e + 6ac81e0）**：`cargo fmt` 收编八批代理的格式漂移（10 文件纯换行/导入序，无语义差异——各批跑了 clippy 未跑 fmt 的补课）；plan-next 勾账（新增「全面审查修复战役」分节、uv 哨兵勾销、安卓 P1 前置①②③标记已修仅剩④）+ known-issues **W6 收口**（macOS 托盘已启用待目检、Linux 维持待真机验证）。终检门禁全绿：fmt / **clippy --all-targets 零警告**（暂停时怀疑的 main.rs 残留警告不存在）/ **全量 cargo test exit 0**（lib 1513 各批已验 + 集成零失败）/ pytest **497** / 前端全套含 **vitest --coverage 阈值门禁**与 build / android target（cargo ndk check，仅 detect.rs 六条 P0 预存死代码警告）。
 - **实机复验（2026-11-21 晚，最新构建实例 50733）**：① **连接风暴复测通过**——两次全新打开（首次加载 + 清空凭据存储严格复现今晨场景）12 秒内 unauthorized 计数 **0**（修复前同场景数十条）、误导 toast **0**（修复前≥2）、日志通道一次连上、配置正常加载（68641ba 修法实测有效）；② 录制弹窗回归通过——三阶段第一阶段结构完整、Esc 关闭正常；③ 托盘实测——新构建实例日志「系统托盘已创建（macOS 主队列）」，菜单栏图标视觉待用户人工目检。复验截图补入 `docs/reports/ui-sweep-2026-11-21/`（12/13 号）。
+- **版本定格 v5.2.0-beta.2（2026-11-22）**：汇总三个「开发中」分节（录制生成独立任务 / 前端统一重构战役 / 全面审查修复战役）为可发布版本。三端同版：`Cargo.toml` + `frontend/package.json` + `openapi.json` info.version（UPDATE_OPENAPI 重生成，diff 恰一行版本号）；`updatelog.md` 新增 v5.2.0-beta.2 用户条目（录制任务 / 持久会话 / 界面 / macOS 托盘 / 稳定性 / Docker TZ 六节 + 兼容性说明）；同步 AGENTS.md 头部版本、plan-next「当前活跃」（原 v5.1.3 系 beta.1 时漏更的陈旧漂移一并修正）、openwrt 两包 `PKG_VERSION`、fuzz/Cargo.lock campus-auth 版本条目（路径依赖版本镜像，保 `--locked` 构建可用）；`version_info.rs` / `openwrt_package_test.py` / 指南示例中的 beta.1 为测试夹具与历史示例，不动。打 tag 与 GitHub 发版由维护者执行。
 
 ## 开发中（2026-11-21 录制生成独立任务）
 
