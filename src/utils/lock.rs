@@ -133,7 +133,14 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     }
 
     if info.port == 0 {
-        anyhow::bail!("实例运行于轻量模式且 Web 控制台尚未启动，无法远程停止；请通过系统托盘退出");
+        // 轻量模式无 Web 控制台可发关机请求；托盘指引只对有托盘的实例成立
+        //（轻量 + 显式无托盘的组合里托盘不存在，P3-40），必须同时给出
+        // 手动 kill 出口，否则指引是死路
+        anyhow::bail!(
+            "实例运行于轻量模式且 Web 控制台尚未启动，无法远程停止；\
+             若有系统托盘请从托盘退出，否则请手动结束进程（PID {}）",
+            info.pid
+        );
     }
 
     // 发送关机请求（忽略 HTTP 错误，进程可能已开始关闭）。
@@ -379,6 +386,26 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "record_port 后不应残留临时文件: {leftovers:?}"
+        );
+    }
+
+    /// P3-40：轻量模式（端口未监听）下 `--stop` 无法远程停止，错误指引必须
+    /// 同时给出手动 kill 出口——「轻量 + 显式无托盘」组合里托盘指引是死路
+    #[tokio::test]
+    async fn stop_instance_lightweight_without_console_reports_kill_exit() {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let info_path = crate::utils::paths::instance_info_path(dir.path());
+        std::fs::create_dir_all(info_path.parent().expect("父目录")).unwrap();
+        // 自身 PID + 端口 0：query_instance 判定存活、无端口可发关机请求
+        std::fs::write(&info_path, format!("{}\n0\n", std::process::id())).unwrap();
+        let err = stop_instance(dir.path()).await.expect_err("轻量模式必须无法远程停止");
+        let message = format!("{err:#}");
+        assert!(message.contains("轻量模式"), "{message}");
+        // kill 出口指引：须含手动结束提示与实例 PID
+        assert!(message.contains("手动结束进程"), "{message}");
+        assert!(
+            message.contains(&std::process::id().to_string()),
+            "指引须带实例 PID: {message}"
         );
     }
 
