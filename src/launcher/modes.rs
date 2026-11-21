@@ -44,12 +44,10 @@ pub(super) async fn launch_full(state: &mut LauncherState) -> Result<()> {
     }
     state.axum_handle = Some(handle);
     let bind_host = state.app_config.host.as_deref().unwrap_or("127.0.0.1");
-    // Docker 环境绑定 0.0.0.0 时，提示地址仍显示为可访问的 host:port
-    let display_host = if bind_host == "0.0.0.0" {
-        "0.0.0.0"
-    } else {
-        "127.0.0.1"
-    };
+    // 展示地址跟随真实绑定地址（P3-13）：--host 192.168.x.x 的 LAN 部署此前被
+    // 一律显示成 127.0.0.1，日志与提示双错；0.0.0.0 照实显示（全接口绑定的
+    // 事实陈述，不是可访问的目的地址）
+    let display_host = display_host_for(bind_host);
     info!("Web 控制台已启动: http://{display_host}:{port}");
 
     // CLI --no-browser 与设置项 app.auto_start_browser 任一关闭即不打开：
@@ -57,10 +55,10 @@ pub(super) async fn launch_full(state: &mut LauncherState) -> Result<()> {
     if state.app_config.auto_open_browser {
         // 打开失败（无桌面环境等）时同样给出终端入口，避免界面彻底不可达
         if !open_browser(&state.app_config.base_path, port) {
-            print_headless_ui_hint(state, port, display_host);
+            print_headless_ui_hint(state, port, bind_host);
         }
     } else {
-        print_headless_ui_hint(state, port, display_host);
+        print_headless_ui_hint(state, port, bind_host);
     }
 
     // Engine 崩溃恢复
@@ -220,19 +218,34 @@ fn spawn_background_update_check(state: &LauncherState) {
     }
 }
 
+/// 绑定地址 → 展示用 host 文本（P3-13）
+///
+/// 与监听侧共用 [`app::parse_bind_addr`] 的解析口径（不可解析的 host 同样
+/// 回退回环），展示的必然是实际绑定的地址；IPv6 按 URL 书写惯例补方括号
+/// （`http://[::1]:port`），IPv4 原样。
+fn display_host_for(bind_host: &str) -> String {
+    match app::parse_bind_addr(bind_host) {
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        ip => ip.to_string(),
+    }
+}
+
 /// 无浏览器 + 无托盘（且回环监听）时，把带引导秘钥的完整界面地址打到终端。
 ///
 /// 该组合下没有任何界面入口——托盘「复制界面链接」不存在、也不自动开浏览器，
 /// 用户只能去读 0600 的密钥文件，headless 自测/无桌面环境等于「打不开」。
 /// 只写 stderr（终端可见），**不进日志文件与诊断包**：后端日志按设计只记录
 /// 不含 fragment 的基础 URL，引导秘钥不得落盘。
-fn print_headless_ui_hint(state: &LauncherState, port: u16, display_host: &str) {
+fn print_headless_ui_hint(state: &LauncherState, port: u16, bind_host: &str) {
     // no_tray 字段仅桌面构建存在；其余构建恒无托盘，视同「无托盘」成立
     #[cfg(feature = "desktop")]
     let no_tray = state.app_config.no_tray;
     #[cfg(not(feature = "desktop"))]
     let no_tray = true;
-    if display_host != "127.0.0.1"
+    // 回环判据用真实绑定地址（P3-13）：此前拿展示地址做字符串硬比较，
+    // `--host ::1` 等回环绑定会被误判为非回环而不打印；解析口径与监听侧
+    // parse_bind_addr 完全一致，杜绝两处判定漂移
+    if !app::parse_bind_addr(bind_host).is_loopback()
         || !no_tray
         || app::is_docker_env()
         || cfg!(any(feature = "openwrt", feature = "android"))
@@ -244,4 +257,33 @@ fn print_headless_ui_hint(state: &LauncherState, port: u16, display_host: &str) 
         "界面入口（含引导秘钥，勿转发）：{}",
         crate::web::auth::ui_url(port, bootstrap.as_deref())
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// display_host_for：跟随真实绑定地址（P3-13），IPv6 补方括号
+    #[test]
+    fn test_display_host_follows_bind_address() {
+        assert_eq!(display_host_for("127.0.0.1"), "127.0.0.1");
+        assert_eq!(display_host_for("0.0.0.0"), "0.0.0.0");
+        // LAN 部署此前被硬编码显示成 127.0.0.1，日志与实际绑定地址不符
+        assert_eq!(display_host_for("192.168.1.5"), "192.168.1.5");
+        assert_eq!(display_host_for("::1"), "[::1]");
+        // 不可解析的 host 与监听侧 parse_bind_addr 同口径回退回环
+        assert_eq!(display_host_for("not-an-ip"), "127.0.0.1");
+    }
+
+    /// 回环判据口径（P3-13）：按绑定地址 is_loopback 判定，
+    /// 0.0.0.0（全接口）与 LAN 地址均不触发提示
+    #[test]
+    fn test_hint_loopback_criterion_matches_bind_addr() {
+        assert!(app::parse_bind_addr("127.0.0.1").is_loopback());
+        assert!(app::parse_bind_addr("::1").is_loopback());
+        assert!(!app::parse_bind_addr("0.0.0.0").is_loopback());
+        assert!(!app::parse_bind_addr("192.168.1.5").is_loopback());
+        // 监听侧对主机名回退回环绑定，提示判据保持同一结论
+        assert!(app::parse_bind_addr("localhost").is_loopback());
+    }
 }
