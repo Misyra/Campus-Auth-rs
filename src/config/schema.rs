@@ -1008,7 +1008,8 @@ impl LoginChannel {
 /// 的汇聚逻辑 + README「录制契约」一节）：`type`/`selector`/`strategy`/`ts` 恒存在，
 /// `value` 由 `change`/`fill`/`navigate` 动作携带（点击不录值，缺键反序列化为
 /// `None`；`fill` 的值为录制时的输入内容——凭据经 `{{USERNAME}}`/`{{PASSWORD}}`
-/// 占位符录制，密码永不落明文，回放时由 `profile_auto_login` 下发的凭据解析）。
+/// 占位符录制，密码永不落明文，回放时由 `profile_auto_login` 下发的凭据解析），
+/// `frame` 仅在非顶层 frame（iframe）内捕获时携带（顶层捕获缺键）。
 ///
 /// `type` 与 `strategy` 刻意保持 `String` 而非枚举：两者都是 Worker 侧演进的
 /// 受控词表（当前 `type` 为 `click`/`change`/`fill`/`navigate`，`strategy` 为
@@ -1031,6 +1032,10 @@ pub struct RecordedAction {
     /// Worker 返回形状一致）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// 非顶层 frame 内捕获的动作：主文档到目标 iframe 的 CSS 选择器链，
+    /// ' >> ' 分隔；顶层捕获缺此键
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
 }
 
 /// 单个 Profile 文件内容（`config/profiles/{id}.json`）
@@ -1238,7 +1243,8 @@ mod tests {
     /// RecordedAction 与 Worker 录制契约（python_worker/config_session.py）逐字对齐：
     /// `type`/`selector`/`strategy`/`ts` 恒存在，`value` 由 change/fill 携带（click
     /// 缺键 → None，回写时同样不带 value 键，与 Worker 返回形状一致；fill 的值
-    /// 可为凭据占位符，按字面值透传）。
+    /// 可为凭据占位符，按字面值透传）；`frame` 仅 iframe 内捕获时携带（可选键，
+    /// 缺键 → None，回写时同样不带该键）。
     #[test]
     fn recorded_action_matches_worker_contract() {
         let worker_shape = serde_json::json!([
@@ -1262,23 +1268,39 @@ mod tests {
                 "ts": 1731475200789i64,
                 "value": "{{PASSWORD}}",
             },
+            {
+                "type": "fill",
+                "selector": "#user",
+                "strategy": "id",
+                "ts": 1731475200901i64,
+                "value": "{{USERNAME}}",
+                "frame": "#host >> iframe#portal",
+            },
         ]);
         let actions: Vec<RecordedAction> = serde_json::from_value(worker_shape).unwrap();
-        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.len(), 4);
         assert_eq!(actions[0].action_type, "click");
         assert_eq!(actions[0].selector, "#login-btn");
         assert_eq!(actions[0].strategy, "id");
         assert_eq!(actions[0].ts, 1731475200123);
         assert_eq!(actions[0].value, None, "click 无 value 键");
+        assert_eq!(actions[0].frame, None, "顶层捕获缺 frame 键 → None");
         assert_eq!(actions[1].action_type, "change");
         assert_eq!(actions[1].value.as_deref(), Some("telecom"));
+        assert_eq!(actions[1].frame, None, "缺 frame 键 → None（serde default）");
         // fill 携带值且占位符原样透传（凭据解析在回放侧，存储永不落明文）
         assert_eq!(actions[2].action_type, "fill");
         assert_eq!(actions[2].value.as_deref(), Some("{{PASSWORD}}"));
+        // iframe 内捕获：frame 选择器链原样透传（' >> ' 分隔由 Worker 侧保证）
+        assert_eq!(actions[3].action_type, "fill");
+        assert_eq!(actions[3].value.as_deref(), Some("{{USERNAME}}"));
+        assert_eq!(actions[3].frame.as_deref(), Some("#host >> iframe#portal"));
 
-        // 回写形状：click 不得出现 "value": null（Worker 契约里 click 不带该键）
+        // 回写形状：click 不得出现 "value": null（Worker 契约里 click 不带该键）；
+        // frame 为 None 的动作同样不得出现 "frame" 键
         let click_json = serde_json::to_value(&actions[0]).unwrap();
         assert!(click_json.get("value").is_none(), "{click_json}");
+        assert!(click_json.get("frame").is_none(), "{click_json}");
         assert_eq!(click_json["type"], "click");
         // change 回写保留 value
         let change_json = serde_json::to_value(&actions[1]).unwrap();
@@ -1286,6 +1308,9 @@ mod tests {
         // fill 回写同样保留 value（占位符字面值）
         let fill_json = serde_json::to_value(&actions[2]).unwrap();
         assert_eq!(fill_json["value"], "{{PASSWORD}}");
+        // frame 携带时回写保留（回放侧据此映射 StepConfig.frame）
+        let framed_json = serde_json::to_value(&actions[3]).unwrap();
+        assert_eq!(framed_json["frame"], "#host >> iframe#portal");
     }
 
     #[test]

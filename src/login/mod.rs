@@ -2163,6 +2163,7 @@ mod tests {
                 strategy: "text".to_string(),
                 ts: 42,
                 value: None,
+                frame: None,
             }],
             ..crate::config::ProfileData::default()
         };

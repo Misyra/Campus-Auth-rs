@@ -180,6 +180,10 @@ pub struct RecordedActionData {
     /// `click`/`navigate` 无此键（序列化时跳过，与 Worker 返回形状一致）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// 非顶层 frame 内捕获的动作：主文档到目标 iframe 的 CSS 选择器链，
+    /// ' >> ' 分隔；顶层捕获缺此键
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
 }
 
 /// POST /api/profiles/{id}/config-session/stop 响应载荷
@@ -3660,6 +3664,7 @@ mod tests {
             strategy: "id".into(),
             ts: 42,
             value: None,
+            frame: None,
         }];
 
         // 非 discard：400 且不派发、归属保留（可改用 discard 重新结算）
@@ -3845,6 +3850,7 @@ mod tests {
             strategy: "id".into(),
             ts: 42,
             value: None,
+            frame: None,
         }];
 
         let resp =
@@ -3887,6 +3893,7 @@ mod tests {
                 strategy: "id".into(),
                 ts: 1,
                 value: value.map(str::to_string),
+                frame: None,
             }
         }
         let username = "stu001";
@@ -4061,6 +4068,7 @@ mod tests {
                 strategy: "id".into(),
                 ts: 42,
                 value: None,
+                frame: None,
             }];
             dorm.persistent_session_enabled = true;
         }
