@@ -318,16 +318,10 @@ fn run_os_thread(
         drop(first_snapshot);
 
         // 加载图标（缺失则回退到生成色块），并准备运行/停止两种图标：
-        // 停止态用同一 logo 的灰色版保持品牌识别（此前是纯红色块，无信息量）
+        // 停止态经 inactive_icon_rgba 区分（非 macOS 压灰 / macOS 压半透明）
         let (rgba, w, h) = load_tray_rgba();
         let active_icon = make_icon(rgba.clone(), w, h);
-        let mut inactive_rgba = rgba;
-        for px in inactive_rgba.chunks_mut(4) {
-            px[0] = 150;
-            px[1] = 150;
-            px[2] = 150;
-        }
-        let inactive_icon = make_icon(inactive_rgba, w, h);
+        let inactive_icon = make_icon(inactive_icon_rgba(rgba), w, h);
 
         let built = match active_icon.as_ref() {
             Some(icon) => TrayIconBuilder::new()
@@ -421,8 +415,8 @@ struct MacTrayState {
     menu_items: Vec<Box<dyn IsMenuItem>>,
     /// 运行态图标（品牌黑猫剪影；macOS template 渲染下按系统深浅显黑/白）
     active_icon: Option<Icon>,
-    /// 停止态图标（灰色变体；仅 Windows / Linux 起视觉区分作用，macOS
-    /// template 渲染只取 alpha、与运行态同观感）
+    /// 停止态图标（macOS 压半透明淡显 / Windows / Linux 压灰，见
+    /// inactive_icon_rgba 的 cfg 对偶注释）
     inactive_icon: Option<Icon>,
     /// 「状态」信息行（动态改文本）
     status_item: MenuItem,
@@ -520,25 +514,20 @@ fn build_mac_tray_on_main(status: Arc<StatusManager>, action_tx: mpsc::Sender<Tr
     toggle_item.set_text(monitor_toggle_label(first_snapshot.engine_state));
     drop(first_snapshot);
 
-    // 加载图标（缺失则回退到生成色块），准备运行/停止两种形态
+    // 加载图标（缺失则回退到生成色块），准备运行/停止两种形态：
+    // 停止态经 inactive_icon_rgba 区分（macOS 压半透明淡显，见函数注释）
     let (rgba, w, h) = load_tray_rgba();
     let active_icon = make_icon(rgba.clone(), w, h);
-    let mut inactive_rgba = rgba;
-    for px in inactive_rgba.chunks_mut(4) {
-        px[0] = 150;
-        px[1] = 150;
-        px[2] = 150;
-    }
-    let inactive_icon = make_icon(inactive_rgba, w, h);
+    let inactive_icon = make_icon(inactive_icon_rgba(rgba), w, h);
 
     let built = match active_icon.as_ref() {
         Some(icon) => TrayIconBuilder::new()
             .with_icon(icon.clone())
             // 菜单栏图标走系统模板渲染：AppKit 只取 alpha 填色，浅色菜单栏
             // 显黑、深色自动显白。品牌图标是纯黑剪影，非模板下发灰且深色
-            // 菜单上近乎不可见（2026-11-22 真机目检反馈「图标有点灰」，即
-            // 停止态灰图标的观感）；运行/停止语义由菜单状态行与 tooltip
-            // 表达，不依赖图标颜色
+            // 菜单上近乎不可见（2026-11-22 真机目检反馈「图标有点灰」）。
+            // 运行/停止语义：停止态 alpha 减半淡显（系统「未激活」惯例）+
+            // 菜单状态行 + tooltip 三重表达
             .with_icon_as_template(true)
             .with_menu(Box::new(menu))
             .with_tooltip("认证喵 Campus-Auth")
@@ -1197,6 +1186,29 @@ fn load_tray_rgba() -> (Vec<u8>, u32, u32) {
             solid_rgba(ACTIVE_COLOR, FALLBACK_ICON_SIZE)
         }
     }
+}
+
+/// 停止态图标 RGBA 转换（macOS）：template 渲染只取 alpha 填色，灰色 RGB
+/// 无效——压 alpha 至半透明表达「未运行」（系统「未激活」淡显惯例），
+/// 深色菜单栏显半透明白、浅色显半透明黑，与运行态全亮形成对比
+#[cfg(target_os = "macos")]
+fn inactive_icon_rgba(mut rgba: Vec<u8>) -> Vec<u8> {
+    for px in rgba.chunks_mut(4) {
+        px[3] /= 2;
+    }
+    rgba
+}
+
+/// 停止态图标 RGBA 转换（Windows / Linux）：同一 logo 压灰 RGB 保持品牌
+/// 识别的双态着色（macOS 对偶路径见上，灰色 RGB 对模板渲染无效）
+#[cfg(not(target_os = "macos"))]
+fn inactive_icon_rgba(mut rgba: Vec<u8>) -> Vec<u8> {
+    for px in rgba.chunks_mut(4) {
+        px[0] = 150;
+        px[1] = 150;
+        px[2] = 150;
+    }
+    rgba
 }
 
 /// 生成指定颜色的纯色 RGBA 缓冲（alpha=255）
