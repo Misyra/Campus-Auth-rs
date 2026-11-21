@@ -241,6 +241,9 @@ async function connectWebSocket(): Promise<void> {
       }
     } else if (parsed.type === "dialog") {
       /* 弹窗提示已由后端留痕为任务域日志（source=task），事件本身无其他前端消费 */
+    } else if (parsed.type === "debug_session_closed") {
+      // Worker 崩溃强杀调试会话（P3-26）：清空调试面板本地状态，退出「进行中」态
+      useDebug().handleDebugSessionClosed((parsed.data ?? {}) as { reason?: string });
     } else if (parsed.type === "pong") {
       /* 心跳响应 */
     } else {

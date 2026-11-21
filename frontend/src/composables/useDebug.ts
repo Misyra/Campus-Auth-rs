@@ -254,6 +254,25 @@ function handleStepProgress(data: {
   );
 }
 
+/**
+ * 处理 WS `debug_session_closed`（P3-26）：Worker 崩溃时后端强杀调试会话——
+ * 会话在服务端已不存在，面板本地若不清空会永远停留「进行中」且后续操作必败。
+ * 清空会话状态、收起面板，并按 reason 给出用户可读提示。
+ */
+function handleDebugSessionClosed(data: { reason?: string }): void {
+  const reason = typeof data?.reason === "string" ? data.reason : "";
+  if (!visible.value && !session.running) return; // 面板未展示调试会话时无需动
+  frontendLogger.warn("debug", `调试会话被服务端强制关闭${reason ? `（${reason}）` : ""}`);
+  toastOnly(
+    false,
+    reason === "worker_crashed" ? "Python Worker 已崩溃，调试会话被强制结束" : "调试会话已被强制结束",
+  );
+  clearDetailRefill();
+  syncSession(emptySession());
+  screenshotStep.value = null;
+  visible.value = false;
+}
+
 export function useDebug() {
   return {
     session,
@@ -269,6 +288,7 @@ export function useDebug() {
     getStepStatus,
     handleScreenshot,
     handleStepProgress,
+    handleDebugSessionClosed,
     clearScreenshot,
     restoreIfActive,
   };

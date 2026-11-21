@@ -5,7 +5,8 @@
  * - 建连即拒（unauthorized）连续出现不翻牌成 unreachable；
  * - 连上过再断（传输中断）归类 unreachable 且阈值后保持；
  * - 鉴权就绪事件驱动：unauthorized 退避中 token 后到立即重连（带 5s 冷却）；
- * - 鉴权门：引导未完成（token=null）不发起匿名建连，挂起等待就绪事件。
+ * - 鉴权门：引导未完成（token=null）不发起匿名建连，挂起等待就绪事件；
+ * - debug_session_closed 消息路由到 useDebug（P3-26）。
  *
  * WebSocket/window/定时器全部打桩，不触网络。模块为单例（connecting/
  * retryCount/就绪订阅常驻），全链路放在单个顺序用例内，避免多用例间状态串扰；
@@ -20,6 +21,8 @@ const fetchStatusMock = vi.fn(async () => {});
 const fetchLogsMock = vi.fn(async () => {});
 /** 捕获 onAuthReady 登记的监听器，测试里手动触发「token 后到」事件 */
 const authReadyListeners: Array<(token: string) => void> = [];
+/** useDebug.handleDebugSessionClosed 桩（debug_session_closed 分发断言用） */
+const debugClosedMock = vi.fn();
 
 vi.mock("../api/client", () => ({
   // 桩一律无参转发：被测代码不传参，且裸 vi.fn() 摊开 unknown[] 会触发 TS2556
@@ -53,6 +56,7 @@ vi.mock("./useDebug", () => ({
   useDebug: () => ({
     handleScreenshot: vi.fn(),
     handleStepProgress: vi.fn(),
+    handleDebugSessionClosed: () => debugClosedMock(),
   }),
 }));
 
@@ -158,6 +162,13 @@ describe("useWebSocket 重连调度", () => {
     expect(wsMgr.wsDisconnectReason.value).toBeNull();
     expect(wsMgr.wsRetryCount.value).toBe(0);
     expect(cb).not.toHaveBeenCalled();
+
+    // 6b) 消息分发：debug_session_closed（Worker 崩溃强杀调试会话）路由到 useDebug（P3-26）
+    debugClosedMock.mockClear();
+    FakeSocket.last?.onmessage?.({
+      data: JSON.stringify({ type: "debug_session_closed", data: { reason: "worker_crashed" } }),
+    });
+    expect(debugClosedMock).toHaveBeenCalledTimes(1);
 
     // 7) 连上过再断 = 会话中断：分类 unreachable（P2-7），连续中断达阈值保持 unreachable
     FakeSocket.last?.onclose?.();
