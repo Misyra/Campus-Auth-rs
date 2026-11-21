@@ -21,10 +21,10 @@ android/
 
 前置要求：JDK 17、Android SDK（compileSdk 35）、本机 Gradle 8.9+（或任意能运行的 Gradle，见第 2 步）。
 
-1. **产出 Rust 动态库**：Rust 侧需提供 JNI 入口（契约见下节）并以 `cdylib` 方式编译（本次壳工程不动 `Cargo.toml`，crate-type 与 JNI 模块为 Rust 侧后续工作）。示意命令（仓库根执行）：
+1. **产出 Rust 动态库**：JNI 入口已随 P0 落地——`src/ffi_android.rs`（仅 `target_os = "android"` 下编译），`Cargo.toml` 的 `[lib] crate-type` 已含 `cdylib`，符号契约见下节。构建须关默认特性只开 `android`（默认 `desktop` 特性会拉 tray-icon/gtk 等桌面依赖，android target 编译不过）。命令（仓库根执行）：
 
    ```bash
-   cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release
+   cargo ndk -t arm64-v8a -o android/app/src/main/jniLibs build --release --no-default-features --features android
    ```
 
    产物 `libcampus_auth.so` 会被 cargo-ndk 直接放进 `android/app/src/main/jniLibs/arm64-v8a/`；目录不存在时先 `mkdir -p`。需要其他 ABI 时追加 `-t` 参数。
