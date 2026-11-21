@@ -262,7 +262,8 @@
   line-height: 1.6;
 }
 /* 步骤说明收进步进器行尾的 ？（FieldHelp）：常驻灰字块（三步 ol）改为悬停可见，
-   行内只占一个圆标；小屏步进器改三列网格后无处安放，直接隐藏 */
+   行内只占一个圆标；小屏步进器改三列网格后 ？ 移到整行居中（见下方 640px 分支，
+   不再隐藏——安卓 WebView 复用同一前端，触屏也要能看到使用步骤） */
 .ai-steps-help {
   display: inline-flex;
   align-items: center;
@@ -414,7 +415,9 @@
   .ai-step-label { font-size: var(--text-sm); white-space: normal; text-align: center; }
   .ai-step { flex-direction: column; gap: 6px; min-width: 0; }
   .ai-step-sep { display: none; }
-  .ai-steps-help { display: none; }
+  /* 小屏三步改三列网格，行尾 ？ 无处安放：整行居中保留入口（FieldHelp 点击可钉住，
+     气泡经 portal 展示，触屏 / 安卓 WebView 同样可达——旧取舍是直接 display:none） */
+  .ai-steps-help { grid-column: 1 / -1; justify-content: center; margin-left: 0; }
   .ai-provider-grid { grid-template-columns: 1fr; }
   .ai-stepper { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-inline: 10px; }
 }
