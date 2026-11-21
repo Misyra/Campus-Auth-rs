@@ -12,6 +12,66 @@ use std::path::Path;
 pub const NO_BROWSER_MESSAGE: &str =
     "当前无可用浏览器，请下载 Chromium（设置 · 浏览器页可一键安装）";
 
+/// 解析 App Paths 注册表默认值（REG_SZ/REG_EXPAND_SZ 展开后的宽字符）：
+/// 剥首尾 NUL、空白与包裹引号后要求非空路径。
+///
+/// cfg 含 test 使纯逻辑可在任意平台的测试构建单测（生产仅 Windows 编译）
+#[cfg(any(windows, test))]
+fn clean_app_paths_value(raw: &[u16]) -> Option<String> {
+    let text = String::from_utf16_lossy(raw.strip_suffix(&[0]).unwrap_or(raw));
+    let cleaned = text.trim().trim_matches('"');
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+/// 读取 App Paths 注册表默认值并校验目标存在（P3-39）
+///
+/// HKLM/HKCU 的 `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<exe>`
+/// 默认值登记可执行文件完整路径：自定义盘符/自定义目录安装的 Chrome/Edge
+/// 不在文件系统候选路径（Program Files/LocalAppData）内，仅能经此查到
+///（Chromium 下载兜底不受影响）。经 windows-sys 原生 `RegGetValueW`——与
+/// `utils::platform_windows` 的注册表读取同手段，无需新依赖；空值名读默认值，
+/// REG_EXPAND_SZ 一并接受由系统展开（部分安装器用 %ProgramFiles% 变量登记）；
+/// 登记残留指向已卸载路径时不误报（要求文件存在才返回）
+#[cfg(target_os = "windows")]
+fn app_paths_executable(exe_name: &str) -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::Foundation::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+
+    // 路径值远小于 4K 字符；不足时 RegGetValueW 返回错误而非截断误报
+    let mut bytes = vec![0u8; 8192];
+    let subkey = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}");
+    let subkey_wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+    // 空值名（仅 NUL 结尾）读取键的默认值——App Paths 的登记形态
+    let default_value_name = [0u16];
+    for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        let mut len = bytes.len() as u32;
+        let code = unsafe {
+            RegGetValueW(
+                root,
+                subkey_wide.as_ptr(),
+                default_value_name.as_ptr(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                std::ptr::null_mut(),
+                bytes.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        if code != 0 {
+            // 未登记（ERROR_FILE_NOT_FOUND 等）或读取失败：换下一个根键
+            continue;
+        }
+        if let Some(path) = clean_app_paths_value(&bytes[..len as usize / 2]) {
+            let path = std::path::PathBuf::from(path);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 /// 检测系统是否安装了 Google Chrome
 #[cfg(target_os = "windows")]
 pub fn is_chrome_installed() -> bool {
@@ -33,6 +93,7 @@ pub fn is_chrome_installed() -> bool {
             .join("chrome.exe"),
     ];
     candidates.iter().any(|p| p.exists())
+        || app_paths_executable("chrome.exe").is_some()
 }
 
 /// 检测系统是否安装了 Google Chrome（macOS）
@@ -94,6 +155,7 @@ pub fn is_edge_installed() -> bool {
             .join("msedge.exe"),
     ];
     candidates.iter().any(|p| p.exists())
+        || app_paths_executable("msedge.exe").is_some()
 }
 
 /// 检测系统是否安装了 Microsoft Edge（macOS）
@@ -337,5 +399,24 @@ mod tests {
     fn test_no_browser_message_mentions_chromium() {
         assert!(NO_BROWSER_MESSAGE.contains("无可用浏览器"));
         assert!(NO_BROWSER_MESSAGE.contains("Chromium"));
+    }
+
+    /// P3-39：App Paths 默认值解析——剥 NUL/空白/包裹引号，空值拒绝
+    ///（注册表读取本体仅 Windows 编译，解析纯逻辑全平台可单测）
+    #[test]
+    fn test_clean_app_paths_value() {
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        assert_eq!(
+            clean_app_paths_value(&wide(r"C:\Apps\Chrome\chrome.exe")),
+            Some(r"C:\Apps\Chrome\chrome.exe".to_string())
+        );
+        // 部分安装器登记带引号的路径
+        assert_eq!(
+            clean_app_paths_value(&wide(r#""D:\My Apps\Edge\msedge.exe""#)),
+            Some(r"D:\My Apps\Edge\msedge.exe".to_string())
+        );
+        // 值缺失（仅 NUL）或全空白：视为未登记
+        assert_eq!(clean_app_paths_value(&[0]), None);
+        assert_eq!(clean_app_paths_value(&wide("   ")), None);
     }
 }
