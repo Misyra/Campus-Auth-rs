@@ -190,6 +190,19 @@ _RECORDER_JS_TEMPLATE = r"""
       node = parent;
       depth++;
     }
+    // 深度预算用尽仍未及 body：无锚结构链在回放 strict 模式下跨子树多匹配
+    // 失败率显著上升——不计片段继续回溯（只求锚点，防病态深度无界循环由
+    // BODY/HTML/parentElement 判空兜底），命中 body 即以 "body > " 锚定，
+    // 可回放性优先于片段长度
+    if (node && node.nodeType === 1 && node.tagName !== "BODY" &&
+        node.tagName !== "HTML") {
+      let probe = node.parentElement;
+      while (probe && probe.nodeType === 1 && probe.tagName !== "BODY" &&
+             probe.tagName !== "HTML") {
+        probe = probe.parentElement;
+      }
+      if (probe && probe.tagName === "BODY") node = probe;
+    }
     const prefix = node && node.tagName === "BODY" ? "body > " : "";
     return { selector: prefix + parts.join(" > "), strategy: "structure" };
   };

@@ -1311,6 +1311,36 @@ def test_recorder_js_select_change_with_empty_value_not_reported():
     assert [c["value"] for c in changes] == ["cmcc"], "空值 change 不上报"
 
 
+def test_recorder_js_structure_selector_anchors_body_when_depth_exhausted():
+    """深度预算（5 层）用尽时继续回溯锚到 body：深嵌套无属性元素的选择器
+    带 body 前缀，避免回放 strict 模式下跨子树多匹配。"""
+    payloads = _run_recorder_js(
+        # 7 层包裹（超过 STRUCTURE_MAX_DEPTH=5）且无任何稳定属性 → structure 策略
+        "const tree = makeTree(7, { tagName: 'BUTTON' });"
+        "const btn = tree.leaf;"
+        "btn.closest = () => btn;"
+        "fire('click', { target: btn });"
+    )
+    clicks = [p for p in payloads if p["type"] == "click"]
+    assert len(clicks) == 1
+    sel = clicks[0]["selector"]
+    assert sel.startswith("body > "), "深度用尽也必须锚到 body"
+    assert sel.count(":nth-child(") == 5, "片段仍受深度预算约束（锚点不计片段）"
+    assert sel.endswith("button:nth-child(1)")
+
+
+def test_recorder_js_structure_selector_shallow_unchanged():
+    """浅层结构路径行为不变：预算内自然到 body，正常带 body 前缀。"""
+    payloads = _run_recorder_js(
+        "const tree = makeTree(2, { tagName: 'BUTTON' });"
+        "const btn = tree.leaf;"
+        "btn.closest = () => btn;"
+        "fire('click', { target: btn });"
+    )
+    sel = [p for p in payloads if p["type"] == "click"][0]["selector"]
+    assert sel == "body > div:nth-child(1) > button:nth-child(1)"
+
+
 def test_recorder_js_click_listener_flush_precedes_closest():
     """静态钉住：click 监听中 flushFill 位于 closest 判定之前（inPanel 之后）。"""
     js = build_recorder_init_script()
