@@ -99,20 +99,21 @@ pub(super) async fn rank_mirror_urls(mgr: &EnvironmentManager, urls: &[String]) 
     }
     let client = mgr.http_client().clone();
     let mut handles = Vec::with_capacity(urls.len());
-    for (idx, url) in urls.iter().enumerate() {
+    for url in urls {
         let client = client.clone();
         let url = url.clone();
         handles.push(tokio::spawn(async move {
-            let outcome = probe_mirror_throughput(&client, &url).await;
-            (idx, outcome)
+            probe_mirror_throughput(&client, &url).await
         }));
     }
     let mut results = Vec::with_capacity(handles.len());
-    for h in handles {
+    // handles 与 urls 同序生成：enumerate 提供真实 idx，探测任务 panic
+    //（JoinError）也能按「该候选失败」兜底保留——旧实现塞 usize::MAX 哨兵，
+    // 会穿透排序进入返回值，调用方 urls[usize::MAX] 直接越界 panic
+    for (idx, h) in handles.into_iter().enumerate() {
         match h.await {
-            Ok((idx, outcome)) => results.push((idx, outcome)),
-            // JoinError 仅在探测任务 panic 时出现；idx 无法回收，按失败兜底
-            Err(_) => results.push((usize::MAX, None)),
+            Ok(outcome) => results.push((idx, outcome)),
+            Err(_) => results.push((idx, None)),
         }
     }
     let ok = results.iter().filter(|(_, o)| o.is_some()).count();
@@ -120,17 +121,25 @@ pub(super) async fn rank_mirror_urls(mgr: &EnvironmentManager, urls: &[String]) 
         "镜像测速：{ok} 个可用、{} 个零字节/失败，按实测吞吐排序（最快优先）",
         results.len() - ok
     );
-    order_from_probe_results(results)
+    order_from_probe_results(results, urls.len())
 }
 
 /// 探测结果的纯排序：成功项按吞吐（字节/秒）降序，失败项按原序追加末尾兜底。
+/// `url_count` 之外的越界 idx 一律丢弃（uv 哨兵修复的防御层）——返回值保证
+/// 全部是可直接索引 urls 的合法下标，三个调用方（GitHub API 版本探测 /
+/// SHA 文本下载 / uv 归档下载）据此永不越界 panic。
 /// 抽成纯函数便于无网络单测。
 fn order_from_probe_results(
     results: Vec<(usize, Option<(usize, std::time::Duration)>)>,
+    url_count: usize,
 ) -> Vec<usize> {
     let mut ok: Vec<(usize, f64)> = Vec::new();
     let mut failed: Vec<usize> = Vec::new();
     for (idx, outcome) in results {
+        // 哨兵防御：越界下标（历史 usize::MAX 哨兵形态）不得进入返回值
+        if idx >= url_count {
+            continue;
+        }
         match outcome {
             Some((bytes, elapsed)) => {
                 // 微小文件（SHA256 等）瞬时读完，耗时近零时钳到 1ms 防除零
@@ -522,7 +531,7 @@ mod tests {
             (2, Some((100_000, dur(400)))),  // 250 KB/s
             (3, Some((262_144, dur(1000)))), // 262 KB/s
         ];
-        assert_eq!(order_from_probe_results(results), vec![1, 3, 2, 0]);
+        assert_eq!(order_from_probe_results(results, 4), vec![1, 3, 2, 0]);
     }
 
     /// 探测排序：失败候选不淘汰，按原序追加到成功项之后兜底
@@ -535,10 +544,30 @@ mod tests {
             (2, None),
             (3, Some((1024, dur))),
         ];
-        assert_eq!(order_from_probe_results(results), vec![1, 3, 0, 2]);
+        assert_eq!(order_from_probe_results(results, 4), vec![1, 3, 0, 2]);
         // 全部失败：回退原序
         let results = vec![(0, None), (1, None), (2, None)];
-        assert_eq!(order_from_probe_results(results), vec![0, 1, 2]);
+        assert_eq!(order_from_probe_results(results, 3), vec![0, 1, 2]);
+    }
+
+    /// uv 哨兵修复：越界 idx（usize::MAX 哨兵的历史形态 / 任何越界值）在纯排序
+    /// 处丢弃，返回值全部是可直接索引 urls 的合法下标——三个调用方据此不会
+    /// 在探测任务 panic 后越界 panic
+    #[test]
+    fn test_order_from_probe_results_drops_out_of_range_idx() {
+        let dur = std::time::Duration::from_millis(100);
+        // JoinError 哨兵历史形态 + 越界但「成功」的样本：均不得穿透进返回值
+        let results = vec![
+            (usize::MAX, None),
+            (0, Some((64, dur))),
+            (7, Some((262_144, dur))),
+            (1, None),
+        ];
+        assert_eq!(
+            order_from_probe_results(results, 2),
+            vec![0, 1],
+            "越界样本丢弃、合法样本按吞吐与失败兜底原序保留"
+        );
     }
 
     /// zip 提取：从含 uv.exe 的 zip 中正确提取（Windows 资产格式）
