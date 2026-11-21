@@ -1280,6 +1280,23 @@ def test_recorder_js_pagehide_flushes_pending_fill():
     assert fills[0]["value"] == "last-segment"
 
 
+def test_recorder_js_select_change_flushes_pending_fill_first():
+    """SELECT 的 change 前先结算进行中的 fill：「按账号动态生成 ISP 选项」门户
+    的录序必须保持「输入 → 选择」，否则回放时选项尚未生成。"""
+    payloads = _run_recorder_js(
+        "const user = makeEl({ id: 'user', name: 'username' });"
+        "user.value = 'student-001';"
+        "fire('input', inputEvent(user));"
+        # 防抖 500ms 未到即切换 ISP 选项
+        "const isp = makeEl({ id: 'isp', tagName: 'SELECT' });"
+        "isp.value = 'cmcc';"
+        "fire('change', { target: isp });"
+    )
+    assert [p["type"] for p in payloads] == ["fill", "change"]
+    assert payloads[0]["value"] == RECORDER_PLACEHOLDER_USERNAME
+    assert payloads[1]["value"] == "cmcc"
+
+
 def test_recorder_js_click_listener_flush_precedes_closest():
     """静态钉住：click 监听中 flushFill 位于 closest 判定之前（inPanel 之后）。"""
     js = build_recorder_init_script()

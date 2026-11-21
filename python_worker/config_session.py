@@ -540,6 +540,10 @@ _RECORDER_JS_TEMPLATE = r"""
     if (!el) return;
     if (inPanel(el)) return;  // 面板自防：面板内目标绝不录入
     if (el.tagName === "SELECT") {
+      // 录序保持：select 的 change 常依赖此前的账号输入（「按账号动态生成
+      // ISP 选项」门户），change 前进行中的 fill 先结算落序，否则录序变成
+      // change 先于 fill，回放时选项尚未生成
+      flushFill();
       send("change", el, el.value);
       return;
     }
