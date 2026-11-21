@@ -539,10 +539,29 @@ async fn handle_apply_profile(
     let current = deps.config_service.runtime().load().profile.id.clone();
     let switched = current != profile_id;
     if switched {
-        // 切换活跃 Profile（内部重建 RuntimeConfig 并原子替换）
-        if let Err(e) = deps.profile_service.switch_profile(profile_id).await {
-            tracing::warn!("切换 Profile 失败: {} ({})", profile_id, e);
-            return;
+        // 切换活跃 Profile（内部重建 RuntimeConfig 并原子替换）。存在性校验会
+        // 全量同步读取 Profile 文件（load_all_profiles 磁盘 IO），整段经
+        // spawn_blocking 移出异步工作线程，慢盘不拖住引擎主循环的命令处理
+        //（cf9ffe8 阻塞点收敛批次漏网之一）；阻塞线程内以 Handle::block_on
+        // 驱动内含的异步段落（多线程 runtime 下的合法用法，阻塞线程非异步
+        // 上下文）。错误语义不变：切换失败仅告警并中止本次切换
+        let profile_service = deps.profile_service.clone();
+        let target = profile_id.to_string();
+        let switch = tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(profile_service.switch_profile(&target))
+        })
+        .await;
+        match switch {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("切换 Profile 失败: {} ({})", profile_id, e);
+                return;
+            }
+            // 阻塞任务 panic：与切换失败同语义（告警 + 中止），不中断引擎主循环
+            Err(join_err) => {
+                tracing::warn!("切换 Profile 任务异常退出: {} ({})", profile_id, join_err);
+                return;
+            }
         }
     }
     deps.status_manager.merge(PartialSnapshot::ActiveProfile {
@@ -1334,10 +1353,22 @@ async fn handle_profile_probe_message(
     };
     let gateway_str = gateways.first().map(|g| g.to_string()).unwrap_or_default();
     let ssid_str = ssid.as_deref().unwrap_or("");
-    if let Some(matched_id) = deps
-        .profile_service
-        .detect_matching_profile(&gateway_str, ssid_str)
-    {
+    // 匹配需全量同步读取 Profile 文件（load_all_profiles 磁盘 IO），经
+    // spawn_blocking 移出异步工作线程（与 handle_apply_profile 的切换调用点
+    // 同批次收敛，cf9ffe8 漏网之二）；阻塞任务 panic 按「无匹配」兜底并告警，
+    // 语义与原本就有的「无匹配即不切换」一致
+    let profile_service = deps.profile_service.clone();
+    let gateway = gateway_str.clone();
+    let ssid = ssid_str.to_string();
+    let matched = tokio::task::spawn_blocking(move || {
+        profile_service.detect_matching_profile(&gateway, &ssid)
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+        tracing::warn!("Profile 匹配任务异常退出: {join_err}");
+        None
+    });
+    if let Some(matched_id) = matched {
         let current = deps.config_service.runtime().load().profile.id.clone();
         if matched_id != current {
             tracing::info!("检测到网络变化，自动切换到 Profile: {}", matched_id);
