@@ -23,8 +23,13 @@ pub enum BridgeError {
         reason: String,
     },
 
-    /// Worker 正忙（调试会话进行中）
-    #[error("Worker 忙: 调试会话进行中")]
+    /// Worker 正忙：已有会话在途
+    ///
+    /// 占用源可能是登录 / 浏览器任务 / 调试会话 / 配置会话 / 重定向检测——
+    /// `check_session_compat` 互斥矩阵的任一拒绝路径都回本错误。Display 保持
+    /// 中性口径，按占用源细分的文案留给上层（调用方知道请求方法与活跃会话
+    /// 类型，可渲染更精确的提示）。
+    #[error("Worker 忙：已有会话在途")]
     WorkerBusy,
 
     /// IPC 写入失败
@@ -75,4 +80,21 @@ pub enum BridgeError {
     /// Worker 启动前环境验证或自愈失败
     #[error("Worker 环境验证失败: {0}")]
     WorkerEnvironmentInvalid(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BridgeError;
+
+    /// P3-5：WorkerBusy Display 为中性文案（不预设占用源）——在途登录 /
+    /// 重定向检测 / 配置会话占用时同样回本错误，写死「调试会话进行中」会误导。
+    #[test]
+    fn workerbusy文案为中性() {
+        let rendered = BridgeError::WorkerBusy.to_string();
+        assert_eq!(rendered, "Worker 忙：已有会话在途");
+        assert!(
+            !rendered.contains("调试会话"),
+            "中性文案不得预设占用源: {rendered}"
+        );
+    }
 }
