@@ -176,8 +176,9 @@ pub struct RecordedActionData {
     pub strategy: String,
     /// 事件时间戳（毫秒；Worker 侧按此升序返回并做 500ms 去重）
     pub ts: i64,
-    /// `change`/`fill` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}` 占位符）；
-    /// `click`/`navigate` 无此键（序列化时跳过，与 Worker 返回形状一致）
+    /// `change`/`fill`/`navigate` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}`
+    /// 占位符、`navigate` 为落地页 URL）；仅 `click` 无此键（序列化时跳过，与
+    /// Worker 返回形状一致）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// 非顶层 frame 内捕获的动作：主文档到目标 iframe 的 CSS 选择器链，
@@ -3999,6 +4000,68 @@ mod tests {
             );
         }
         assert!(bridge.owner().is_none(), "结算后归属应清空");
+    }
+
+    /// 契约镜像漂移守卫（P3-19）：`RecordedActionData` 是
+    /// `config::schema::RecordedAction` 的线格式镜像声明，两侧 serde 序列化形状
+    /// 必须逐键逐值一致（含 `frame` 的携带/缺省两形态与 `value` 的省略语义）——
+    /// 源类型演化而镜像未跟随时本测试失败（口径与 system.rs 的
+    /// `contract_mirror_dtos_match_source_wire_shapes` 先例一致）
+    #[test]
+    fn recorded_action_data_matches_source_wire_shape() {
+        use crate::config::schema::RecordedAction;
+
+        fn pair(
+            kind: &str,
+            value: Option<&str>,
+            frame: Option<&str>,
+        ) -> (RecordedAction, RecordedActionData) {
+            let value = value.map(str::to_string);
+            let frame = frame.map(str::to_string);
+            (
+                RecordedAction {
+                    action_type: kind.into(),
+                    selector: "#x".into(),
+                    strategy: "id".into(),
+                    ts: 42,
+                    value: value.clone(),
+                    frame: frame.clone(),
+                },
+                RecordedActionData {
+                    action_type: kind.into(),
+                    selector: "#x".into(),
+                    strategy: "id".into(),
+                    ts: 42,
+                    value,
+                    frame,
+                },
+            )
+        }
+
+        // 形态矩阵：click 无值；navigate 恒携带 value（落地页 URL）；
+        // fill 占位符值；frame 携带 / 缺省各覆盖一档
+        for (kind, value, frame) in [
+            ("click", None, None),
+            ("navigate", Some("http://portal/success"), None),
+            ("fill", Some("{{USERNAME}}"), None),
+            ("fill", Some("{{PASSWORD}}"), Some("#host >> iframe#portal")),
+        ] {
+            let (source, mirror) = pair(kind, value, frame);
+            assert_eq!(
+                serde_json::to_value(&source).expect("源类型序列化"),
+                serde_json::to_value(&mirror).expect("镜像序列化"),
+                "{kind} 形态线格式漂移"
+            );
+        }
+
+        // 缺省语义钉死：顶层 click 线格式不带 value / frame 键（不是 null）
+        let (source, _mirror) = pair("click", None, None);
+        let wire = serde_json::to_value(&source).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "click", "selector": "#x", "strategy": "id", "ts": 42}),
+            "{wire}"
+        );
     }
 
     /// stop 无活跃会话（本地无归属）→ 409 且不派发
