@@ -54,7 +54,9 @@ class AuthForegroundService : Service() {
     override fun onDestroy() {
         handler.removeCallbacks(pollRunnable)
         try {
-            // 核心可能尚未初始化（如开机自启后从未打开过 App），Rust 侧须容忍该路径
+            // 核心可能尚未初始化（如开机自启后从未打开过 App），Rust 侧须容忍该路径。
+            // nativeStop 为异步受理：全链优雅关闭在 Rust 后台执行，本回调立即
+            // 返回——同步等待最坏 ~29s 会把主线程拖进系统 ANR
             AuthNative.nativeStop()
         } catch (_: Throwable) {
             // 停止核心失败不应阻断服务销毁（含 .so 缺失时的 UnsatisfiedLinkError）

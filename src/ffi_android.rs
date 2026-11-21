@@ -7,8 +7,13 @@
 //!   host 构建与测试天然跳过。
 //! - P0 范围：nativeInit 跑通「目录预建 → 日志 → Axum 预绑定 → 容器 → startup()
 //!   后台任务 → Axum serve → Engine 启动动作」，启动语义为桌面 launcher 完整模式
-//!   的子集；实例锁 / Engine 崩溃恢复（engine_watch）/ 定时自重启 / 后台更新检查 /
-//!   日志生命周期均未纳入，见各 TODO(P1)。
+//!   的子集；实例锁 / Engine 崩溃恢复（engine_watch）/ 定时自重启 / 后台更新检查
+//!   均未纳入，见各 TODO(P1)。
+//! - 生命周期（P2-12 收敛）：`init → 运行 → stop` 单程语义改为**可重启**——
+//!   nativeStop 异步受理（取走实例转交 runtime 后立即返回，不在 FGS onDestroy
+//!   的主线程上同步等待全链优雅关闭），再次 nativeInit 先等上一轮关闭彻底完成
+//!   再重新引导；tracing 全局 subscriber 无法二次注册，日志层跨实例沿用
+//!   （见 [`bootstrap_android`] 日志小节的二次初始化防护注释）。
 //! - 失败策略：所有 JNI 入口不 panic、不跨边界抛异常；失败返回 0 / null，并尽量
 //!   eprintln 到 stderr（Android 上 stderr 可映射进 logcat）。
 
@@ -66,9 +71,30 @@ static INSTANCE: Mutex<Option<AndroidInstance>> = Mutex::new(None);
 ///
 /// nativeInit 全程持锁完成初始化，天然保证并发 / 重复调用的幂等：
 /// 后到者在锁上排队，进锁后读到 Some 直接返回既有端口。
+/// nativeStop **不得**经本函数排队取锁——它在 FGS onDestroy 的主线程调用，
+/// 若初始化进行中（锁被后台初始化线程持有数秒），排队等待即主线程 ANR；
+/// nativeStop 改用 `try_lock` 放弃停止请求（见其实现）。
 fn lock_instance() -> MutexGuard<'static, Option<AndroidInstance>> {
     INSTANCE.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+/// nativeStop 异步受理后尚未完成的关闭任务句柄
+///
+/// 再次 nativeInit 前先取走并等待完成：新旧实例对默认端口（50721 回环）与
+/// 运行时目录的竞态在此显式收敛，而不是依赖「后台时序恰好错开」。
+/// 等待发生在 JNI 调用线程（Kotlin 侧本就要求后台线程调 nativeInit），
+/// 不阻塞 Android 主线程。
+static PENDING_SHUTDOWN: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+
+/// 日志广播通道的全进程唯一 sender（跨实例复用）
+///
+/// tracing 全局 subscriber 只能注册一次（stop 后再次 nativeInit 无法重建
+/// BroadcastLayer），但 `log_broadcast_tx()` 每次调用都新建通道：若二次引导
+/// 时另起通道，新 Axum 的 WS 日志层会订阅到无人发送的新通道（旧
+/// BroadcastLayer 仍往第一代通道推）。经本 static 固定同一 sender，新 Axum
+/// 的订阅与旧 BroadcastLayer 的推送恒在同一条通道上汇合。
+static LOG_BROADCAST_TX: OnceLock<tokio::sync::broadcast::Sender<crate::logging::LogEntry>> =
+    OnceLock::new();
 
 // ============================================================
 // JNI 入口（签名与 Kotlin 侧 rs.campusauth.app.AuthNative 逐字对应）
@@ -80,6 +106,9 @@ fn lock_instance() -> MutexGuard<'static, Option<AndroidInstance>> {
 ///   `CAMPUS_AUTH_BASE_DIR` 环境变量 + 显式传入容器构造）。
 /// - 幂等：已初始化时直接返回既有端口，不重复初始化（重复调用携带的
 ///   `base_dir` 被忽略）。
+/// - 可重启（P2-12）：nativeStop 后实例槽位已复位，本入口可再次引导新实例；
+///   动手前先等上一轮异步关闭彻底完成（[`PENDING_SHUTDOWN`]），避免新旧
+///   实例争默认端口 / 双写运行时目录。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeInit(
     mut env: JNIEnv,
@@ -128,6 +157,25 @@ pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeInit(
         },
     };
 
+    // 可重启生命周期的收敛点：上一轮 nativeStop 已把实例取走并转交 runtime 异步
+    // 关闭，这里先等它彻底完成再引导新实例（默认端口释放 / 目录写入静默）。
+    // 等待期间持有实例槽位锁——关闭任务不触碰槽位（实例已 move 进任务），无死锁；
+    // nativeStop 侧用 try_lock，不会被本等待卡住主线程
+    if let Some(pending) = PENDING_SHUTDOWN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
+        match runtime.block_on(pending) {
+            Ok(()) => {}
+            Err(e) => {
+                // JoinHandle Err = 关闭任务内 panic：旧实例的清理已尽力执行，
+                // 新实例照常引导（端口被残占时 prepare_axum_listener 内部回退）
+                eprintln!("{FFI_LOG_TAG} 等待上一轮实例关闭失败（继续初始化）: {e}");
+            }
+        }
+    }
+
     // block_on 在 JNI 调用线程上同步完成启动（耗时数秒量级，Kotlin 侧应放后台线程）
     let base_path = Path::new(&base_dir).to_path_buf();
     let boot = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -142,15 +190,14 @@ pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeInit(
         }
         Ok(Err(e)) => {
             eprintln!("{FFI_LOG_TAG} nativeInit 启动失败: {e:#}");
-            // 启动失败即释放日志 guard（non-blocking writer flush 后关闭后台线程）：
-            // P0 不支持失败后的重试初始化（tracing 全局 subscriber 只能设置一次），
-            // 保留 guard 只会让 appender 线程空转
-            crate::logging::flush_stashed_log_guard();
+            // 不释放日志 guard（P2-12，与 P0 单程语义不同）：tracing 全局
+            // subscriber 一旦注册即不可二次注册，释放 guard 会关闭仍在挂载的
+            // 文件层写线程，此后重试实例的文件日志永久静默；appender 后台
+            // 线程空转的代价远小于文件日志不可恢复
             0
         }
         Err(_) => {
             eprintln!("{FFI_LOG_TAG} nativeInit 启动过程发生 panic");
-            crate::logging::flush_stashed_log_guard();
             0
         }
     }
@@ -201,14 +248,22 @@ pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeStatus(
     }
 }
 
-/// 逆序关闭控制平面（1 = 成功或本就未运行，0 = 失败）
+/// 请求停止控制平面（1 = 已受理或本就未运行，0 = 受理失败）
+///
+/// **异步受理**（P2-12）：取走实例槽位后把全链优雅关闭转交 tokio runtime，
+/// 立即返回，绝不在调用线程上同步等待——调用方是 FGS `onDestroy` 的主线程，
+/// 全链关闭预算最坏 ~29s（Scheduler 5s + Engine 5s + Bridge 8s + 通知/
+/// EventSink 各 3s + Axum 5s），同步 `block_on` 必然 ANR。Kotlin 契约
+/// 「非 0 = 已请求停止」自此与实现一致。
 ///
 /// 关闭顺序对齐 `launcher::shutdown::graceful_shutdown`（去除托盘 / 实例锁 /
 /// 更新 helper）：先取消应用级关闭令牌，再 Scheduler → Engine → Bridge →
 /// 通知 / EventSink → Axum → 端口文件清理。
 ///
-/// 注意：P0 的生命周期为「init → 运行 → stop」单程，stop 后再次 nativeInit
-/// 未定义（tracing 全局 subscriber 无法二次初始化），TODO(P1) 处理。
+/// 可重启生命周期的另一半：槽位在受理时即复位，再次 nativeInit 会先等
+/// [`PENDING_SHUTDOWN`] 的关闭任务完成后重新引导。初始化进行中（槽位锁被
+/// 后台初始化线程持有）时放弃本次停止请求返回 0——在主线程排队等锁同样
+/// 是 ANR，核心随后照常完成初始化，由下次停止或系统杀进程收敛。
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeStop(
     _env: JNIEnv,
@@ -218,23 +273,29 @@ pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeStop(
         // runtime 尚未创建：无服务可停，幂等成功
         return 1;
     };
-    let Some(mut instance) = lock_instance().take() else {
+    // try_lock：绝不在主线程排队等初始化锁（见函数级注释）
+    let mut slot = match INSTANCE.try_lock() {
+        Ok(guard) => guard,
+        // poison 恢复与 lock_instance 同口径：以槽位实际状态为准
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            eprintln!("{FFI_LOG_TAG} nativeStop：核心正在初始化，跳过本次停止请求");
+            return 0;
+        }
+    };
+    let Some(mut instance) = slot.take() else {
         // 槽位为空：未初始化或已停止，幂等成功
         return 1;
     };
-    let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(shutdown_android(&mut instance))
-    }));
-    match stopped {
-        Ok(()) => {
-            tracing::info!("Android JNI 实例已关闭");
-            1
-        }
-        Err(_) => {
-            eprintln!("{FFI_LOG_TAG} nativeStop 关闭过程发生 panic");
-            0
-        }
-    }
+    // 受理即转交：关闭链在 tokio worker 上执行，句柄留给下一次 nativeInit 等待
+    let handle = runtime.spawn(async move {
+        shutdown_android(&mut instance).await;
+        tracing::info!("Android JNI 实例已关闭");
+    });
+    *PENDING_SHUTDOWN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    1
 }
 
 // ============================================================
@@ -258,10 +319,26 @@ async fn bootstrap_android(base_path: &Path) -> anyhow::Result<AndroidInstance> 
     //    P0 固定 schema 默认值 INFO / 保留 7 天 / 开文件——launcher 的启动期
     //    轻量配置读在 launcher::config 内部不可复用，TODO(P1) 对齐
     //    settings.logging 的真实值（容器构造后可经 reload_log_level 热修正）
-    let log_tx = crate::logging::log_broadcast_tx();
-    let log_guard =
-        crate::logging::init_logging(base_path, log_tx.clone(), LevelFilter::INFO, 7, true);
-    crate::logging::stash_log_guard(log_guard);
+    //
+    //    二次初始化防护（可重启生命周期的配套）：tracing 全局 subscriber 只能
+    //    注册一次，stop 后再次引导时 init_logging 的 try_init 必失败——照常
+    //    调用不但无益（新三层永不挂载），stash_log_guard 的覆盖式存入还会把
+    //    上一代 guard 挤出 drop，关闭仍在挂载的旧文件层写线程，此后所有实例
+    //    的文件日志静默丢行。已初始化时跳过重复 init，旧三层继续服务；广播
+    //    通道经 LOG_BROADCAST_TX 跨实例固定同一 sender，新 Axum 的 WS 日志层
+    //    与旧 BroadcastLayer 恒在同一条通道上汇合
+    let log_tx = LOG_BROADCAST_TX
+        .get_or_init(crate::logging::log_broadcast_tx)
+        .clone();
+    if crate::logging::logging_initialized() {
+        tracing::info!(
+            "日志系统已随上一代实例初始化，跨实例沿用（tracing 全局 subscriber 单次注册）"
+        );
+    } else {
+        let log_guard =
+            crate::logging::init_logging(base_path, log_tx.clone(), LevelFilter::INFO, 7, true);
+        crate::logging::stash_log_guard(log_guard);
+    }
 
     // 3. 预绑定 Axum 监听器（对齐 launcher 完整模式：端口等不可恢复错误不启动
     //    Engine / Scheduler / Bridge 后立刻整套关闭；回环绑定凭据门禁恒放行，
@@ -316,6 +393,10 @@ async fn bootstrap_android(base_path: &Path) -> anyhow::Result<AndroidInstance> 
 
 /// 逆序关闭已启动的服务（对齐 `launcher::shutdown::graceful_shutdown`，
 /// 去除托盘 / 实例锁 / 更新 helper 三项桌面侧关注点）
+///
+/// 注意：本函数**不得**释放日志 guard（`flush_stashed_log_guard`）——tracing
+/// subscriber 跨实例沿用，关闭写线程会让重试 / 重启实例的文件日志永久静默；
+/// guard 随进程退出统一回收。
 async fn shutdown_android(instance: &mut AndroidInstance) {
     // 0. 先取消应用级关闭令牌：容器内 uptime / 登录 shutdown child 自动传播，
     //    在途登录 task（detached，Engine 不持有句柄）协作退出，避免在 Bridge

@@ -7,10 +7,11 @@ package rs.campusauth.app
  * - 这些是 Kotlin `object` 的实例方法（非 `@JvmStatic`），JNI 符号按实例方法约定：
  *   `Java_rs_campusauth_app_AuthNative_<方法名>(JNIEnv*, jobject, ...)`；
  * - [nativeInit] 必须幂等：核心已运行时直接返回现有端口，不得重复起服务
- *   （Activity 重建 / 进程恢复会再次调用）；
+ *   （Activity 重建 / 进程恢复会再次调用）；停止后再次调用会重新引导新实例
+ *   （生命周期可重启，Rust 侧先等上一轮关闭完成）；
  * - 其余方法必须容忍「未初始化」状态（nativePort 返回 0、nativeStatus 返回占位
- *   JSON、nativeStop 返回 0）——开机自启会先拉起前台服务轮询状态，[nativeInit]
- *   要等用户打开 App 才执行。
+ *   JSON）——开机自启会先拉起前台服务轮询状态，[nativeInit] 要等用户打开 App
+ *   才执行。
  */
 object AuthNative {
 
@@ -28,6 +29,11 @@ object AuthNative {
     /** 核心状态快照，JSON 字符串（字段契约 TODO(P1) 与 Rust 侧定稿） */
     external fun nativeStatus(): String
 
-    /** 停止核心；0 = 失败 / 未运行，非 0 = 已请求停止 */
+    /**
+     * 停止核心。**异步受理**：转交 Rust 后台执行全链优雅关闭后立即返回，
+     * 调用方（如前台服务 onDestroy 的主线程）不得假设关闭已完成；
+     * 非 0 = 已受理（含本就未初始化/已停止的幂等情形），0 = 受理失败
+     * （如核心初始化进行中）。
+     */
     external fun nativeStop(): Int
 }
