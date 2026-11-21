@@ -68,6 +68,37 @@ let authToken: string | null = null;
 let tokenPromise: Promise<string | null> | null = null;
 
 /**
+ * 「鉴权就绪」事件订阅（P2-7）：token 经**真实引导**（exchange 交换 / 回环
+ * local-token 下发）成功取得时通知订阅方，供 WS 日志通道与状态轮询把启动/重连
+ * 排在鉴权就绪之后——引导完成前不发起匿名请求风暴。
+ *
+ * 事件只在引导路径成功时触发，**缓存读取路径不发**（内存/本地存储命中）：WS 重连
+ * 的常规流程每轮都经 `refreshAuthToken` 从缓存恢复同一 token，若也发事件会把重连
+ * 退避反复重置成紧密循环（连接风暴的另一种形态）。
+ */
+type AuthReadyListener = (token: string) => void;
+const authReadyListeners: AuthReadyListener[] = [];
+
+/** 订阅鉴权就绪事件；返回退订函数 */
+export function onAuthReady(listener: AuthReadyListener): () => void {
+  authReadyListeners.push(listener);
+  return () => {
+    const i = authReadyListeners.indexOf(listener);
+    if (i !== -1) authReadyListeners.splice(i, 1);
+  };
+}
+
+function notifyAuthReady(token: string): void {
+  for (const listener of [...authReadyListeners]) {
+    try {
+      listener(token);
+    } catch (e) {
+      frontendLogger.warn("auth", "鉴权就绪回调执行失败", e);
+    }
+  }
+}
+
+/**
  * 读取 token 缓存：localStorage 优先（回环跨标签/重启），回退 sessionStorage
  * （远程与旧版本缓存）。存储被禁用（隐私模式等）时静默降级。
  */
@@ -194,6 +225,8 @@ async function exchangeBootstrapAuth(
         authToken = token;
         writeStoredToken(token);
         stripAuthHash();
+        // 引导交换成功（fragment / 管理密码 / 粘贴秘钥）：通知鉴权就绪（P2-7）
+        notifyAuthReady(token);
         return { ok: true, token };
       }
       return { ok: false, code: "AUTH_REJECTED", message: "服务返回的凭据无效，请重试" };
@@ -266,6 +299,9 @@ async function fetchLocalToken(): Promise<string | null> {
     if (typeof token !== "string" || !token) return null;
     authToken = token;
     writeStoredToken(token);
+    // 回环免引导 token 下发成功：通知鉴权就绪（P2-7）。REST 401 触发的重新引导
+    // （resetAuthToken 清缓存后重走本端点）也经此把新 token 通知到 WS 重连方
+    notifyAuthReady(token);
     return token;
   } catch {
     // 后端未起 / 非回环 404 / 超时：保持引导态判定不变

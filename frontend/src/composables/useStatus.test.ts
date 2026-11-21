@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import type { StatusSnapshot } from "../api/types";
+import { ApiError } from "../api/client";
 
 const fetchStatusMock = vi.fn();
 const fetchAutostartMock = vi.fn(async () => ({
@@ -197,5 +198,23 @@ describe("fetchAutostart 与失败通知", () => {
     fetchStatusMock.mockRejectedValueOnce(new Error("down"));
     await fetchStatus();
     expect(notifications.length).toBe(before + 1);
+  });
+
+  it("401 失败静默（P2-7）：不发「无法连接到服务器」误导通知，鉴权恢复后也不报失联", async () => {
+    // 先回一次成功：把上一用例遗留的连败状态清账（这一次「已重新连接」是合法通知）
+    fetchStatusMock.mockResolvedValue(backendRaw({ snapshot_version: 6 }));
+    await fetchStatus();
+    const before = notifications.length;
+
+    // 401 = 凭据未就绪/失效（request() 内部已重取重试过一次），不是后端没起
+    fetchStatusMock.mockRejectedValueOnce(new ApiError("未授权", 401));
+    await fetchStatus();
+    expect(notifications.length).toBe(before);
+
+    // 恢复成功：401 从未向用户报过失联，也不该弹「已重新连接」
+    fetchStatusMock.mockResolvedValue(backendRaw({ snapshot_version: 7 }));
+    await fetchStatus();
+    expect(notifications.length).toBe(before);
+    expect(status.network_state).toBe("online");
   });
 });
