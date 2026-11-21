@@ -44,7 +44,7 @@
 ## 三、三端兼容性（Windows / macOS / Linux）
 
 > 2026-08-30 全量审计的 16 项（W1–W16）中 12 项已于同日修复并归档至 changelog（第十六轮）：W1 uv 资产格式、W2 venv 路径、W3 解压权限位、W4 更新器 tar.gz、W5 force_kill、W7 unix 卸载脚本、W10 CI unix job、W11 SIGTERM/SIGHUP、W12 进程组终止、W14 __pycache__、W15 备份名、W16 .bat 拒绝 + XDG 环境变量。
-> W6（托盘）按用户决策收敛：**macOS 托盘禁用**（`TrayManager::spawn` 内单点拦截返回空句柄，轻量模式自动降级完整模式，Web 控制台 / `--stop` 仍可用），Linux 侧已修复（托盘线程内 `gtk::init` + glib 主循环，与 `tray-icon` 内部 `gtk 0.18` 同版本，待真机验证），不再跟踪；主力平台为 Windows。
+> W6（托盘）——**2026-11-21 macOS 已启用**（修复战役 f5cc2e1：主线程交还 AppKit + 托盘经 GCD 主队列投递构建；根因系主线程被 `runtime.block_on` 占死与 AppKit 线程模型不兼容，非 tray-icon 能力缺失；真机冒烟退出链 SIGTERM 1s 零残留；**菜单栏图标视觉与左右键交互待用户人工目检**，轻量模式 macOS 恢复留目检后决策）。Linux 侧维持已修复（`gtk::init` + glib 主循环，`gtk 0.18` 与 tray-icon 内部同版，**仍待真机验证**）。主力平台为 Windows。
 > 剩余未修项如下（均为有指引或降级方案的低危）。
 
 | # | 严重度 | 问题 | 位置 |

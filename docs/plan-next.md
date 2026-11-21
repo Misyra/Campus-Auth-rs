@@ -4,6 +4,19 @@
 > 当前活跃：`v5.1.3`（`docs/changelog.md`）。P0/P1 与更新子系统待办的权威摘要以本文件与 `docs/known-issues.md` 为准（原 defect-recheck / updater-audit 过程报告已于 2026-09-12 删除）。
 > 验证块：`cargo clippy --all-targets -- -D warnings` / `cargo test` 双 feature（含 `rust-tests-unix`）/ `cargo fmt --check` / `uv run pytest` / `npm run build` + `vitest` / `e2e-login-chain` 全链路。
 
+## 全面审查修复战役（2026-11-21，八批全落地，**终检收口中**）
+
+> 同日全面审查（报告 `docs/reports/code-review-2026-11-21.md`，本地不提交）发现的 P1×1 + P2×15 + P3×43(+1 nit) 全量修复 + 安卓 P1 前置①②③ + uv 哨兵提级项；八个域子代理并行（录制链 Python / 录制契约 Rust / Bridge 基座 / macOS 托盘与 launcher / Rust 杂项 / 前端 / 安卓 / CI 构建），逐项独立 commit，changelog「全面审查修复战役」分节集中记账。
+
+- [x] **P1 录制明文密码双层防线**：Worker 启发式（autocomplete 密码语义 + WeakMap 首判锁定，84b0e22）+ Rust stop 结算等值归一（原文 + URL 编码恒等替换占位符，06f8eea）+ 诊断包脱敏登记 recorded_actions（703e27f）——三条扩散路径（方案落盘 / 任务仓库外发 / 诊断包）全封堵
+- [x] **录制链 P2 五连修**：空闲回收豁免（c9ec922）/ iframe frame 契约三侧贯通（a5663f6 + 04fc505）/ shadow DOM composedPath（bc344cb）/ 点导航丢 pendingFill（5d7accc）/ starting 孤儿会话按轮次记账（2e17a06）
+- [x] **macOS 系统托盘启用（f5cc2e1，架构批，known-issues W6 收口）**：主线程交还 AppKit + 托盘经 GCD 主队列投递；真机冒烟退出链 SIGTERM 1s 零残留（`NSApp.stop` 无事件唤醒不生效的真机发现与 exit 收法见 changelog）——**菜单栏图标与左右键交互待用户人工目检**；轻量模式 macOS 恢复留目检后决策
+- [x] **回环免引导连接风暴根治（68641ba）**：WS 鉴权门 + `onAuthReady` 事件 + unauthorized 诚实分类（不再弹「请检查后端」误导 toast）+ 状态轮询降级复位
+- [x] **CI 两项假防线**：clippy --all-targets 必红收口（54a0a31，验证口径教训）+ vitest 覆盖率门禁接通（be130fe）
+- [x] **安卓壳层四项 + 前置①②③**：restart/shutdown android 门（d02e0c2）/ WebView 文件选择与下载含 blob（684f590）/ local-token 安卓下架 + `nativeBootstrapSecret` fragment 引导（a49fb36）/ FGS nativeStop 异步可重启（7b6aac8）/ 密钥路径挂 `CAMPUS_AUTH_BASE_DIR`（ac73d85）；BootReceiver 双状态源④按计划留 P2
+- [x] **其余 P3 全量**：IPv6 剥括号（43acd2e）/ Docker TZ 文档（913b97f）/ XDG 转义与 Linux 观测（d9ad14f + b11a2eb）/ App Paths 注册表（b317e20）/ 通知 AUMID（e9d1bbb）/ uv 哨兵（a19bde4）/ 诊断脱敏等，逐项见 changelog 同名分节
+- [ ] **终检与复验**：统一门禁全绿（fmt 已收口 56b2e1e；android target / 前端含覆盖率门禁已过）+ clippy --all-targets 与全量 cargo test 收口中 + 实例复验（连接风暴复测、录制弹窗回归）+ 托盘目检交用户；CI 全矩阵（含 e2e-login-chain / rust-tests-unix 真机）待 PR 触发
+
 ## 录制生成独立任务（2026-11-21 立项，**已落地**）
 
 > 用户诉求：「录制能不能做到填入账号密码？能做到就加上去，改成独立的任务形式，用户只需要完整录制内容」。拍板口径：录制升级为**完整操作录制**（含键盘输入），并可一键转换为**标准浏览器任务**（独立任务形式：可手动跑 / 定时调度 / 绑定方案），凭据永不落明文——密码框录 `{{PASSWORD}}`、用户名框录 `{{USERNAME}}` 占位符，运行时经现有变量解析管线注入。
@@ -27,7 +40,7 @@
 - [ ] **tokio feature 防回归钉（可选）**：ci.yml 加 `cargo tree -e features -p tokio` 快照比对
 - [ ] **ffi_android TODO(P1) 收敛**（P0 骨架→正式模式）：见下节「安卓端开发」P1 条——nativeStatus 占位混淆、tracing 单次初始化、实例锁 / engine_watch / 自启语义、LogOnce 决议、日志对齐 settings；收敛前不合并 master
 - [ ] **release.yml 嵌钥上传与签名清单非原子（P2）**：build 六矩阵各自 `gh release upload` 与 manifest job 签名清单上传非原子——`--sign-manifest` 失败时已公开的嵌钥版本按 SignedManifestMissing 拒一切更新直到下个成功发布；manifest 失败应视为发布失败（考虑 `gh release delete`）+ 维护规程要求配置 secret 前本地 `--gen-signing-key` 核对公钥一致
-- [ ] **uv 探测哨兵索引 panic（P2）**：`environment/uv/download.rs:115` JoinError 把哨兵 `usize::MAX` 塞进 results，三个调用方 `urls[idx]` 直索引——探测任务 panic 时「按失败兜底」路径自身 panic；修法 `order_from_probe_results` 过滤 `idx >= len` 或调用方改 `.get()`
+- [x] **uv 探测哨兵索引 panic（P2）**——已修（a19bde4，2026-11-21 修复战役）：`rank_mirror_urls` enumerate 回收真实 idx + `order_from_probe_results` 越界过滤（三个调用方单点收口），哨兵 `usize::MAX` 与越界成功样本防御测试钉住
 - [ ] **python_mirror_ladder 直连殿后口径成文（P2）**：`uv/sync.rs:60-67` Auto 分支把直连固定殿后，与 mirror.rs 文档「Auto=实测吞吐自动选最优」及压缩包下载 Auto 口径分叉——注释声明取舍或改完整实测序
 - [ ] **android 杂项（P3）**：jniLibs 仅 arm64-v8a（模拟器冒烟需补 x86_64）、WebView 停留判定收紧 scheme+host 且覆盖 localhost/::1、ACCESS_NETWORK_STATE 权限无使用点可删、`login/mod.rs:706` 渠道不支持文案按构建形态分派（现写死 OpenWrt）
 - [ ] **CI/供应链杂项（P3）**：release.yml `packages: write` 下沉到 docker 两 job、公钥轮换流程成文（或不轮换取舍）、audit.yml 两个 uvx 步合成一步防工具版本漂移、drag.test 补过滤态对照用例、background symlink check-then-use TOCTOU 补注释声明
@@ -88,7 +101,7 @@ APK（单进程）
 ### 分阶段计划
 
 - [x] **P0 编译打通**（2026-11-17 完成，提交 bc02045 / cd6c627 / 35f4706；逐项更改见 changelog 同日条目）：Cargo `android` feature + `[lib] crate-type = ["lib", "cdylib"]` + `jni = "0.21"`（android target 专属）；cfg 门照 openwrt 先例（tray / notify-rust os 通道 target 门 / launcher 跳过 tray+browser / bridge 恒不懒加载 / autostart·uninstall·config 适配）；`CAMPUS_AUTH_BASE_DIR` 环境变量注入 base 目录；system 路由 `android` 平台字段；`src/ffi_android.rs` JNI 薄层（nativeInit/nativePort/nativeStatus/nativeStop，符号契约 `rs.campusauth.app.AuthNative`）；`android/` Gradle 骨架（MainActivity WebView + AuthForegroundService specialUse + BootReceiver + network_security_config 仅放行 127.0.0.1 cleartext）。**成功标准达成 = `cargo ndk -t arm64-v8a` 编出 libcampus_auth.so + clippy/fmt/test 全绿（lib 1454）**
-- [ ] **P1 前置（2026-11-19 第二轮审查发现，先于真机冒烟）**：① 密钥路径——`config/crypto.rs default_key_path` 走 `dirs::home_dir()`，android target 只读 HOME 环境变量（无 getpwuid 回退）且应用进程无 HOME → 回退 CWD `/` → `/.campus_network_auth` 创建 EACCES → `ServiceContainer::new` 失败 → nativeInit 恒返 0（真机首启即败）；修法为 android 下密钥路径挂 `CAMPUS_AUTH_BASE_DIR`（ffi 已先于容器注入）；② `MainActivity` 主线程同步调 nativeInit（Rust 契约明示数秒量级应后台线程）→ 移后台线程 + 完成后回 UI 线程加载 WebView，否则 ANR 且 startForeground 被推迟出系统窗口（ForegroundServiceDidNotStartInTime）；③ FGS `onDestroy` 走 nativeStop 后 P0 单程生命周期 → 服务被停掉再开 App 永久「启动失败」且通知已失——收敛到 launcher 正式 Android 模式时一并处理（对应 ffi TODO(P1)）；④ BootReceiver autostart 双状态源（Kotlin SharedPreferences 零写入 vs Rust `/api/autostart` 配置）——P2 接设置 UI 时以 Rust 配置为唯一事实源
+- [ ] **P1 前置（2026-11-19 第二轮审查发现；2026-11-21 修复战役已收①②③，仅剩④）**：① 密钥路径——**已修（ac73d85）**：android 下 `default_key_path` 挂 `CAMPUS_AUTH_BASE_DIR`（仅 android target 生效——桌面读该变量会静默换钥致旧 `ENC:` 失解，刻意不扩平台）；真机必败点修正为「首次保存带密码凭据时 EACCES」而非 nativeInit 恒返 0（密钥懒加载不阻断容器构造，见审查报告）；② `MainActivity` 主线程同步调 nativeInit——**已修（a49fb36）**：移后台线程 + 完成后回 UI 线程以 `#auth=` fragment 加载 WebView（ForegroundServiceDidNotStartInTime 排队链一并消除，fetchLocalToken 路径删除）；③ FGS `onDestroy` 单程生命周期——**已收敛（7b6aac8）**：nativeStop 异步受理 + INSTANCE 复位可重启 + logging 二次 init 显式处理；launcher 正式 Android 模式仍留后续；④ BootReceiver autostart 双状态源——**未动**，P2 接设置 UI 时以 Rust 配置为唯一事实源
 - [ ] **P1 真机 MVP**：真机全链路（掉线检测 → 自动重登 → 通知）；JNI 状态回传由 5s 轮询换 WS 订阅；启动编排从 ffi 薄层迁入 launcher 正式 Android 模式；mock 门户（`tests/mock-servers/full-portal`）+ 真机两套验证
 - [ ] **P2 系统集成**：autostart 设置 UI、电池优化引导 + 保活指引页、PC 配置经 repo 导入导出迁移、前端按 `/api/system` android 字段隐藏浏览器/脚本渠道入口、Android 16 LNP 权限位前瞻声明
 - [ ] **P3 发布链路**：release.yml Android job（cargo-ndk + gradle assembleRelease 签名）、应用内更新（版本检查 → APK 下载 → 安装意图，复用镜像回退）、四端同版注入（Gradle 版本号）、`docs/guides` 用户指南
