@@ -103,7 +103,7 @@ const {
               <span class="tech-badge websockets">WebSockets</span>
               <span class="tech-badge ddddocr">Ddddocr</span>
               <span class="tech-badge uv">uv</span>
-              <span class="tech-badge python">Python 3.10+</span>
+              <span class="tech-badge python">Python 3.12+</span>
             </div>
           </div>
         </div>
