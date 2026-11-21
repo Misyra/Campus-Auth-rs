@@ -1491,7 +1491,9 @@ export interface paths {
          *     无覆盖面，放行（取回的同样是空数组）。
          *
          *     响应 `recorded_actions` 数组为 informational：无论 discard 与否、apply 与否，
-         *     Worker 回包携带即原样返回。
+         *     Worker 回包携带即返回——结算处先经凭据等值归一（fill/change 值与方案凭据
+         *     恒等时替换为 `{{USERNAME}}`/`{{PASSWORD}}`，见
+         *     [`normalize_recorded_credential_values`]），落盘与回显同一次覆盖。
          *
          *     超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
          *     耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
@@ -2312,7 +2314,8 @@ export interface components {
             persistent_session_enabled: boolean;
             /**
              * @description 本次会话录制的动作数组（informational：无论 discard 与否、apply 与否，
-             *     Worker 回包携带即原样返回；Worker 侧已有单次 50 条截断守卫，量级可控）。
+             *     Worker 回包携带即返回——已过凭据等值归一，值与方案凭据恒等时替换为
+             *     占位符；Worker 侧已有单次 50 条截断守卫，量级可控）。
              *     任务录制流程经 `apply=false` 消费本字段，前端不必再发一次 GET 方案详情
              */
             recorded_actions: components["schemas"]["RecordedActionData"][];
@@ -2408,7 +2411,8 @@ export interface components {
                 persistent_session_enabled: boolean;
                 /**
                  * @description 本次会话录制的动作数组（informational：无论 discard 与否、apply 与否，
-                 *     Worker 回包携带即原样返回；Worker 侧已有单次 50 条截断守卫，量级可控）。
+                 *     Worker 回包携带即返回——已过凭据等值归一，值与方案凭据恒等时替换为
+                 *     占位符；Worker 侧已有单次 50 条截断守卫，量级可控）。
                  *     任务录制流程经 `apply=false` 消费本字段，前端不必再发一次 GET 方案详情
                  */
                 recorded_actions: components["schemas"]["RecordedActionData"][];
@@ -4229,6 +4233,11 @@ export interface components {
          *     响应形状。字段须与源类型逐字对齐（含 `type` 改名与 `value` 的省略语义）
          */
         RecordedActionData: {
+            /**
+             * @description 非顶层 frame 内捕获的动作：主文档到目标 iframe 的 CSS 选择器链，
+             *     ' >> ' 分隔；顶层捕获缺此键
+             */
+            frame?: string | null;
             /** @description 目标元素选择器（Worker 按启发式优先级取首个命中） */
             selector: string;
             /** @description 选择器采用的启发式级别（与 `selector` 配对） */
@@ -4244,8 +4253,9 @@ export interface components {
              */
             type: string;
             /**
-             * @description `change`/`fill` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}` 占位符）；
-             *     `click`/`navigate` 无此键（序列化时跳过，与 Worker 返回形状一致）
+             * @description `change`/`fill`/`navigate` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}`
+             *     占位符、`navigate` 为落地页 URL）；仅 `click` 无此键（序列化时跳过，与
+             *     Worker 返回形状一致）
              */
             value?: string | null;
         };
