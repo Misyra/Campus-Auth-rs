@@ -27,7 +27,9 @@ pub(super) fn load_and_merge_config(cli: &CliArgs, base_path: PathBuf) -> Result
     ))]
     let runtime_mode = match runtime_mode {
         RuntimeMode::Lightweight => {
-            tracing::warn!("当前构建不支持托盘，轻量模式降级为完整模式");
+            // 此刻 tracing subscriber 尚未初始化（init_logging 在 run() 中才执行），
+            // tracing::warn 是 no-op、降级原因恒不可见——必须走 stderr 同步输出（P3-15）
+            eprintln!("当前构建不支持托盘，轻量模式降级为完整模式");
             RuntimeMode::Full
         }
         other => other,
