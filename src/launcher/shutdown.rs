@@ -33,12 +33,21 @@ pub(super) async fn graceful_shutdown(state: &mut LauncherState) {
         drop(tray);
     }
 
-    // 2. 关闭 SchedulerService（并保留 bridge_handle 供第 4 步统一关闭）
+    // 2. 关闭 SchedulerService 与推送通知服务（并保留 bridge_handle 供第 4 步统一关闭）
     let bridge_handle = if let Some(handles) = state.startup_handles.take() {
         handles
             .scheduler_handle
             .stop_with_timeout(std::time::Duration::from_secs(5))
             .await;
+        // 推送通知服务无关闭令牌兜底（只订阅 EventBus 广播，不监听应用级
+        // 令牌），不显式 stop 就会活到 runtime teardown——此前仅随句柄 drop
+        // 「停用 stop 信号源」，StartupHandles 注释承诺的「统一 stop」从未
+        // 发生（P3-10）。显式 stop 触发主循环退出并执行停机排空
+        handles
+            .notification
+            .stop_with_timeout(std::time::Duration::from_secs(3))
+            .await;
+        // event_sink 维持令牌驱动（第 0 步取消即排空退出），句柄随本分支 drop
         Some(handles.bridge_handle)
     } else {
         None

@@ -34,7 +34,8 @@ pub struct StartupHandles {
     /// Launcher 无需显式 stop；句柄保留供测试与后续源头接入方显式停用）
     pub event_sink: crate::ServiceHandle,
     /// 推送通知服务句柄（订阅 EventBus 按配置过滤投递；发送失败静默，
-    /// 绝不影响登录主链路；句柄交 Launcher 随应用关闭统一 stop）
+    /// 绝不影响登录主链路；不监听应用级关闭令牌，由 Launcher 在优雅关闭
+    /// 第 2 步显式 `stop_with_timeout`——「统一 stop」承诺的实现落点，P3-10）
     pub notification: crate::ServiceHandle,
 }
 

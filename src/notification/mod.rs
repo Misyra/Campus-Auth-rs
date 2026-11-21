@@ -8,6 +8,16 @@
 //! 以 `spawn_notification_service(container.events.clone(), container.config.clone(), base_path)`
 //! 挂入（`Arc<dyn ConfigApi>` 已实现 [`NotificationConfigSource`]）。
 //!
+//! # 可停止语义（P3-10）
+//!
+//! 本服务**不监听应用级关闭令牌**（只消费 EventBus 广播），停用只能经
+//! [`crate::ServiceHandle`] 的 stop 通道：`stop` / `stop_with_timeout` 发出
+//! `true` 后主循环即刻退出并执行停机排空（[`run_notification_loop`] 尾部的
+//! `try_recv` 段，在途积压事件照常派发为独立任务）；`stop_tx` 被 drop 仅
+//! 停用该信号源、生命周期随应用退出（与事件落盘同口径）。优雅关闭流程
+//! （`launcher::shutdown` 第 2 步）据此对通知句柄显式 `stop_with_timeout`，
+//! 保证停机排空在 runtime teardown 前执行完毕。
+//!
 //! # 失败静默口径（与登录主链路的边界）
 //!
 //! 发送失败——包括重试退避（[`sender::send_with_retry`]，指数退避；os 通道
@@ -124,7 +134,9 @@ async fn run_notification_loop(
         }
     }
     // 停止后排空积压并照常派发（派发为独立任务、不等待完成；应用退出时随
-    // runtime 结束，发送中断即静默失败，符合本模块失败口径）
+    // runtime 结束，发送中断即静默失败，符合本模块失败口径）。本段即
+    // 「停机排空」：只有经 ServiceHandle 显式 stop 才会执行——这是优雅关闭
+    // 流程对通知句柄显式 stop_with_timeout 的直接动机（P3-10，语义见模块 doc）
     while let Ok(envelope) = rx.try_recv() {
         dispatch_event_detached(envelope, cached.clone());
     }
@@ -447,5 +459,40 @@ mod tests {
         bus.publish(login_failed_event());
         assert_eq!(wait_for(&captured, 2).await, 2, "Lagged 后服务继续工作");
         service.stop_with_timeout(Duration::from_secs(5)).await;
+    }
+
+    /// P3-10：通知服务可被 stop 信号在超时内结束——主循环退出、EventBus
+    /// 订阅释放、停机排空照常执行，全程不依赖 abort 兜底
+    #[tokio::test]
+    async fn test_service_stops_within_timeout_on_stop_signal() {
+        let (addr, captured) = spawn_webhook_receiver().await;
+        let bus = Arc::new(EventBus::new());
+        let settings = settings_with(vec![webhook_channel(addr)], vec!["login_failed"], |_| {});
+        let service = spawn_notification_service(
+            bus.clone(),
+            Arc::new(FixedSource(settings)),
+            PathBuf::new(),
+        );
+        // 停止前服务存活且正常送达（排除「通道关闭导致意外退出」的假阳性）
+        bus.publish(login_failed_event());
+        assert_eq!(wait_for(&captured, 1).await, 1, "停止前事件正常送达");
+        assert_eq!(bus.receiver_count(), 1, "停止前应恰有一个订阅者");
+
+        // 拆开句柄直接发 stop 信号并限时 join：超时即失败——证明服务是
+        // 「被 stop 信号结束」而非靠 stop_with_timeout 的 abort 兜底过关
+        let crate::ServiceHandle {
+            stop_tx,
+            join_handle,
+            name: _,
+        } = service;
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), join_handle)
+            .await
+            .expect("通知服务应在 stop 信号后 3s 内退出")
+            .expect("通知服务 task 不应 panic");
+
+        // 循环退出后订阅释放：EventBus 订阅者计数归零（task 已 join，
+        // rx 的 drop 先于 join 完成可见，此处无竞态）
+        assert_eq!(bus.receiver_count(), 0, "退出后 EventBus 订阅应释放");
     }
 }
