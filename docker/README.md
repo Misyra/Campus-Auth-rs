@@ -5,7 +5,7 @@
 | 位置 | 文件 | 职责 |
 |---|---|---|
 | 根 | `Dockerfile` | 多阶段构建（Node 前端 → Rust → Python 3.12-slim 预装 `python_worker`+Chromium，基础镜像 digest pin，主进程经降权以 `campus(1000)` 运行），产物预装 `/app/python_worker` |
-| 根 | `docker-compose.yml` | 默认拉取 GHCR 多架构测试镜像并编排（`127.0.0.1:50721→50721`、`VOLUME /data`、`HEALTHCHECK /api/health`、`stop_grace_period: 40s` 容纳 26s 优雅关闭预算、`init: true` 回收浏览器子进程树） |
+| 根 | `docker-compose.yml` | 默认拉取 GHCR 多架构测试镜像并编排（`127.0.0.1:50721→50721`、`VOLUME /data`、`HEALTHCHECK /api/health`、`stop_grace_period: 40s` 容纳 26s 优雅关闭预算、`init: true` 回收浏览器子进程树、`TZ=Asia/Shanghai` 默认时区） |
 | 根 | `docker-compose.build.yml` | 源码开发/自定义构建覆盖；叠加后才执行本地 `Dockerfile` 多阶段构建 |
 | 根 | `.dockerignore` | 缩小上下文（`target/frontend/node_modules/python_worker/.venv/__pycache__/logs/config` 等），与 `.gitignore` 口径一致 |
 | `docker/` | `entrypoint.sh` | 容器入口（建目录、同步 `/opt/campus-auth/resources` 到数据目录、root 启动时修正存量卷属主，再经 `setpriv` 降权 exec 主进程），仅被 `Dockerfile` 引用 |
@@ -136,6 +136,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 | `CAMPUS_AUTH_BASE_PATH` | `/data` | 数据根目录（容器内） |
 | `CAMPUS_AUTH_MANAGEMENT_PASSWORD` | 未设置 | 管理密码（非回环绑定必需，见「安全模型」）；等价 CLI `--management-password`，优先于 settings.json |
 | `CAMPUS_AUTH_ALLOW_UNAUTH_BIND` | 未设置 | `true` 显式豁免「非回环绑定无管理凭据拒绝启动」的门禁（强烈不推荐） |
+| `TZ` | 未设置（UTC） | 容器本地时区，影响 cron 定时与推送免打扰时段判定（见「时区（TZ）」）；compose 默认 `Asia/Shanghai` |
 | `RUST_LOG` | `info` | 日志级别 |
 | `CAMPUS_AUTH_WORKER_DIR` | 未设置 | Worker 源码路径覆盖；镜像默认自动使用 `/app/python_worker` |
 
@@ -146,6 +147,21 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 > **定时自重启与容器重启策略**：配置里的 `app.auto_restart_hours` 默认 24 小时，到期后主进程主动优雅退出。compose 已配 `restart: unless-stopped`，容器会自动拉起；手工 `docker run` 需自行加 `--restart unless-stopped`，否则容器会停在 exited。若不需要，可在设置页把该值改为 0。
 
 CLI 参数优先级高于环境变量：`--host` / `--port` / `--base-path` / `--management-password`。
+
+## 时区（TZ）
+
+镜像本身不设时区，容器默认 UTC——**cron 定时任务与推送通知的免打扰时段都按容器本地时区（`chrono::Local`）判定**，国内用户不设置时整体偏 8 小时：「每天 08:00」实际 16:00 触发，免打扰「22:00–08:00」同样偏移。
+
+`docker-compose.yml` 已默认设置 `TZ=Asia/Shanghai`；手工 `docker run` 或自写编排时在环境变量中补一行即可（基础镜像为 Debian bookworm，tzdata 属 required 包随镜像自带，glibc 直接读取 `TZ`，无需额外安装）：
+
+```yaml
+services:
+  campus-auth:
+    environment:
+      - TZ=Asia/Shanghai
+```
+
+其他时区改为对应 IANA 名称（如 `Europe/Berlin`）。修改 `TZ` 需重建容器生效（`docker compose up -d` 因环境变量变化自动重建）。
 
 ## 端口与网络
 
@@ -174,6 +190,7 @@ docker run -d \
   -p 127.0.0.1:50721:50721 \
   -v campus-auth-data:/data \
   -e CAMPUS_AUTH_HOST=0.0.0.0 \
+  -e TZ=Asia/Shanghai \
   campus-auth
 ```
 

@@ -33,6 +33,10 @@ services:
       #   CAMPUS_AUTH_MANAGEMENT_PASSWORD，否则同网段任何设备都能直接接管
       #   （含脚本执行接口）。
       - CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true
+      # 时区：cron 定时任务与推送免打扰时段按容器本地时区（chrono::Local）判定，
+      # 镜像默认 UTC——不设置时国内定时整体偏 8 小时（「每天 08:00」实际 16:00
+      # 触发）。按所在时区改写，详见 docker/README.md「时区（TZ）」
+      - TZ=Asia/Shanghai
       # 可选：自定义日志级别（debug / info / warn / error）
       # - RUST_LOG=info
       # 可选：GitHub 代理（国内网络加速 uv/playwright 下载）
