@@ -100,6 +100,27 @@ impl WorkerProcess {
         // self drop 时关闭 Job 句柄（若仍持有）：正常退出路径下 Worker 已自行
         // 关闭浏览器，此处仅回收漏网进程
     }
+
+    /// 测试辅助：构造不绑定真实子进程的桩 Worker
+    ///
+    /// 生命周期单测（lifecycle.rs 空闲回收 / 优雅关闭）需要模拟「process 存续」
+    /// 状态，而真实槽位只能由 spawn_worker 写入、单测无从驱动完整 IPC。桩的
+    /// 四个后台 task 均为立即完成的空 task，`shutdown` 因此瞬时返回。
+    #[cfg(test)]
+    pub(crate) fn test_stub() -> Self {
+        let (stdin_tx, _stdin_rx) = mpsc::channel(IPC_WRITE_CHANNEL_CAP);
+        let idle = || tokio::spawn(async {});
+        Self {
+            stdin_tx,
+            handles: ProcessHandles {
+                stdin_task: idle(),
+                stdout_task: idle(),
+                stderr_task: idle(),
+                health_task: idle(),
+            },
+            kill_tx: None,
+        }
+    }
 }
 
 /// 子进程相关的后台 task 句柄

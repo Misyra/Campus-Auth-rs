@@ -479,6 +479,8 @@ fn drain_pending_requests(this: &BridgeSupervisor, reason: &str) {
 /// 不改 worker_state**，仅体现在 `pending_requests` 中。存在在途请求时不能
 /// 回收 Worker（否则请求被 drain 为 `WorkerCrashed`），重置活动时刻并重启
 /// 空闲计时器顺延一个完整空闲周期；待请求结束后再由计时器正常回收。
+/// P2-2：配置浏览器/录制会话归属存续期间同样豁免（会话存续期不在空闲
+/// 预算内，对齐调试会话「静置不被回收」语义）。
 pub(super) async fn handle_idle_timeout(this: &Arc<BridgeSupervisor>) {
     let should_shutdown = {
         let mut inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -497,6 +499,25 @@ pub(super) async fn handle_idle_timeout(this: &Arc<BridgeSupervisor>) {
                 target: "python_worker",
                 "空闲回收触发但存在 {} 个在途请求，顺延一个空闲周期",
                 inner.pending_requests.len()
+            );
+            return;
+        }
+        // P2-2：配置浏览器/录制会话存续期不在空闲预算内。`profile_session_start`
+        // 返回后用户手动登录门户/录制操作可停留任意久（Worker 契约对齐调试会话
+        // 「静置不被回收」，归属登记见 web 层 start 端点），start 返回即
+        // reset_session 重新武装空闲计时器——若到期照常回收，5 分钟静置会把
+        // 录制中的浏览器连同已录内容一起杀掉且无从找回。归属注册表存续期间
+        // （`config_session.peek().is_some()`）到期仅顺延计时器；stop 结算清空
+        // 归属后，下一轮到期恢复正常回收。仅当承载该会话的 Worker 仍存活时
+        // 顺延——进程已亡（崩溃 / 强杀后未重建）时归属表项是待 stop 端点 409
+        // 惰性自愈清理的残留（见 ConfigSessionRegistry 对齐口径），没有可保留
+        // 的 Worker，按正常路径走（take None，无副作用）。
+        if inner.process.is_some() && this.config_session.peek().is_some() {
+            inner.last_activity = Instant::now();
+            start_idle_timer(this, &mut inner);
+            debug!(
+                target: "python_worker",
+                "空闲回收触发但配置/录制会话存续中，顺延一个空闲周期"
             );
             return;
         }
@@ -630,6 +651,7 @@ mod tests {
 
     use super::*;
     use crate::bridge::test_support::make_bridge;
+    use crate::bridge::{ConfigSessionOwner, WorkerProcess};
 
     /// B3：连续 spawn 失败熔断——达到阈值后 ensure_worker 快速失败而非再等 30s。
     #[tokio::test]
@@ -704,5 +726,90 @@ mod tests {
         {
             h.abort();
         }
+    }
+
+    /// P2-2：配置/录制会话归属存续期间，空闲到期仅顺延、不回收 Worker。
+    ///
+    /// 模拟生产时序：`profile_session_start` 成功返回后 reset_session 启动
+    /// 空闲计时器、web 层完成归属登记；用户在门户手动登录/录制静置超过
+    /// 完整空闲周期（默认 300s，tokio::time::pause 下推进）→ IdleTimeout
+    /// 到期 → 豁免生效，Worker 保留且计时器顺延（对齐调试会话「静置不被
+    /// 回收」语义——否则录制中的浏览器连同已录内容被杀且无从找回）。
+    #[tokio::test]
+    async fn p2_2_配置会话存续期空闲到期不回收() {
+        tokio::time::pause();
+        let (bridge, _dir) = make_bridge().await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+            inner.process = Some(WorkerProcess::test_stub());
+        }
+        // 模拟 start 成功后的归属登记（生产中由 web 层 start 端点写入）
+        bridge.config_session.set(ConfigSessionOwner {
+            session_id: "sess-p2-2".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        // 启动真实空闲计时器（等同 start 返回后 reset_session → start_idle_timer）
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            start_idle_timer(&bridge, &mut inner);
+            assert!(inner.idle_timer.is_some(), "应已启动空闲计时器");
+        }
+        // 先让计时器 task 完成首轮 poll（注册 sleep），再推进时钟——否则
+        // sleep 以推进后的时刻为基准起算，推进不会命中其截止时刻
+        tokio::task::yield_now().await;
+        // 推进满默认 300s 空闲周期：计时器到期并投递 IdleTimeout 命令
+        tokio::time::advance(Duration::from_secs(300)).await;
+        let mut cmd_rx = bridge
+            .cmd_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("测试前未消费命令通道");
+        let cmd = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("推进满周期后应收到 IdleTimeout")
+            .expect("命令通道不应关闭");
+        assert!(
+            matches!(cmd, SupervisorCommand::IdleTimeout),
+            "应收到空闲到期命令"
+        );
+        // 到期触发：豁免生效——Worker 不 shutdown，计时器顺延一个周期
+        handle_idle_timeout(&bridge).await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                inner.process.is_some(),
+                "配置会话存续期空闲到期不得回收 Worker"
+            );
+            assert!(inner.idle_timer.is_some(), "豁免路径应顺延空闲计时器");
+            // 清理：中止顺延的计时器，避免测试运行时后台 task 残留
+            if let Some(h) = inner.idle_timer.take() {
+                h.abort();
+            }
+        }
+    }
+
+    /// P2-2 边界：归属表项存在但 Worker 进程已亡（崩溃 / 强杀后未重建）
+    /// → 无可保留对象，不进入顺延分支（否则会拿着残留表项空转计时器）。
+    #[tokio::test]
+    async fn p2_2_进程已亡时归属残留不顺延() {
+        let (bridge, _dir) = make_bridge().await;
+        {
+            let mut inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.worker_state = WorkerState::Idle;
+        }
+        bridge.config_session.set(ConfigSessionOwner {
+            session_id: "sess-gone".into(),
+            profile_id: "dorm".into(),
+            record: false,
+        });
+        handle_idle_timeout(&bridge).await;
+        let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            inner.idle_timer.is_none(),
+            "进程已亡时不得因残留归属表项顺延计时器"
+        );
     }
 }
