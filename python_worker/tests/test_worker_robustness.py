@@ -950,3 +950,66 @@ def test_dispatch_envelope_keeps_plain_message_untouched(monkeypatch, capsys):
     assert envelope["result"]["success"] is True
     assert envelope["result"]["data"]["message"] == plain
     assert envelope["result"]["error"] is None
+
+
+# ── P3-7：dialogs 列表与 dialog 事件通道脱敏 ──
+
+
+def test_dispatch_dialogs_list_sanitized(monkeypatch, capsys):
+    """P3-7 响应信封：dialogs list 内裸 str 项的 token URL 写出前被剥掉。
+
+    门户 alert 文案（如「登录成功，正在跳转 …?token=xxx」）随 StructuredResult
+    的 data.dialogs 上报，此前键名白名单只覆盖 message/error 字段，list 里的
+    裸字符串原样直达 Rust 登录历史。
+    """
+
+    async def handler(params):
+        return {
+            "dialogs": [
+                "登录成功！跳转 http://portal.example.com/srun?token=leak9&x=1",
+                "账号或密码错误！",
+            ]
+        }
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_dialogs", handler)
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak9" not in dumped and "token" not in dumped
+    dialogs = envelope["result"]["data"]["dialogs"]
+    assert dialogs[0].startswith("登录成功！跳转 http://portal.example.com/srun")
+    # 无 URL 的普通弹窗文案原样保留
+    assert dialogs[1] == "账号或密码错误！"
+
+
+def test_emit_event_dialog_message_sanitized(capsys):
+    """P3-7 事件通道：dialog 事件携带的 alert 原文（含带参 URL）写出前被剥洗。
+
+    事件不走 _dispatch 的响应信封闸口，emit_event 出口就地脱敏后写 stdout。
+    """
+    payload = {
+        "message": "请重新登录: http://portal.example.com/srun?token=leak10#frag",
+        "action": "accept",
+    }
+    worker_main.emit_event("dialog", payload)
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["event"] == "dialog"
+    dumped = json.dumps(event, ensure_ascii=False)
+    assert "leak10" not in dumped and "token" not in dumped and "#frag" not in dumped
+    assert event["data"]["message"].startswith("请重新登录: http://portal.example.com/srun")
+    # 非 message/error 字段不受影响
+    assert event["data"]["action"] == "accept"
+
+
+def test_emit_event_plain_payload_untouched(capsys):
+    """P3-7 边界：无 message/error 键与裸 str 列表的事件负载原样透传。"""
+    payload = {
+        "step_index": 0,
+        "description": "步骤 1: 打开 http://portal.example.com/裸地址",
+    }
+    worker_main.emit_event("step_progress", payload)
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    # description 不在键名白名单内，task 侧文案保持原样
+    assert event["data"] == payload

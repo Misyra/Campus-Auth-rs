@@ -151,7 +151,14 @@ def emit_event(event_type: str, data: dict) -> None:
     实际事件类型：step_progress / screenshot / dialog（业务事件，经 Rust 白名单
     转发 WebSocket）与 command_started（BRG-1b 内部信令，不进白名单，Rust 据此
     重置对应请求的超时起算点）。
+
+    P3-7：事件数据写出前经 ``_sanitize_message_fields`` 就地脱敏——事件通道
+    不走 ``_dispatch`` 的响应信封闸口，dialog 事件携带页面 alert 原文（可能含
+    带临时 token 的重定向 URL），键名白名单恰好覆盖其 message 字段；其余
+    事件负载无 message/error 键与裸 str 列表，均为 no-op。各 emit 调用点的
+    负载均为就地构造的独立 dict，就地修改无共享状态风险。
     """
+    _sanitize_message_fields(data)
     _write_line({"event": event_type, "data": data})
 
 
@@ -244,7 +251,10 @@ def _sanitize_message_fields(node: object) -> None:
     """递归脱敏 dict / list 树中名为 message / error 的字符串字段（就地修改）。
 
     debug 会话响应的 ``data.results[*].message`` 等嵌套结构与扁平字段统一覆盖；
-    ``_sanitize_error`` 对无 query/fragment 的文本原样返回（幂等），重复应用无害。
+    list 内的裸 str 项同样过 ``_sanitize_error``（P3-7）——``dialogs``（页面
+    弹窗文案列表）这类载荷不经键名白名单，门户 alert 里带临时 token 的 URL
+    会原样随响应信封进登录历史；``_sanitize_error`` 对无 query/fragment 的
+    文本原样返回（幂等），重复应用无害。
     """
     if isinstance(node, dict):
         for key, value in node.items():
@@ -253,8 +263,11 @@ def _sanitize_message_fields(node: object) -> None:
             else:
                 _sanitize_message_fields(value)
     elif isinstance(node, list):
-        for item in node:
-            _sanitize_message_fields(item)
+        for i, item in enumerate(node):
+            if isinstance(item, str):
+                node[i] = _sanitize_error(item)
+            else:
+                _sanitize_message_fields(item)
 
 
 def _sanitize_response_result(result: object) -> object:
