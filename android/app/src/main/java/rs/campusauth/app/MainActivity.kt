@@ -366,6 +366,19 @@ class MainActivity : Activity() {
         }
     }
 
+    // P3-34：界面退后台暂停 WebView 的 JS 执行与渲染（否则 WS 重连退避、状态
+    // 轮询在前台持续空转耗电），回前台恢复；前台服务与 Rust 核心不受影响——
+    // 掉线检测/自动重登照常运行
+    override fun onPause() {
+        webView.onPause()
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        webView.onResume()
+    }
+
     override fun onDestroy() {
         // 只销毁 WebView，不停前台服务：守护与 UI 生命周期解耦
         webView.destroy()
