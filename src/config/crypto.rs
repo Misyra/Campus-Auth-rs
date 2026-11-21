@@ -40,7 +40,22 @@ const NONCE_LEN: usize = 12;
 /// 允许两个版本在同一用户目录下共存。`.enc_key.rs` 不存在时会优先继承
 /// Python 旧版的 `.enc_key`（见 `PasswordCrypto::read_or_create_key`），
 /// 保证新旧版本共用同一密钥、密码互通（历史遗留：两版密钥各自生成导致冲突）。
+///
+/// 安卓例外（前置①，真机必败点收敛）：Android 应用进程通常无 HOME
+/// （`dirs::home_dir` 在 android target 只读 HOME 环境变量、无 getpwuid 回退），
+/// 静默回退 CWD 会落到 `/` → `/.campus_network_auth` 创建 EACCES → 首次保存/
+/// 解密带密码凭据必败。android 下密钥目录挂 `CAMPUS_AUTH_BASE_DIR`（JNI 启动层
+/// `ffi_android::nativeInit` 先于容器构造注入的应用私有目录），目录名沿用桌面的
+/// `.campus_network_auth` 保持布局一致；解析语义与 `utils::paths::resolve_base_dir`
+/// 同源（非空生效、trim 容忍）。桌面/OpenWrt 构建不读该变量（paths.rs 侧文档
+/// 承诺不设置）：密钥身份载体是 OS 用户主目录，即便用户手动设置 base 目录变量
+/// 也不迁移密钥——避免既有 ENC: 密文静默换钥后全部无法解密。
 pub fn default_key_path() -> PathBuf {
+    if cfg!(target_os = "android")
+        && let Some(dir) = android_key_dir_from_env(std::env::var("CAMPUS_AUTH_BASE_DIR").ok().as_deref())
+    {
+        return dir.join(".enc_key.rs");
+    }
     let mut dir = dirs::home_dir().unwrap_or_else(|| {
         // 静默回退 CWD 会让不同工作目录下启动的实例各生成各的密钥：ENC: 密文
         // 在 A 目录加密后到 B 目录启动就互解失败（症状为全部密码"损坏"），
@@ -55,6 +70,19 @@ pub fn default_key_path() -> PathBuf {
     dir.push(".campus_network_auth");
     dir.push(".enc_key.rs");
     dir
+}
+
+/// 安卓密钥目录解析（纯函数，便于单测）：注入的 base 目录非空时挂其下 `.campus_network_auth`
+///
+/// 语义与 `utils::paths::resolve_base_dir` 同源：空串/纯空白视同未设置。
+/// 独立成函数是为了不触碰进程环境变量就能钉住解析行为——lib 测试与
+/// `utils::paths` 的环境变量用例共用同一进程，测试内 `set_var` 会引入并行竞态。
+fn android_key_dir_from_env(raw: Option<&str>) -> Option<PathBuf> {
+    let base = raw?.trim();
+    if base.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(base).join(".campus_network_auth"))
 }
 
 /// 密码加解密器，密钥延迟加载
@@ -523,6 +551,33 @@ mod tests {
         let key_path = tmp.path().join(".enc_key");
         let crypto = PasswordCrypto::new(key_path);
         (tmp, crypto)
+    }
+
+    // ============ 密钥路径解析（前置①：安卓挂 CAMPUS_AUTH_BASE_DIR） ============
+
+    /// 前置①：安卓密钥目录挂 `CAMPUS_AUTH_BASE_DIR`（与 resolve_base_dir 同源语义）
+    ///
+    /// 真机必败点收敛：android 进程无 HOME，不挂 base 目录会落到 `/` 创建
+    /// `/.campus_network_auth` 必然 EACCES，首次保存带密码凭据即失败
+    #[test]
+    fn test_android_key_dir_from_env() {
+        // 有效注入：密钥目录挂 base 下的 `.campus_network_auth`（与桌面
+        // `~/.campus_network_auth` 同名，保持两平台布局一致）
+        assert_eq!(
+            android_key_dir_from_env(Some("/data/user/0/rs.campusauth.app/files")),
+            Some(PathBuf::from(
+                "/data/user/0/rs.campusauth.app/files/.campus_network_auth"
+            ))
+        );
+        // 首尾空白容忍（与 resolve_base_dir 的 trim 口径一致）
+        assert_eq!(
+            android_key_dir_from_env(Some("  /base  ")),
+            Some(PathBuf::from("/base/.campus_network_auth"))
+        );
+        // 空串 / 纯空白 / 未设置：视同未设置，回退桌面 home 解析
+        assert_eq!(android_key_dir_from_env(Some("")), None);
+        assert_eq!(android_key_dir_from_env(Some("   ")), None);
+        assert_eq!(android_key_dir_from_env(None), None);
     }
 
     // ============ AES-256-GCM 加解密往返 ============
