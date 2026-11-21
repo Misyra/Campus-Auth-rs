@@ -121,7 +121,7 @@ pub fn query_instance(base_path: &Path) -> Option<InstanceInfo> {
 
 /// 优雅停止运行实例
 ///
-/// 通过 HTTP POST `/api/system/shutdown` 通知实例关闭，然后轮询等待进程退出（最多 10 秒）。
+/// 通过 HTTP POST `/api/system/shutdown` 通知实例关闭，然后轮询等待进程退出（最多 30 秒）。
 pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     let info =
         query_instance(base_path).ok_or_else(|| anyhow::anyhow!("未找到运行中的实例信息"))?;
@@ -153,12 +153,14 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
         tracing::debug!("停止请求发送失败（目标进程可能已退出）: {e}");
     }
 
-    // 轮询等待进程退出；上限须覆盖优雅关闭的最坏预算
-    // （bridge 3s + scheduler 5s + engine 8s = 16s），取 20s 留余量。
+    // 轮询等待进程退出；上限须覆盖优雅关闭的最坏预算（P3-12）：
+    // 托盘 3s + scheduler 5s + engine 5s + bridge 8s + axum 5s ≈ 26s，
+    // 与 shutdown 侧 spawn_exit_watchdog 统一取 30s——轮询上限低于该值
+    // 会在 Windows 慢场景把仍在正常关闭中的实例误报成「停止失败」。
     // unix 附加"监听端口已关闭"判据：若父进程未回收子进程，已退出的实例
     // 会以僵尸形态存在，kill(pid,0) 仍返回成功——此时端口关闭才是可靠的
     // 停止信号（shutdown POST 已送达，Axum 关闭即代表实例已停止）。
-    for _ in 0..200 {
+    for _ in 0..300 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !is_process_alive(info.pid) {
             return Ok(());
@@ -168,7 +170,7 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
         }
     }
 
-    anyhow::bail!("等待进程退出超时（20 秒）")
+    anyhow::bail!("等待进程退出超时（30 秒）")
 }
 
 /// 校验 PID 是否为本程序实例（防 PID 复用误杀）
