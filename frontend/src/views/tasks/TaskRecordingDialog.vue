@@ -82,8 +82,11 @@ function defaultRecordedName(): string {
   return `录制任务 ${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-watch(phase, (p) => {
-  if (p !== "preview") return;
+watch(phase, (p, old) => {
+  // 仅 finishRecording 成功（finishing → preview）进入预览时生成默认名/描述：
+  // saving → preview（保存失败回退重试）时保留用户已改的输入，否则保存失败
+  // 一次就把我改的任务名重置回默认值（P2-15）
+  if (p !== "preview" || old !== "finishing") return;
   taskName.value = defaultRecordedName();
   taskDescription.value =
     `由「录制新任务」从方案「${selectedProfileName.value || profileId.value}」的浏览器操作生成` +

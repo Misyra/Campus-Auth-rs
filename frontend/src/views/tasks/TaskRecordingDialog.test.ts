@@ -17,7 +17,8 @@
  * - 放弃录制 → stop 带 discard=true（后端不落盘）；
  * - starting 窗口取消（P2-14）：start 在途关闭弹窗 → 立即关窗不发 stop（会话未登记，
  *   发了也 409），start 落地后补发一次 stop(discard) 收尾，不进录制态；补发撞 409
- *   （会话实际未落地）静默收场不弹失败提示。
+ *   （会话实际未落地）静默收场不弹失败提示；
+ * - 保存失败回预览（P2-15）：用户已改的名称/描述保留，不被默认值重置。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createApp, nextTick, type App } from "vue";
@@ -453,5 +454,52 @@ describe("TaskRecordingDialog", () => {
     // 不写就地 errorMsg：回到选方案阶段，role=alert 区域不出现
     expect(rec.phase.value).toBe("select");
     expect(document.querySelector('[data-testid="record-error"]')).toBeNull();
+  });
+
+  it("保存失败回到预览：用户已改的名称/描述保留，不被默认值重置（P2-15）", async () => {
+    stubFetch((url, init) => {
+      if (url.includes("/config-session/start")) {
+        return Promise.resolve(jsonResponse({ data: { started: true } }));
+      }
+      if (url.includes("/config-session/stop")) {
+        return Promise.resolve(
+          jsonResponse({
+            data: { recorded_count: 5, truncated: false, persistent_session_enabled: false, recorded_actions: recordedActions() },
+          }),
+        );
+      }
+      if (url.includes("/api/tasks/untitled_1") && init?.method === "PUT") {
+        return Promise.resolve(
+          jsonResponse({ error: { code: "INTERNAL", message: "保存失败" } }, { status: 500 }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    mountDialog();
+    await flush();
+    const rec = useTaskRecording();
+    rec.profileId.value = "dorm";
+    await flush();
+    click("record-start");
+    await settle();
+    click("record-finish");
+    await settle();
+
+    // 改写名称与描述（v-model 经 input 事件同步）
+    const nameInput = document.querySelector<HTMLInputElement>('[data-testid="record-name"]');
+    nameInput!.value = "我的自定义任务";
+    nameInput!.dispatchEvent(new Event("input"));
+    const descInput = document.querySelector<HTMLInputElement>('[data-testid="record-desc"]');
+    descInput!.value = "自定义描述";
+    descInput!.dispatchEvent(new Event("input"));
+    await flush();
+
+    // 保存失败：停在预览态可重试（就地错误可见）
+    click("record-save");
+    await settle();
+    expect(rec.phase.value).toBe("preview");
+    expect(document.querySelector<HTMLInputElement>('[data-testid="record-name"]')?.value).toBe("我的自定义任务");
+    expect(document.querySelector<HTMLInputElement>('[data-testid="record-desc"]')?.value).toBe("自定义描述");
+    expect(document.querySelector('[data-testid="record-error"]')?.textContent).toContain("保存失败");
   });
 });
