@@ -963,10 +963,19 @@ fn update_tray(
         EngineState::Running => active,
         EngineState::Stopped | EngineState::Dead => inactive,
     };
-    if let Some(icon) = target
-        && let Err(e) = tray.set_icon(Some(icon.clone()))
-    {
-        debug!("更新托盘图标失败: {e}");
+    if let Some(icon) = target {
+        // macOS 必须走带 template 的换图路径：tray-icon 平台层普通 set_icon
+        // 把 template 硬编码为 false（0.24.1 platform_impl/macos/mod.rs:118），
+        // 状态切换一次即丢模板——停止态灰猫按原始 RGB 显示「发灰」，运行态
+        // 黑猫在深色菜单栏近乎不可见（be74a7c 的模板渲染被静默撤销）。
+        // 非 macOS 的 set_icon_with_as_template 是丢弃 icon 的 no-op，须分流
+        #[cfg(target_os = "macos")]
+        let result = tray.set_icon_with_as_template(Some(icon.clone()), true);
+        #[cfg(not(target_os = "macos"))]
+        let result = tray.set_icon(Some(icon.clone()));
+        if let Err(e) = result {
+            debug!("更新托盘图标失败: {e}");
+        }
     }
 }
 
