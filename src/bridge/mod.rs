@@ -1402,7 +1402,12 @@ mod tests {
         ] {
             assert!(g4_preflight_method(m), "{m} 应在 G4 预检列表");
         }
-        for m in ["debug_step", "debug_run_all", "ocr_recognize", "feedback_capture"] {
+        for m in [
+            "debug_step",
+            "debug_run_all",
+            "ocr_recognize",
+            "feedback_capture",
+        ] {
             assert!(!g4_preflight_method(m), "{m} 不应在 G4 预检列表");
         }
     }

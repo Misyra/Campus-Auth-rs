@@ -1265,7 +1265,10 @@ pub fn sanitize_config_snapshot(
         if let Some(network) = obj.get_mut("network").and_then(|v| v.as_object_mut()) {
             sanitize_url_field(network, "proxy_url");
         }
-        if let Some(actions) = obj.get_mut("recorded_actions").and_then(|v| v.as_array_mut()) {
+        if let Some(actions) = obj
+            .get_mut("recorded_actions")
+            .and_then(|v| v.as_array_mut())
+        {
             redact_recorded_action_values(actions);
         }
     }

@@ -1287,7 +1287,10 @@ mod tests {
         assert_eq!(actions[0].frame, None, "顶层捕获缺 frame 键 → None");
         assert_eq!(actions[1].action_type, "change");
         assert_eq!(actions[1].value.as_deref(), Some("telecom"));
-        assert_eq!(actions[1].frame, None, "缺 frame 键 → None（serde default）");
+        assert_eq!(
+            actions[1].frame, None,
+            "缺 frame 键 → None（serde default）"
+        );
         // fill 携带值且占位符原样透传（凭据解析在回放侧，存储永不落明文）
         assert_eq!(actions[2].action_type, "fill");
         assert_eq!(actions[2].value.as_deref(), Some("{{PASSWORD}}"));

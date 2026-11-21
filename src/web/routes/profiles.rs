@@ -3930,10 +3930,7 @@ mod tests {
         assert_eq!(actions[1].value.as_deref(), Some("{{USERNAME}}"));
 
         // click/navigate 不参与比对：navigate 值与凭据恒等也原样保留
-        let mut actions = vec![
-            action("click", None),
-            action("navigate", Some(password)),
-        ];
+        let mut actions = vec![action("click", None), action("navigate", Some(password))];
         normalize_recorded_credential_values(&mut actions, username, password);
         assert_eq!(actions[0].value, None);
         assert_eq!(actions[1].value.as_deref(), Some("p@ss w0rd"));

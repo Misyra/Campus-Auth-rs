@@ -398,7 +398,9 @@ mod tests {
         std::fs::create_dir_all(info_path.parent().expect("父目录")).unwrap();
         // 自身 PID + 端口 0：query_instance 判定存活、无端口可发关机请求
         std::fs::write(&info_path, format!("{}\n0\n", std::process::id())).unwrap();
-        let err = stop_instance(dir.path()).await.expect_err("轻量模式必须无法远程停止");
+        let err = stop_instance(dir.path())
+            .await
+            .expect_err("轻量模式必须无法远程停止");
         let message = format!("{err:#}");
         assert!(message.contains("轻量模式"), "{message}");
         // kill 出口指引：须含手动结束提示与实例 PID

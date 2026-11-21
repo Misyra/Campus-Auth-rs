@@ -3002,7 +3002,8 @@ mod tests {
         // 凭据四键必须存在且与编排侧装配一致（原样透传，供 fill 占位符回放解析）
         for key in ["username", "password", "isp", "auth_url"] {
             assert_eq!(
-                sent[key], persistent_params()[key],
+                sent[key],
+                persistent_params()[key],
                 "凭据键 {key} 必须与编排侧装配一致"
             );
         }

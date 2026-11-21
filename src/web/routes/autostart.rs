@@ -70,10 +70,9 @@ pub async fn get_autostart(
     // 取「文件存在且 Exec 指向当前可执行」的观测结论，配置位降为
     // cached_enabled；此前回显配置位，用户手删 .desktop 文件仍显示已启用
     #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
-    let observed =
-        tokio::task::spawn_blocking(crate::utils::platform::xdg_self_start_status)
-            .await
-            .map_err(|e| ApiError::Internal(format!("查询自启动状态后台任务异常: {e}")))?;
+    let observed = tokio::task::spawn_blocking(crate::utils::platform::xdg_self_start_status)
+        .await
+        .map_err(|e| ApiError::Internal(format!("查询自启动状态后台任务异常: {e}")))?;
     #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
     let enabled = observed.enabled;
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]

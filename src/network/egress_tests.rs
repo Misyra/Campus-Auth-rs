@@ -67,7 +67,10 @@ async fn dns_uses_selected_server_without_system_resolver_fallback() {
 async fn resolve_strips_ipv6_brackets_for_literal() {
     // 剥括号辅助：方括号剥一层、其余原样
     assert_eq!(strip_ipv6_brackets("[2001:db8::1]"), "2001:db8::1");
-    assert_eq!(strip_ipv6_brackets("portal.example.edu"), "portal.example.edu");
+    assert_eq!(
+        strip_ipv6_brackets("portal.example.edu"),
+        "portal.example.edu"
+    );
     assert_eq!(strip_ipv6_brackets("[::1"), "[::1");
     // Binding 字面量分支：方括号形态不再落进 DNS 查询失败分支
     let binding = Binding {

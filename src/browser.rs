@@ -36,7 +36,7 @@ fn clean_app_paths_value(raw: &[u16]) -> Option<String> {
 fn app_paths_executable(exe_name: &str) -> Option<std::path::PathBuf> {
     // HKEY 根键常量与取值 API 同在 Registry 模块（platform_windows 同源）
     use windows_sys::Win32::System::Registry::{
-        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegGetValueW, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
     };
 
     // 路径值远小于 4K 字符；不足时 RegGetValueW 返回错误而非截断误报。
@@ -94,8 +94,7 @@ pub fn is_chrome_installed() -> bool {
             .join("Application")
             .join("chrome.exe"),
     ];
-    candidates.iter().any(|p| p.exists())
-        || app_paths_executable("chrome.exe").is_some()
+    candidates.iter().any(|p| p.exists()) || app_paths_executable("chrome.exe").is_some()
 }
 
 /// 检测系统是否安装了 Google Chrome（macOS）
@@ -156,8 +155,7 @@ pub fn is_edge_installed() -> bool {
             .join("Application")
             .join("msedge.exe"),
     ];
-    candidates.iter().any(|p| p.exists())
-        || app_paths_executable("msedge.exe").is_some()
+    candidates.iter().any(|p| p.exists()) || app_paths_executable("msedge.exe").is_some()
 }
 
 /// 检测系统是否安装了 Microsoft Edge（macOS）

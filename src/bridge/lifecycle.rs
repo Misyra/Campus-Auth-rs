@@ -672,8 +672,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::bridge::test_support::make_bridge;
     use crate::bridge::ConfigSessionOwner;
+    use crate::bridge::test_support::make_bridge;
 
     /// B3：连续 spawn 失败熔断——达到阈值后 ensure_worker 快速失败而非再等 30s。
     #[tokio::test]
@@ -872,10 +872,7 @@ mod tests {
                 h.abort();
             }
         }
-        assert!(
-            rx.try_recv().is_err(),
-            "在途请求不应被结算为 WorkerCrashed"
-        );
+        assert!(rx.try_recv().is_err(), "在途请求不应被结算为 WorkerCrashed");
     }
 
     /// P3-4：无在途、无存续配置会话时正常回收——判定临界区内 take process，
@@ -897,13 +894,7 @@ mod tests {
             "正常回收路径应取走 process 并完成关闭"
         );
         assert_eq!(inner.worker_state, WorkerState::Idle);
-        assert!(
-            inner.worker_capabilities.is_none(),
-            "能力缓存应随进程失效"
-        );
-        assert!(
-            !inner.debug_session_open,
-            "调试会话标记应随进程终结"
-        );
+        assert!(inner.worker_capabilities.is_none(), "能力缓存应随进程失效");
+        assert!(!inner.debug_session_open, "调试会话标记应随进程终结");
     }
 }
