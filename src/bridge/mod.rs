@@ -880,6 +880,23 @@ async fn handle_ipc_message(this: &Arc<BridgeSupervisor>, msg: ParsedMessage) {
     }
 }
 
+/// G4 孤儿调试会话 TTL 预检覆盖的方法集
+///
+/// 这些方法在 [`check_session_compat`] 对 `InDebug` 一律快速失败，遗弃调试
+/// 会话会让它们恒撞 `WorkerBusy`；进入 [`execute_inner`] 前先做 TTL 预检，
+/// 超时孤儿即强制回收 Worker 放行本次请求。新增与调试会话互斥的登录类
+/// 方法时必须同步本列表（有测试钉住，漏列症状为入口恒 409 无提示）。
+fn g4_preflight_method(method: &str) -> bool {
+    matches!(
+        method,
+        "execute_login_attempt"
+            | "execute_browser_task"
+            | "test_redirect"
+            | "profile_auto_login"
+            | "profile_session_start"
+    )
+}
+
 /// execute 核心逻辑：确保 Worker 就绪 → 注册 cancel → 发送请求
 ///
 /// 返回 `oneshot::Receiver` 供调用方等待响应、`SessionGuard` 用于 RAII 清理，
@@ -918,10 +935,11 @@ async fn execute_inner(
     // 需要 inner 锁）。调试面板被直接关闭（未点"停止调试"）时调试会话永久占住
     // 槽位、拒绝后续所有登录类命令；超过 30 分钟无调试活动判定为遗弃，强制
     // 回收 Worker（调试状态随进程销毁）放行本次请求。
-    if matches!(
-        method,
-        "execute_login_attempt" | "execute_browser_task" | "test_redirect" | "profile_auto_login"
-    ) {
+    // P3-3：预检列表须覆盖 profile_session_start——配置会话与登录同属
+    // check_session_compat 对 InDebug 快速失败的互斥域，漏列会让调试面板
+    // 遗弃 30 分钟后「打开浏览器配置/录制」入口恒 409 且无提示（绕行只有
+    // 跑一次浏览器任务触发预检回收）。
+    if g4_preflight_method(method) {
         let stale = {
             let inner = this.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.current_session == Some(SessionType::Debug)
@@ -1368,6 +1386,25 @@ mod tests {
         grace_wait_slot_release(&bridge, 7, Duration::from_millis(50)).await;
         let inner = bridge.inner.lock().unwrap_or_else(|e| e.into_inner());
         assert_ne!(inner.worker_state, WorkerState::Error, "槽位已空不应强杀");
+    }
+
+    /// P3-3：G4 预检方法集钉住——登录类与配置会话入口（start）都在列，
+    /// 调试面板遗弃 30 分钟后这些入口不再恒 409；轻量 / 调试同域方法
+    /// 不触发预检强杀（debug_* 复用同一会话，轻量命令与任意会话并发）。
+    #[test]
+    fn g4预检方法集_含配置会话入口() {
+        for m in [
+            "execute_login_attempt",
+            "execute_browser_task",
+            "test_redirect",
+            "profile_auto_login",
+            "profile_session_start",
+        ] {
+            assert!(g4_preflight_method(m), "{m} 应在 G4 预检列表");
+        }
+        for m in ["debug_step", "debug_run_all", "ocr_recognize", "feedback_capture"] {
+            assert!(!g4_preflight_method(m), "{m} 不应在 G4 预检列表");
+        }
     }
 
     /// 任务 10：runtime_ocr_capability 在 Worker 未存活时一律 None（回退文件探测）。
