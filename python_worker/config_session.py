@@ -92,7 +92,9 @@ _RECORDER_SELECTOR_MAX_CHARS = 512
 # 录制器 JS 模板：__TOKEN__ 由 build_recorder_init_script 用 Python 常量替换
 #（不用 str.format，避免与 JS 花括号冲突）。捕获范围与防抖/上限口径：
 # - change 仅捕获 <select>（ISP 选择类）；点击仅捕获 button / [type=submit] /
-#   input[type=submit] / [role=button]（closest 兼容按钮内嵌图标等子元素命中）；
+#   input[type=submit] / [role=button]（closest 兼容按钮内嵌图标等子元素命中），
+#   但**任何**点击都先结算进行中的输入会话（链接/JS 导航同样会销毁文档），
+#   pagehide 再兜底一次未决 fill；
 # - 文本输入录为 fill：密码框值恒替换为 {{PASSWORD}} 占位符（绝不捕获真实
 #   输入值，密码永不落明文），用户名启发式命中的框恒替换为 {{USERNAME}}，
 #   其余文本框录实际值字面量（空值不上报）；contenteditable 可忽略不录；
@@ -538,16 +540,23 @@ _RECORDER_JS_TEMPLATE = r"""
   document.addEventListener("click", (ev) => {
     // 面板自防：面板内点击（含删除按钮）绝不录入，也不结算输入会话
     if (inPanel(ev.target)) return;
+    // 输入会话结算先于按钮判定：链接/JS 导航类点击（<a>「短信登录」、
+    // window.open 等）不走按钮分支，文档随导航销毁时防抖窗口内未结算的
+    // fill 会整体丢失——结算不依赖「点了什么」，任何门户可见性点击都可能
+    // 触发导航；按钮点击（含回车在表单上合成的提交点击）同样受益，保持
+    // 「输入 → 提交」时序
+    flushFill();
     const t = ev.target;
     const el = t && t.closest
       ? t.closest("button, [type=submit], input[type=submit], [role=button]")
       : null;
     if (!el) return;
-    // 记录点击前先结算进行中的输入会话：登录点击（含回车在表单上合成的
-    // 提交点击）前，待结算 fill 必须先落序，保持「输入 → 提交」时序
-    flushFill();
     send("click", el, undefined);
   }, true);
+  // pagehide 兜底：导航/关闭销毁文档前结算未决 fill——click/blur/Enter 都
+  // 没赶上的场景（表单 target 提交、脚本 location 跳转）最后一线；binding
+  // 消息能否赶在文档销毁前送达属 best-effort，能救回一段是一段
+  window.addEventListener("pagehide", () => { flushFill(); });
 
   // ── 面板装配（主框架）：先于任何用户交互，但 init script 执行时点早于文档
   // 元素创建（body 与 documentElement 均可能为 null，appendChild 直接抛错会

@@ -1198,3 +1198,63 @@ def test_recorder_js_username_and_literal_fields_unaffected():
     assert [f["value"] for f in fills] == [
         RECORDER_PLACEHOLDER_USERNAME, "hello",
     ]
+
+
+def test_recorder_js_click_flushes_pending_fill_before_button_check():
+    """flushFill 先于 closest 判定：非按钮元素点击（<a> 导航）也结算输入会话。
+
+    防抖窗口内点击链接跳转（「短信登录」）时文档随导航销毁，未结算 fill
+    若不在点击时落盘即整体丢失。
+    """
+    payloads = _run_recorder_js(
+        "const user = makeEl({ id: 'user', name: 'username' });"
+        "user.value = 'student-001';"
+        "fire('input', inputEvent(user));"
+        # 防抖 500ms 未到即点击非按钮元素（<a>，closest 恒 null）
+        "const link = makeEl({ id: 'nav-link', tagName: 'A' });"
+        "fire('click', { target: link });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1, "非按钮点击也必须结算待决 fill"
+    assert fills[0]["value"] == RECORDER_PLACEHOLDER_USERNAME
+    assert all(p["type"] != "click" for p in payloads), "非按钮点击本身仍不录入"
+
+
+def test_recorder_js_button_click_flush_keeps_fill_before_click_order():
+    """按钮点击前结算保持「输入 → 提交」时序（既有口径不回退）。"""
+    payloads = _run_recorder_js(
+        "const user = makeEl({ id: 'user', name: 'username' });"
+        "user.value = 'student-001';"
+        "fire('input', inputEvent(user));"
+        "const btn = makeEl({ id: 'submit-btn', tagName: 'BUTTON' });"
+        "btn.closest = () => btn;"
+        "fire('click', { target: btn });"
+    )
+    assert [p["type"] for p in payloads] == ["fill", "click"]
+    assert payloads[0]["value"] == RECORDER_PLACEHOLDER_USERNAME
+    assert payloads[1]["selector"] == "#submit-btn"
+
+
+def test_recorder_js_pagehide_flushes_pending_fill():
+    """pagehide 兜底：未决 fill 在文档销毁前结算（最后一线）。"""
+    payloads = _run_recorder_js(
+        "const plain = makeEl({ id: 'search' });"
+        "plain.value = 'last-segment';"
+        "fire('input', inputEvent(plain));"
+        "fire('pagehide', { target: null });"
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1
+    assert fills[0]["value"] == "last-segment"
+
+
+def test_recorder_js_click_listener_flush_precedes_closest():
+    """静态钉住：click 监听中 flushFill 位于 closest 判定之前（inPanel 之后）。"""
+    js = build_recorder_init_script()
+    click_seg = js.split('document.addEventListener("click"')[1].split("}, true);")[0]
+    assert click_seg.index("flushFill();") < click_seg.index('t.closest("button'), \
+        "结算必须先于按钮判定，否则非按钮导航丢 pendingFill"
+    assert click_seg.index("if (inPanel(ev.target)) return;") < click_seg.index("flushFill();"), \
+        "面板自防仍先于结算"
+    # pagehide 兜底监听存在
+    assert 'window.addEventListener("pagehide"' in js
