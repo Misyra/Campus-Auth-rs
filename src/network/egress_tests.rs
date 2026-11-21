@@ -60,6 +60,41 @@ async fn dns_uses_selected_server_without_system_resolver_fallback() {
     );
 }
 
+/// P2-13：`resolve` 两条路径对 IPv6 字面量的方括号形态剥括号后按字面量返回
+///（不剥会被误当域名：Binding 走 dns_query 报「DNS 域名无效」、PreparedEgress
+/// 走系统解析器失败），无括号输入不受影响
+#[tokio::test]
+async fn resolve_strips_ipv6_brackets_for_literal() {
+    // 剥括号辅助：方括号剥一层、其余原样
+    assert_eq!(strip_ipv6_brackets("[2001:db8::1]"), "2001:db8::1");
+    assert_eq!(strip_ipv6_brackets("portal.example.edu"), "portal.example.edu");
+    assert_eq!(strip_ipv6_brackets("[::1"), "[::1");
+    // Binding 字面量分支：方括号形态不再落进 DNS 查询失败分支
+    let binding = Binding {
+        adapter: None,
+        dns: Vec::new(),
+    };
+    let v6 = SocketAddr::new(
+        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+        80,
+    );
+    assert_eq!(binding.resolve("[2001:db8::1]", 80).await.unwrap(), [v6]);
+    assert_eq!(binding.resolve("2001:db8::1", 80).await.unwrap(), [v6]);
+    assert_eq!(
+        binding.resolve("127.0.0.1", 443).await.unwrap(),
+        [SocketAddr::from(([127, 0, 0, 1], 443))]
+    );
+    // PreparedEgress 无绑定路径：方括号形态经系统解析器按字面量直返（无 DNS 查询）
+    let route = PreparedEgress::prepare(&NetworkSettings {
+        mode: NetworkMode::Direct,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(route.resolve("[2001:db8::1]", 80).await.unwrap(), [v6]);
+    assert_eq!(route.resolve("127.0.0.1", 443).await.unwrap().len(), 1);
+}
+
 #[test]
 fn invalid_interface_never_produces_an_unbound_socket() {
     let binding = Binding {

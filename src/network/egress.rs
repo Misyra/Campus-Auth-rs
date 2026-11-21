@@ -164,10 +164,15 @@ impl PreparedEgress {
     }
 
     /// 域名检查使用所选网卡的 DNS，避免校验与连接走两套解析路径。
+    ///
+    /// IPv6 字面量可能以方括号形态传入（`url::Url::host_str()` 的产出），
+    /// 字面量解析与 DNS 查询均不认方括号——先剥一层再处理（P2-13，与
+    /// `web::ssrf` / `monitor::portal` 同口径）。
     pub async fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
         if let Some(binding) = &self.binding {
             binding.resolve(host, port).await
         } else {
+            let host = strip_ipv6_brackets(host);
             Ok(tokio::net::lookup_host((host, port)).await?.collect())
         }
     }
@@ -219,6 +224,15 @@ impl PreparedEgress {
             None => true,
         }
     }
+}
+
+/// 剥除 IPv6 字面量的方括号（`[2001:db8::1]` → `2001:db8::1`）：
+/// `url::Url::host_str()` 返回带括号形态，而 `IpAddr` 解析与系统解析器
+/// （`lookup_host`）均不认括号；非括号形态原样返回（域名不受影响）
+fn strip_ipv6_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
 }
 
 /// 校园网 DNS 仅接受实际 IPv4 端点，避免解析 DNS 本身形成循环。
@@ -279,6 +293,9 @@ impl Binding {
     }
 
     async fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        // IPv6 字面量的方括号形态先剥一层（P2-13）：不剥会绕过字面量分支、
+        // 被 dns_query 的 url::Host::parse 判为非域名而「DNS 域名无效」
+        let host = strip_ipv6_brackets(host);
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, port)]);
         }
