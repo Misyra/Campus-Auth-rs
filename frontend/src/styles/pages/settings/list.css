@@ -72,6 +72,10 @@
 }
 .settings-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
 .settings-tab.active { background: var(--accent-soft); color: var(--accent-text, var(--accent)); font-weight: 600; }
+/* 搜索过滤期间被隐藏分区的 tab（P3-25）：置灰不可点，点击不触发定位也不改 hash；
+   悬停不变色（disabled 按钮仍匹配 :hover，需要显式压回原色） */
+.settings-tab:disabled { opacity: 0.45; cursor: default; }
+.settings-tab:disabled:hover { background: transparent; color: var(--text-secondary); }
 .settings-tab-icon { width: 15px; height: 15px; flex-shrink: 0; }
 
 /* 设置搜索：输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，

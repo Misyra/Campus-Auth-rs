@@ -196,3 +196,22 @@ describe("设置页搜索可访问性（输入框已合并进顶栏）", () => {
     expect(settingsView).not.toContain("settings-search-clear");
   });
 });
+
+describe("设置分区导航（tab 条行为锁定）", () => {
+  it("搜索过滤期间被隐藏分区的 tab 置 disabled（P3-25）：点击不定位、hash 不被改写", () => {
+    const button = settingsView.match(/<button[\s\S]*?class="settings-tab"[\s\S]*?<\/button>/);
+    expect(button, "SettingsView.vue 缺少 settings-tab 按钮").not.toBeNull();
+    expect(button![0]).toContain(':disabled="searchResult.hiddenSectionIds.has(section.id)"');
+  });
+
+  it("程序性滚动期间 scrollspy 暂停写入（P3-30）：锚定非空时交叉/触底均早退", () => {
+    expect(settingsView.match(/if \(anchoredSection\) return;/g)?.length).toBeGreaterThanOrEqual(2);
+    // 解除锚定时按当前视口补正一次高亮，不等下一次交叉变化
+    expect(settingsView).toMatch(/function releaseAnchor[\s\S]*?pickBestIntersecting\(\)/);
+  });
+
+  it("active 变化把当前 tab 滚入条内视野（P3-31，窄屏横向滚动条）", () => {
+    expect(settingsView).toContain('ref="tabsNav"');
+    expect(settingsView).toMatch(/watch\(activeSection[\s\S]*?scrollIntoView/);
+  });
+});

@@ -27,6 +27,9 @@ const config = useConfig();
 const { busy } = useStatus();
 const { toastOnly } = useToast();
 
+/** 分区导航条元素（P3-31：窄屏 active tab 滚入条内视野用） */
+const tabsNav = ref<HTMLElement | null>(null);
+
 const navigation = useSettingsNavigation();
 // 实际滚动容器是 App.vue 的 .content-wrapper（页面整体滚动），挂载后经 closest 解析
 // 赋值，不是模板 ref
@@ -75,6 +78,23 @@ function setActiveSection(id: string): void {
 }
 
 /**
+ * 程序性滚动的锚定分区（tab 点击 / hash 深链 / 命令面板定位时置位）：
+ * 非空 = 正在锚定滚动或刚落定未交给用户——期间 scrollspy 暂停写入高亮（P3-30），
+ * 任一用户滚动输入（wheel/touch/pointer/键盘，见 bindScrollContainer）解除
+ */
+let anchoredSection: string | null = null;
+
+/** 阅读带内取 top 最大者：向下滚动时新分区进入带内即接管高亮，向上滚回时旧分区保留 */
+function pickBestIntersecting(): string | null {
+  let best: string | null = null;
+  let bestTop = -Infinity;
+  for (const [id, top] of intersectingTops) {
+    if (top > bestTop) { bestTop = top; best = id; }
+  }
+  return best;
+}
+
+/**
  * scrollspy 判定线与锚定落点同源：tab 条高约 50px，分区 scroll-margin-top 76px +
  * content-wrapper scroll-padding 20px = 96px 落点。阅读带取 [96px, 40% 高度]，
  * 带内「最靠下」（最新进入阅读带）的分区即正在阅读的分区。
@@ -88,17 +108,18 @@ function handleIntersections(entries: IntersectionObserverEntry[]): void {
     if (entry.isIntersecting) intersectingTops.set(id, entry.boundingClientRect.top);
     else intersectingTops.delete(id);
   }
-  let best: string | null = null;
-  let bestTop = -Infinity;
-  // 阅读带内取 top 最大者：向下滚动时新分区进入带内即接管高亮，向上滚回时旧分区保留
-  for (const [id, top] of intersectingTops) {
-    if (top > bestTop) { bestTop = top; best = id; }
-  }
+  // 程序性滚动（tab 点击 / hash 定位 / 高度校准）期间暂停 spy 写入（P3-30）：
+  // 长距离平滑滚动会依次穿过中间分区的阅读带，高亮随之扫一遍再落到目标——
+  // 落点高亮已由 scrollToSection 先行置位，这里等用户重新接管滚动再按视口补正
+  if (anchoredSection) return;
+  const best = pickBestIntersecting();
   if (best) setActiveSection(best);
 }
 
 /** 滚动到底时最后分区可能够不到阅读带：命中底部即选中最后一个可见分区（与旧版一致） */
 function handleScrollBottom(): void {
+  // 同 P3-30：锚定滚动期间不写高亮（短页面中途触底会把高亮抢到最后一个分区）
+  if (anchoredSection) return;
   const container = scrollContainer.value;
   if (!container) return;
   if (container.scrollTop + container.clientHeight < container.scrollHeight - 2) return;
@@ -123,7 +144,6 @@ function setupScrollSpy(): void {
 // ===== 分区定位（点击 tab / 旧深链 hash / 命令面板请求共用） =====
 
 let resizeObserver: ResizeObserver | null = null;
-let anchoredSection: string | null = null;
 
 /** 搜索隐藏的分区不参与定位（display:none 时 offsetParent 为 null） */
 function visibleSection(id: string): HTMLElement | null {
@@ -159,8 +179,26 @@ watch(() => route.hash, (hash) => {
 
 watch(navigation.scrollRequest, (request) => { if (request) void scrollToSection(request.id); });
 
-/** 用户开始阅读或编辑后，让浏览器自然保持滚动，不再校准目录定位。 */
-function releaseAnchor(): void { anchoredSection = null; }
+// 窄屏 tab 条横向滚动（overflow-x: auto）：active 变化时把当前 tab 滚入条内视野
+// （P3-31，390px 下当前分区指示大概率停在条外）。block/inline 均 nearest——不做
+// 纵向滚动（条是 sticky 的恒在视口内），横向只滚最小必要距离
+watch(activeSection, () => {
+  void nextTick(() => {
+    tabsNav.value
+      ?.querySelector<HTMLElement>(".settings-tab.active")
+      ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  });
+});
+
+/** 用户开始阅读或编辑后，让浏览器自然保持滚动，不再校准目录定位。
+ *  解除锚定的同时按当前视口补正一次高亮：锚定期间 spy 写入被暂停（P3-30），
+ *  补正让 tab 立即归位，不必等下一次交叉变化事件。 */
+function releaseAnchor(): void {
+  if (!anchoredSection) return;
+  anchoredSection = null;
+  const best = pickBestIntersecting();
+  if (best) setActiveSection(best);
+}
 
 // 滚动容器在 App.vue（<main class="content-wrapper">），本组件无法用模板事件绑定，
 // 挂载后经 closest 解析再挂监听：wheel/touch/pointer/keyboard 任一用户输入即解除
@@ -236,13 +274,14 @@ function handleSave() {
 <template>
   <div class="page-content settings-page page-in">
     <!-- 分区内导航：sticky 顶部 tab 条（窄屏横向滚动），替代旧 settings-mobile-jump select -->
-    <nav class="settings-tabs" aria-label="设置分区导航">
+    <nav ref="tabsNav" class="settings-tabs" aria-label="设置分区导航">
       <button
         v-for="section in sections"
         :key="section.id"
         type="button"
         class="settings-tab"
         :class="{ active: activeSection === section.id }"
+        :disabled="searchResult.hiddenSectionIds.has(section.id)"
         :aria-current="activeSection === section.id ? 'location' : undefined"
         :title="section.title"
         @click="selectSection(section.id)"
