@@ -607,12 +607,20 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
         let task_id = match pick_http_task_id(&tasks_dir, &http_dir, profile_id, &profile) {
             Ok(id) => id,
             Err(reason) => {
+                // 中止而非跳过（与「写回失败」同语义，P3-16）：跳过会照常提交
+                // 版本号，该方案的内联直连键在下次保存时被 v10 schema 静默丢弃；
+                // 中断重跑把问题留在可诊断状态——用户腾出/改名同名任务后，
+                // 下次启动迁移即可补上搬运与绑定
                 tracing::error!(
                     profile_id = %profile_id,
                     reason = %reason,
-                    "v10 迁移跳过：无法为该方案分配直连任务 ID，方案里的直连配置保持原样（未删除）"
+                    "v10 迁移中止：无法为该方案分配直连任务 ID（版本号不提交，下次启动重试）"
                 );
-                continue;
+                return Err(ConfigError::MigrationFailed {
+                    from: 9,
+                    to: 10,
+                    reason: format!("方案 {profile_id} 的直连任务 ID 分配失败：{reason}"),
+                });
             }
         };
 
@@ -1584,6 +1592,59 @@ mod tests {
         assert_eq!(
             read_profile(&config_dir, "default")["active_http_task"],
             "default"
+        );
+    }
+
+    /// P3-16：方案 id 与 -2…-20 后缀全部被占用时迁移必须中止返回 Err（版本号
+    /// 不提交、方案内联直连键保持原文），与「写回失败」同语义——此前跳过后
+    /// 照常提交版本号，内联直连配置在下次保存时被 v10 schema 静默丢弃
+    #[test]
+    fn test_migrate_v9_to_v10_exhausted_task_ids_aborts_without_version_commit() {
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        // 占满方案 id 及 -2…-20 全部候选（browser 桶同名任务，模拟用户自建；
+        // http 桶留空使「上次迁移复用」分支不命中）
+        let browser_dir = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser_dir).unwrap();
+        std::fs::write(
+            browser_dir.join("default.json"),
+            r#"{"type":"browser","task_id":"default"}"#,
+        )
+        .unwrap();
+        for n in 2..=20 {
+            std::fs::write(
+                browser_dir.join(format!("default-{n}.json")),
+                format!(r#"{{"type":"browser","task_id":"default-{n}"}}"#),
+            )
+            .unwrap();
+        }
+        let original =
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        let err = run_migrations(&config_dir, &mut v).unwrap_err();
+
+        // 版本号不提交（停 9）、错误中文可诊断（含迁移区间 / 方案 id / 占用原因）
+        assert_eq!(v["config_version"], 9, "中止迁移不得提交新版本号");
+        let message = err.to_string();
+        assert!(message.contains("v9→v10"), "错误须标注迁移区间: {message}");
+        assert!(message.contains("default"), "错误须含方案 id: {message}");
+        assert!(message.contains("占用"), "错误须含占用原因: {message}");
+        // 方案保持原文：内联直连键未删，修复后下次启动可重试
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap(),
+            original
+        );
+
+        // 腾出末位候选后重跑成功：迁移自愈补上搬运与绑定
+        std::fs::remove_file(browser_dir.join("default-20.json")).unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        run_migrations(&config_dir, &mut v).unwrap();
+        assert_eq!(v["config_version"], 10);
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default-20",
+            "腾出的候选应被落位绑定"
         );
     }
 
