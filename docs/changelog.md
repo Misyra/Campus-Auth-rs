@@ -12,6 +12,11 @@
 - **.dockerignore 构建上下文瘦身（03a989d）**：补 fuzz / android / tests 三条目——本机 fuzz/target 2.9G、jniLibs 421M 均 gitignored 构建产物，此前全部打进 docker build 上下文；Dockerfile COPY 面核实不含三目录，不影响构建。
 - **compose 健康检查随端口（f8a6f38）**：docker-compose.yml healthcheck 改 `CMD-SHELL` + `$${CAMPUS_AUTH_PORT:-50721}`，与 Dockerfile HEALTHCHECK 同口径——此前硬编码 50721，用户改端口后容器永久 unhealthy。
 - **Docker TZ 文档与示例（913b97f）**：compose environment 示例加 `TZ=Asia/Shanghai`，docker/README 新增「时区（TZ）」节——镜像默认 UTC，cron 定时与免打扰时段按 `chrono::Local` 判定，不设 TZ 国内用户定时偏 8 小时；tzdata 在 bookworm 属 Priority: required，slim 镜像自带 zoneinfo、glibc 直读 TZ，无需额外安装。
+- **CI clippy 必红修复（54a0a31）**：profiles.rs 配置会话测试两处 `MutexGuard` 取值断言收进块作用域（clippy 1.98 `await_holding_lock` 只认作用域 drop、不认显式 `drop(guard)`，审查已独立复现钉死）——8ce4a68 引入的测试持锁跨 await 使 `cargo clippy --all-targets -D warnings` 在 HEAD 必红的问题收口，验证口径恢复与 CI 完全一致。
+- **录制值等值归一——P1 结构性后备防线（06f8eea）**：stop 结算处新增纯函数归一：fill/change 值与方案快照解密凭据恒等比对（原文 + `form_urlencoded::byte_serialize` 编码形态，复用 http_login `collect_secrets` 口径）命中即替换 `{{USERNAME}}`/`{{PASSWORD}}`——Worker 启发式（只认 `type=password`）对「显示密码」type 切换与自绘密码框录下明文的 P1 泄漏链（落方案 JSON / 转浏览器任务 JSON 经任务仓库公开外发 / 进诊断包）在结算层一次封堵；空凭据跳过、占位符原样、解密失败 fail-open 不丢录制；回显与落盘两级测试钉住（纯函数矩阵 + 路径级断言）。
+- **RecordedAction 契约增 frame 字段（a5663f6）**：`schema.rs` 增 `#[serde(default, skip_serializing_if)] frame: Option<String>`（非顶层 frame 内捕获动作的 iframe CSS 链，' >> ' 分隔）+ `record_action_matches_worker_contract` 扩第 4 个 shape 钉住缺键→None；profiles.rs 镜像同步——为 iframe 门户录制回放（审查 P2-3）铺契约；连带 `src/login/mod.rs:2160` 测试字面量一行 `frame: None`（新增字段的唯一全仓编译连带，已在子代理报告显式报备）。
+- **录制契约镜像 doc 修正 + 线格式漂移钉（b2bab90）**：`RecordedActionData.value` doc 改与 schema.rs 同口径（仅 click 无此键、navigate 恒携带落地页 URL——原 doc 称 navigate 无此键与实现矛盾）；照 system.rs 先例补 `recorded_action_data_matches_source_wire_shape` 双向 to_value 对照测试（click/navigate/fill 占位符/fill+frame 四形态，钉死顶层不带 value/frame 键）——词表下次演进时 openapi/前端契约漂移有测试拦截。
+- **openapi/typegen 契约落盘（e298a03）**：`UPDATE_OPENAPI=1` 重生成 openapi.json（diff 仅四处预期：frame 字段、value/recorded_actions 描述、stop 端点归一口径）+ `npm run typegen` 重生成 api.d.ts；无 env 快照 7/7 过零漂移、typegen:check 逐字节一致。B 批收口验证：clippy --all-targets 零警告、schema 18/18、profiles 60/60、**全量 lib 1488 全过**（+11 新测试）。
 
 ## 开发中（2026-11-21 录制生成独立任务）
 
