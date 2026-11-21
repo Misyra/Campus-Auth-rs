@@ -1297,6 +1297,20 @@ def test_recorder_js_select_change_flushes_pending_fill_first():
     assert payloads[1]["value"] == "cmcc"
 
 
+def test_recorder_js_select_change_with_empty_value_not_reported():
+    """空值选项（占位项 <option value="">）不上报：落盘会让整段录制在回放
+    校验阶段整体拒跑（与 fill 空值口径一致）。"""
+    payloads = _run_recorder_js(
+        "const isp = makeEl({ id: 'isp', tagName: 'SELECT' });"
+        "isp.value = '';"
+        "fire('change', { target: isp });"
+        "isp.value = 'cmcc';"
+        "fire('change', { target: isp });"
+    )
+    changes = [p for p in payloads if p["type"] == "change"]
+    assert [c["value"] for c in changes] == ["cmcc"], "空值 change 不上报"
+
+
 def test_recorder_js_click_listener_flush_precedes_closest():
     """静态钉住：click 监听中 flushFill 位于 closest 判定之前（inPanel 之后）。"""
     js = build_recorder_init_script()
