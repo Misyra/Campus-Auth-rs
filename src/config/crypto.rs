@@ -52,7 +52,8 @@ const NONCE_LEN: usize = 12;
 /// 也不迁移密钥——避免既有 ENC: 密文静默换钥后全部无法解密。
 pub fn default_key_path() -> PathBuf {
     if cfg!(target_os = "android")
-        && let Some(dir) = android_key_dir_from_env(std::env::var("CAMPUS_AUTH_BASE_DIR").ok().as_deref())
+        && let Some(dir) =
+            android_key_dir_from_env(std::env::var("CAMPUS_AUTH_BASE_DIR").ok().as_deref())
     {
         return dir.join(".enc_key.rs");
     }

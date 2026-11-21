@@ -328,9 +328,7 @@ pub extern "system" fn Java_rs_campusauth_app_AuthNative_nativeStop(
         shutdown_android(&mut instance).await;
         tracing::info!("Android JNI 实例已关闭");
     });
-    *PENDING_SHUTDOWN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    *PENDING_SHUTDOWN.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     1
 }
 
