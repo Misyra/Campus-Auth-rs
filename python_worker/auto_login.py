@@ -59,6 +59,10 @@ def validate_auto_login_actions(raw_actions: list) -> list[dict]:
       匹配目标 / 填入值；fill 的值可为 {{USERNAME}}/{{PASSWORD}} 占位符或
       字面量，录制器对两者恒写 value，缺失视为数据损坏，启动前拦截）；
       ``navigate`` 的 ``value``（落地地址）同理必填——无地址的导航无回放意义；
+    - ``frame``（可选，仅 click/change/fill）：iframe 内录制的动作携带
+      「主文档 → 目标 iframe」的 ' >> ' 分隔 CSS 链，回放侧映射进
+      ``StepConfig.frame`` 逐层定位；非字符串/空白静默丢弃该键（顶层 frame
+      录制不带、旧会话数据亦无此键），不阻断动作本体；
     - ``ts`` / ``strategy`` 不参与回放（序列本身即 ts 升序），不做强校验。
     """
     if len(raw_actions) > AUTO_LOGIN_MAX_ACTIONS:
@@ -102,6 +106,10 @@ def validate_auto_login_actions(raw_actions: list) -> list[dict]:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{where}（{action_type}）缺少非空 value")
             action["value"] = value
+        # frame 链（可选）：非字符串/空白静默丢弃（录制器顶层 frame 不带该键）
+        frame = raw.get("frame")
+        if isinstance(frame, str) and frame.strip():
+            action["frame"] = frame.strip()
         normalized.append(action)
     return normalized
 
@@ -144,7 +152,10 @@ def build_replay_steps(
     - ``fill`` → ``input`` 处理器（``clear`` 默认 True → 走 ``locator.fill``
       整值填充，与录制语义一致），value 先经 ``variables`` 解析占位符；
     - ``navigate`` → ``navigate`` 处理器（``goto`` 的 domcontentloaded 等待
-      与门户首导航同口径），value 同样解析占位符。
+      与门户首导航同口径），value 同样解析占位符；
+    - ``frame``（iframe 内录制的动作携带）：映射进 ``StepConfig.frame``，
+      回放侧逐层 ``frame_locator`` 下钻（' >> ' 分隔链由步骤处理器的
+      嵌套解析展开）；顶层动作无该键 → ``frame=None`` 主文档执行。
 
     **序列首条 navigate 与 ``portal_url`` 相同则跳过**：录制器对每个新文档
     （含门户首页）都上报 navigate，回放主流程已先打开门户页并完成回填沉降，
@@ -163,8 +174,12 @@ def build_replay_steps(
     for index, action in enumerate(actions):
         step_id = f"auto-login-{index + 1}"
         action_type = action["type"]
+        # iframe 内录制的动作携带 frame 链；顶层动作无该键 → None 主文档执行
+        frame = action.get("frame") or None
         if action_type == "click":
-            steps.append(StepConfig(id=step_id, step_type="click", selector=action["selector"]))
+            steps.append(StepConfig(
+                id=step_id, step_type="click", selector=action["selector"], frame=frame,
+            ))
             continue
         if action_type == "change":
             steps.append(
@@ -173,6 +188,7 @@ def build_replay_steps(
                     step_type="select",
                     selector=action["selector"],
                     value=action["value"],
+                    frame=frame,
                 )
             )
             continue
@@ -189,6 +205,7 @@ def build_replay_steps(
                     step_type="input",
                     selector=action["selector"],
                     value=value,
+                    frame=frame,
                 )
             )
             continue

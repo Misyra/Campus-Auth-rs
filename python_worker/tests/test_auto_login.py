@@ -245,6 +245,50 @@ def test_build_replay_steps_change_value_not_resolved():
     assert step.value == "{{ISP}}", "change 值不解析，既有契约字节面不变"
 
 
+# ── frame 链（iframe 内录制动作的定位契约，P2-3 Python 半边）──
+
+
+def test_validate_actions_preserves_frame_field():
+    """可选 frame 链原样保留（click/change/fill）；顶层动作不带该键。"""
+    actions = validate_auto_login_actions([
+        {"type": "click", "selector": "#login", "strategy": "id", "ts": 1,
+         "frame": "iframe#outer >> iframe#inner"},
+        {"type": "click", "selector": "#top", "strategy": "id", "ts": 2},
+    ])
+    assert actions[0]["frame"] == "iframe#outer >> iframe#inner"
+    assert "frame" not in actions[1]
+
+
+def test_validate_actions_frame_malformed_dropped_not_fatal():
+    """frame 非字符串/空白：静默丢弃该键，不阻断动作本体与整段校验。"""
+    actions = validate_auto_login_actions([
+        {"type": "click", "selector": "#x", "ts": 1, "frame": "  "},
+        {"type": "fill", "selector": "#y", "ts": 2, "value": "v", "frame": 3},
+        {"type": "change", "selector": "#z", "ts": 3, "value": "cmcc", "frame": None},
+    ])
+    assert all("frame" not in a for a in actions)
+    assert [a["selector"] for a in actions] == ["#x", "#y", "#z"]
+
+
+def test_build_replay_steps_maps_frame_into_step_config():
+    """frame 链映射进 StepConfig.frame；顶层动作恒 None（主文档执行）。"""
+    actions = validate_auto_login_actions([
+        {"type": "fill", "selector": "#u", "strategy": "id", "ts": 1, "value": "a",
+         "frame": "iframe#outer >> iframe#inner"},
+        {"type": "click", "selector": "#go", "strategy": "id", "ts": 2,
+         "frame": "#single-frame"},
+        {"type": "change", "selector": "[name=isp]", "strategy": "name", "ts": 3,
+         "value": "cmcc", "frame": "url=portal-frame"},
+        {"type": "click", "selector": "#top", "strategy": "id", "ts": 4},
+    ])
+    steps = build_replay_steps(actions)
+    assert [s.step_type for s in steps] == ["input", "click", "select", "click"]
+    assert steps[0].frame == "iframe#outer >> iframe#inner"
+    assert steps[1].frame == "#single-frame"
+    assert steps[2].frame == "url=portal-frame"
+    assert steps[3].frame is None, "顶层动作无 frame 键 → 主文档执行"
+
+
 # ── 浏览器替身（stub 级）──
 
 

@@ -20,6 +20,7 @@ from config_session import (
     RECORDER_BINDING_NAME,
     RECORDER_DELETE_ACTION_TYPE,
     RECORDER_DEDUP_MS,
+    RECORDER_FRAME_MAX_CHARS,
     RECORDER_MAX_ACTIONS,
     RECORDER_PLACEHOLDER_PASSWORD,
     RECORDER_PLACEHOLDER_USERNAME,
@@ -566,7 +567,8 @@ def test_recorder_js_embeds_python_constants():
     for token in (
         "__BINDING_NAME__", "__DELETE_TYPE__", "__MAX_ACTIONS__", "__DEDUP_MS__",
         "__TEXT_MAX__", "__ATTR_MAX__", "__STRUCTURE_DEPTH__", "__STRATEGIES__",
-        "__URL_MAX__", "__FILL_PASSWORD__", "__FILL_USERNAME__", "__USERNAME_HINTS__",
+        "__URL_MAX__", "__FRAME_MAX__", "__FILL_PASSWORD__", "__FILL_USERNAME__",
+        "__USERNAME_HINTS__",
     ):
         assert token not in js, f"模板占位符 {token} 未被替换"
 
@@ -735,6 +737,36 @@ def test_recorder_sink_fill_value_defensive_clip():
     sink.add_json({}, json.dumps(
         {"type": "fill", "selector": "#a", "strategy": "id", "value": "x" * 600, "ts": 1}))
     assert len(sink.recorded_actions()[0]["value"]) == RECORDER_TEXT_MAX_CHARS
+
+
+def test_recorder_sink_accepts_frame_field():
+    """frame 链白名单放行：click/change/fill 保留；顶层动作与 navigate 不带。"""
+    sink = RecorderSink()
+    sink.add_json({}, json.dumps(
+        {"type": "fill", "selector": "#u", "strategy": "id", "value": "a", "ts": 1,
+         "frame": "#outer >> #inner"}))
+    sink.add_json({}, json.dumps(
+        {"type": "click", "selector": "#b", "strategy": "id", "ts": 2}))
+    sink.add_json({}, json.dumps(
+        {"type": "navigate", "value": "http://p/ok", "ts": 3, "frame": "#f"}))
+    actions = sink.recorded_actions()
+    assert actions[0]["frame"] == "#outer >> #inner"
+    assert "frame" not in actions[1], "顶层 frame 不带该键"
+    assert "frame" not in actions[2], "navigate 恒主框架上报，frame 一并丢弃"
+
+
+def test_recorder_sink_frame_malformed_or_overlong_normalized():
+    """frame 畸形（非字符串/空白）静默丢弃该键；超长兜底截断防撑爆 IPC。"""
+    sink = RecorderSink()
+    for frame_value in (3, None, [], "  "):
+        sink.add_json({}, json.dumps(
+            {"type": "click", "selector": f"#b{frame_value!r}", "strategy": "id",
+             "ts": 1, "frame": frame_value}))
+        assert "frame" not in sink.recorded_actions()[-1]
+    sink.add_json({}, json.dumps(
+        {"type": "click", "selector": "#long", "strategy": "id", "ts": 2,
+         "frame": "f" * 600}))
+    assert len(sink.recorded_actions()[-1]["frame"]) == RECORDER_FRAME_MAX_CHARS
 
 
 def test_recorder_sink_fill_merge_at_cap_still_allowed():
@@ -1300,3 +1332,63 @@ def test_recorder_js_shadow_dom_click_captured_via_composed_path():
     clicks = [p for p in payloads if p["type"] == "click"]
     assert len(clicks) == 1
     assert clicks[0]["selector"] == "#shadow-btn"
+
+
+# iframe 拓扑（P2-3 frame 链行为测试）：window 处于两层 iframe 之下，
+# frameElement 逐层提供 iframe 元素（外层 #outer-frame、内层 #inner-frame）
+_RECORDER_JS_TOPOLOGY_FRAME = """
+const TOP = {};
+TOP.top = TOP;
+TOP.parent = TOP;
+const OUTER = makeEl({ id: 'outer-frame', tagName: 'IFRAME' });
+const INNER = makeEl({ id: 'inner-frame', tagName: 'IFRAME' });
+const MID = { top: TOP, parent: TOP, frameElement: OUTER };
+window.top = TOP;
+window.parent = MID;
+window.frameElement = INNER;
+"""
+
+
+def test_recorder_js_iframe_actions_carry_frame_chain():
+    """iframe 内捕获的动作附带 frame 链（主文档 → 目标 iframe，' >> ' 分隔）。"""
+    payloads = _run_recorder_js(
+        "const fu = makeEl({ id: 'frame-user', name: 'account' });"
+        "fu.value = 'u1';"
+        "fire('input', inputEvent(fu));"
+        "fire('blur', { target: fu });"
+        "const fbtn = makeEl({ id: 'frame-btn', tagName: 'BUTTON' });"
+        "fbtn.closest = () => fbtn;"
+        "fire('click', { target: fbtn });",
+        topology=_RECORDER_JS_TOPOLOGY_FRAME,
+    )
+    assert len(payloads) == 2
+    for p in payloads:
+        assert p["frame"] == "#outer-frame >> #inner-frame"
+    # 顶层动作不带该键（对照：同桩默认拓扑）
+    top_payloads = _run_recorder_js(
+        "const u = makeEl({ id: 'user', name: 'username' });"
+        "u.value = 'u2';"
+        "fire('input', inputEvent(u));"
+        "fire('blur', { target: u });"
+    )
+    assert all("frame" not in p for p in top_payloads)
+
+
+def test_recorder_js_iframe_frame_chain_uncomputable_omits_key():
+    """跨域等拿不到 frameElement：链不可计算即不带 frame 键（best-effort）。"""
+    payloads = _run_recorder_js(
+        "const u = makeEl({ id: 'user', name: 'username' });"
+        "u.value = 'u3';"
+        "fire('input', inputEvent(u));"
+        "fire('blur', { target: u });",
+        topology=(
+            "const TOP = {};\n"
+            "TOP.top = TOP;\n"
+            "window.top = TOP;\n"
+            "window.parent = TOP;\n"
+            "window.frameElement = null;\n"
+        ),
+    )
+    fills = _fill_payloads(payloads)
+    assert len(fills) == 1
+    assert "frame" not in fills[0]

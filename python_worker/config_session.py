@@ -55,6 +55,11 @@ RECORDER_TEXT_MAX_CHARS = 40
 #: 成功信封丢失）。
 RECORDER_URL_MAX_CHARS = 512
 
+#: frame 链截断长度：iframe 内捕获的动作附带「主文档 → 目标 iframe」的 CSS
+#: 选择器链（' >> ' 分隔，回放侧 FrameLocator 逐层解析）。无界进入 IPC 会
+#: 撑爆 1MiB NDJSON 行上限，与 selector 同纪律（JS 侧截断 + Python 侧兜底）。
+RECORDER_FRAME_MAX_CHARS = 512
+
 #: 录制占位符（回放侧经 ``variable_resolver`` 从凭据参数解析）：密码框值恒为
 #: {{PASSWORD}}——**绝不捕获真实输入值，密码永不落明文**；用户名启发式命中的
 #: 文本框值恒为 {{USERNAME}}；其余文本框录实际值字面量。
@@ -106,6 +111,9 @@ _RECORDER_SELECTOR_MAX_CHARS = 512
 # - 事件用捕获相位（第三参 true）注册，门户 JS stopPropagation 也不影响录制；
 # - shadow DOM：监听器取 ev.composedPath()[0] 作真实事件源（open shadow root
 #   表单输入/点击不被宿主 retarget 吞掉；无 composedPath 回落 ev.target）；
+# - iframe 内捕获的动作附带 frame 键 = 主文档到目标 iframe 的 CSS 选择器链
+#   （' >> ' 分隔，回放侧映射进 StepConfig.frame 逐层定位）；顶层 frame 不带
+#   该键；跨域拿不到 frameElement 时链不可计算同样不带（best-effort）；
 # - select 的 textContent 是全部选项拼接，作为选择器目标是垃圾，text 策略
 #   仅对点击路径（button 类元素）生效；
 # - 悬浮面板（仅主框架渲染）：右下角可折叠实时步骤列表 + 逐条删除——
@@ -126,6 +134,7 @@ _RECORDER_JS_TEMPLATE = r"""
   const ATTR_MAX = __ATTR_MAX__;
   const STRUCTURE_MAX_DEPTH = __STRUCTURE_DEPTH__;
   const URL_MAX = __URL_MAX__;
+  const FRAME_MAX = __FRAME_MAX__;
   const STRATEGIES = __STRATEGIES__;
   const PASSWORD_VALUE = "__FILL_PASSWORD__";
   const USERNAME_VALUE = "__FILL_USERNAME__";
@@ -207,6 +216,29 @@ _RECORDER_JS_TEMPLATE = r"""
     }
     return structural(el);
   };
+
+  // ── frame 链（iframe 内捕获专用）──
+  // 非顶层 frame 的动作必须携带「主文档 → 本 frame」的 iframe CSS 选择器链，
+  // 否则回放恒在主文档找不到目标元素（录制成功、回放必败）。逐层取
+  // frameElement 的稳定选择器（text 策略对 iframe 无意义，禁用），' >> '
+  // 分隔交由回放侧 FrameLocator 逐层解析。跨域 frame 拿不到 frameElement
+  // （null/抛错）：链不可计算即不带该键，退化为与既有行为一致（不阻塞录制）
+  const FRAME_CHAIN = (() => {
+    try {
+      if (window.top === window) return "";
+      const parts = [];
+      let win = window;
+      let hops = 0;  // 病态环状 parent 链防御：超过常见嵌套深度即放弃
+      while (win !== win.top && hops < 16) {
+        const fe = win.frameElement;
+        if (!fe) return "";
+        parts.unshift(selectorFor(fe, false).selector);
+        win = win.parent;
+        hops++;
+      }
+      return win === win.top ? parts.join(" >> ") : "";
+    } catch (e) { return ""; }
+  })();
 
   // ── 文本输入捕获（fill）──
   // 密码框值恒为占位符（绝不捕获真实输入值，密码永不落明文）——判定含
@@ -309,6 +341,9 @@ _RECORDER_JS_TEMPLATE = r"""
     if (typeof BINDING !== "function") return;  // 绑定未就绪的极端早期事件：丢弃
     const payload = { type: type, selector: sel.selector, strategy: sel.strategy, ts: now };
     if (type === "change" || type === "fill") payload.value = clip(value, TEXT_MAX);
+    // iframe 内捕获的动作附带 frame 链（顶层 frame 的 FRAME_CHAIN 为空串，
+    // 不带该键；navigate 仅主框架上报，天然无链）
+    if (FRAME_CHAIN) payload.frame = clip(FRAME_CHAIN, FRAME_MAX);
     // 入列即镜像（同一缓冲）：乐观渲染先行保证即时可见，汇聚器回包（权威
     // 全量列表）后整体收敛——Python 侧去重/合并可能不采纳本条
     const mirror = { type: type, selector: sel.selector, ts: now };
@@ -633,6 +668,7 @@ def build_recorder_init_script() -> str:
         "__ATTR_MAX__": str(RECORDER_ATTR_MAX_CHARS),
         "__STRUCTURE_DEPTH__": str(RECORDER_STRUCTURE_MAX_DEPTH),
         "__URL_MAX__": str(RECORDER_URL_MAX_CHARS),
+        "__FRAME_MAX__": str(RECORDER_FRAME_MAX_CHARS),
         "__STRATEGIES__": json.dumps(list(SELECTOR_STRATEGY_PRIORITY)),
         "__FILL_PASSWORD__": RECORDER_PLACEHOLDER_PASSWORD,
         "__FILL_USERNAME__": RECORDER_PLACEHOLDER_USERNAME,
@@ -728,6 +764,13 @@ class RecorderSink:
             if not isinstance(value, str) or not value:
                 return self.recorded_actions()
             action["value"] = value[:RECORDER_URL_MAX_CHARS]
+        # frame 链（iframe 内捕获的动作携带，顶层 frame 不带该键）：click/
+        # change/fill 有效，navigate 恒主框架上报、伪造载荷的 frame 一并丢弃；
+        # 非字符串/空白视为畸形丢弃该键（不阻断动作本体），超长兜底截断
+        if action_type in ("click", "change", "fill"):
+            frame = payload.get("frame")
+            if isinstance(frame, str) and frame.strip():
+                action["frame"] = frame[:RECORDER_FRAME_MAX_CHARS]
         self.add(action)
         return self.recorded_actions()
 
@@ -850,6 +893,7 @@ __all__ = [
     "RECORDER_BINDING_NAME",
     "RECORDER_DELETE_ACTION_TYPE",
     "RECORDER_DEDUP_MS",
+    "RECORDER_FRAME_MAX_CHARS",
     "RECORDER_MAX_ACTIONS",
     "RECORDER_PLACEHOLDER_PASSWORD",
     "RECORDER_PLACEHOLDER_USERNAME",
