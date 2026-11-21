@@ -3634,11 +3634,14 @@ mod tests {
             v["data"]["persistent_session_enabled"], false,
             "discard 不写回，回方案当前值"
         );
-        let guard = inner.lock().unwrap();
-        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
-        assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
-        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
-        drop(guard);
+        // 断言收进块作用域释放锁：clippy 的 await_holding_lock 只认作用域 drop，
+        // 不认显式 drop（本测试后续仍有 await 点）
+        {
+            let guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+            assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
+            assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        }
         assert!(bridge.owner().is_none(), "discard 结算后归属应清空");
 
         // apply=false：不写盘同样放行（守卫防的是空录制覆盖方案，本路径无覆盖面）
@@ -3661,11 +3664,12 @@ mod tests {
             v["data"]["persistent_session_enabled"], false,
             "apply=false 不写回，回方案当前值"
         );
-        let guard = inner.lock().unwrap();
-        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
-        assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
-        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
-        drop(guard);
+        {
+            let guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+            assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
+            assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        }
         assert!(bridge.owner().is_none(), "apply=false 结算后归属应清空");
     }
 
