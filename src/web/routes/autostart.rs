@@ -66,11 +66,17 @@ pub async fn get_autostart(
     };
     #[cfg(any(windows, target_os = "macos"))]
     let enabled = observed.enabled;
-    #[cfg(not(any(
-        windows,
-        target_os = "macos",
-        all(target_os = "linux", feature = "openwrt")
-    )))]
+    // Linux（非 openwrt）：XDG autostart 文件为系统事实（P3-38）——enabled
+    // 取「文件存在且 Exec 指向当前可执行」的观测结论，配置位降为
+    // cached_enabled；此前回显配置位，用户手删 .desktop 文件仍显示已启用
+    #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+    let observed =
+        tokio::task::spawn_blocking(crate::utils::platform::xdg_self_start_status)
+            .await
+            .map_err(|e| ApiError::Internal(format!("查询自启动状态后台任务异常: {e}")))?;
+    #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+    let enabled = observed.enabled;
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     let enabled = settings.global.app.autostart_enabled;
     #[cfg(all(target_os = "linux", feature = "openwrt"))]
     let enabled = tokio::task::spawn_blocking(crate::utils::platform::openwrt_self_start_enabled)
@@ -134,8 +140,31 @@ pub async fn get_autostart(
         status["method"] = "LaunchAgent".into();
         status["location"] = observed.plist_path.clone().unwrap_or_default().into();
     }
-    // 其它平台保留既有注册机制与兼容字段。
-    #[cfg(not(any(windows, target_os = "macos")))]
+    // Linux（非 openwrt）：XDG autostart 观测字段并入响应（P3-38，形状对齐
+    // Windows/macOS：registered / path_match / state + cached_enabled）
+    #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+    {
+        status
+            .as_object_mut()
+            .ok_or_else(|| ApiError::internal("自启动响应序列化失败"))?
+            .extend(
+                serde_json::to_value(&observed)
+                    .map_err(ApiError::internal)?
+                    .as_object()
+                    .ok_or_else(|| ApiError::internal("自启动状态序列化失败"))?
+                    .clone(),
+            );
+        status["source"] = "system".into();
+        status["cached_enabled"] = settings.global.app.autostart_enabled.into();
+        status["method"] = "desktop file".into();
+        status["location"] = observed.desktop_path.clone().into();
+    }
+    // 其余平台（openwrt/BSD 等）保留既有注册机制与兼容字段。
+    #[cfg(not(any(
+        windows,
+        target_os = "macos",
+        all(target_os = "linux", not(feature = "openwrt"))
+    )))]
     {
         status["source"] = if cfg!(feature = "openwrt") {
             "system"
@@ -347,11 +376,49 @@ mod tests {
         (app, inner)
     }
 
+    /// Linux（非 openwrt）测试前置：独占锁 + XDG_CONFIG_HOME 指向空临时目录，
+    /// 隔离 status 观测对真实用户 autostart 目录的读取（同文件各 linux 测试
+    /// 经锁串行，互设环境变量会竞态）；守卫 drop 时恢复原值
+    #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+    struct XdgEnvGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+    impl Drop for XdgEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+                None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+    async fn isolate_xdg_config_home() -> XdgEnvGuard {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let guard = LOCK.lock().await;
+        let dir = tempfile::tempdir().expect("创建临时 XDG 配置目录");
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        // edition 2024 起 set_var 为 unsafe（并发可见性无法静态证明）
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
+        XdgEnvGuard {
+            _lock: guard,
+            _dir: dir,
+            previous,
+        }
+    }
+
     /// 默认关闭：enabled=false，method 占位 "-"，platform 与编译目标一致
-    /// （macOS 走系统观测，enabled 取决于真机登记状态，不适用配置缓存口径）
+    /// （macOS 走系统观测，enabled 取决于真机登记状态，不适用配置缓存口径；
+    /// Linux 走 XDG 文件观测，须隔离用户配置目录防环境残留）
     #[cfg(not(any(windows, target_os = "macos")))]
     #[tokio::test]
     async fn status_reports_disabled_by_default() {
+        #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+        let _xdg = isolate_xdg_config_home().await;
         let (app, _) = mock_app();
         let resp = app
             .oneshot(
@@ -369,25 +436,57 @@ mod tests {
         assert_eq!(v["data"]["platform"], std::env::consts::OS);
     }
 
-    /// 开启后 method 不再是占位符（Windows=Registry，其余见实现）
-    #[cfg(not(any(windows, target_os = "macos")))]
+    /// P3-38（Linux 非 openwrt）：状态以 XDG autostart 文件为系统事实——写入
+    /// Exec 指向当前测试进程的 desktop 文件后 enabled=true、method/观测字段
+    /// 齐全；配置位仅作 cached_enabled 回显。此后改写 Exec 指向别处，
+    /// enabled 如实回落（path_mismatch），手删文件回落 not_registered
+    #[cfg(all(target_os = "linux", not(feature = "openwrt")))]
     #[tokio::test]
-    async fn status_reports_method_when_enabled() {
+    async fn status_observes_xdg_desktop_file_on_linux() {
+        let _xdg = isolate_xdg_config_home().await;
         let (app, inner) = mock_app();
+        let request = || {
+            Request::builder()
+                .uri("/api/autostart/status")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let write_desktop = |exec: &str| {
+            let config_home = std::env::var("XDG_CONFIG_HOME").expect("隔离守卫已设置");
+            let autostart_dir = std::path::Path::new(&config_home).join("autostart");
+            std::fs::create_dir_all(&autostart_dir).unwrap();
+            // 与 enable 注册路径同构的 desktop 文件（Exec 用规范转义构造）
+            let content = format!(
+                "[Desktop Entry]\nType=Application\nName=Campus-Auth\nExec={exec}\n\
+                 Terminal=false\nX-GNOME-Autostart-enabled=true\n"
+            );
+            std::fs::write(autostart_dir.join("campus-auth.desktop"), content).unwrap();
+        };
+        // 配置位开启：观测未登记时 enabled 仍为 false（配置位降为 cached_enabled）
         inner.lock().unwrap().settings.global.app.autostart_enabled = true;
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/autostart/status")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let v = body_json(resp).await;
+        let v = body_json(app.clone().oneshot(request()).await.unwrap()).await;
+        assert_eq!(v["data"]["enabled"], false, "无文件时不得显示已启用");
+        assert_eq!(v["data"]["cached_enabled"], true);
+        assert_eq!(v["data"]["source"], "system");
+        assert_eq!(v["data"]["state"], "not_registered");
+        assert_eq!(v["data"]["registered"], false);
+        // 写入指向当前测试进程的 desktop 文件：观测口径翻转为已启用
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        write_desktop(&crate::utils::platform::quote_desktop_exec_arg(&exe));
+        let v = body_json(app.clone().oneshot(request()).await.unwrap()).await;
         assert_eq!(v["data"]["enabled"], true);
-        assert_ne!(v["data"]["method"], "-");
+        assert_eq!(v["data"]["method"], "desktop file");
+        assert_eq!(v["data"]["registered"], true);
+        assert_eq!(v["data"]["path_match"], true);
+        assert_eq!(v["data"]["state"], "enabled");
+        assert_eq!(v["data"]["expected_path"], serde_json::json!(exe));
+        // Exec 指向别处（便携目录搬移未重注册）：path_mismatch 如实呈现
+        write_desktop("\"/moved/elsewhere/campus-auth\"");
+        let v = body_json(app.oneshot(request()).await.unwrap()).await;
+        assert_eq!(v["data"]["enabled"], false);
+        assert_eq!(v["data"]["registered"], true);
+        assert_eq!(v["data"]["path_match"], false);
+        assert_eq!(v["data"]["state"], "path_mismatch");
     }
 
     /// macOS：enabled 来自 launchd 系统观测，配置缓存翻转不影响系统口径，

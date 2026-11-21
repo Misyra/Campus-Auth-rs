@@ -22,7 +22,7 @@ mod imp;
 /// 切分，本形态与其完全兼容；旧实现只转义空格，路径含 `$`/`%`/反引号/引号时
 /// 登录自启失效
 #[cfg(any(test, all(target_os = "linux", not(feature = "openwrt"))))]
-fn quote_desktop_exec_arg(raw: &str) -> String {
+pub(crate) fn quote_desktop_exec_arg(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() + 2);
     out.push('"');
     for ch in raw.chars() {
@@ -173,6 +173,72 @@ mod imp {
     /// 注册/取消系统自启动（当前平台不支持）
     pub fn set_self_start(_enabled: bool) -> Result<()> {
         bail!("当前平台不支持自启动注册");
+    }
+}
+
+/// Linux（XDG autostart）系统观测结论（P3-38）：对齐 Windows/macOS 的
+/// 「系统事实优先」口径，字段命名与 `WindowsAutostartStatus` 逐一同义
+#[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+#[derive(Debug, serde::Serialize)]
+pub struct XdgAutostartStatus {
+    /// autostart desktop 文件是否存在
+    pub registered: bool,
+    /// Exec 程序是否指向当前可执行文件
+    pub path_match: bool,
+    /// 登记的可执行文件是否仍存在
+    pub target_exists: bool,
+    /// 当前可执行文件路径
+    pub expected_path: String,
+    /// desktop 文件路径
+    pub desktop_path: String,
+    /// 文件 Exec 值的首参数（程序路径；缺失/不可解析为 null）
+    pub desktop_exec: Option<String>,
+    /// 系统观测推导的有效开关（enabled 状态机结论）
+    pub enabled: bool,
+    /// 状态机：not_registered / path_mismatch / enabled（命名对齐 Windows）
+    pub state: &'static str,
+}
+
+/// 观测 XDG autostart 的系统事实（P3-38）：desktop 文件存在性 + Exec 指向校验
+///
+/// 对齐 Windows `path_mismatch` 语义——配置位不再直接充当「已启用」，
+/// 用户手删 .desktop 文件后状态如实回落 not_registered；Exec 指向别处
+/// （便携目录搬移后未重注册）如实呈现 path_mismatch。纯读取，不落盘不报错
+#[cfg(all(target_os = "linux", not(feature = "openwrt")))]
+pub fn xdg_self_start_status() -> XdgAutostartStatus {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let desktop_path = dirs::config_dir()
+        .map(|c| c.join("autostart").join(imp::AUTOSTART_DESKTOP_FILE))
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let content = std::fs::read_to_string(&desktop_path).ok();
+    let program = content
+        .as_deref()
+        .and_then(desktop_exec_value)
+        .and_then(parse_desktop_exec_program);
+    let registered = std::path::Path::new(&desktop_path).is_file();
+    let path_match = program.as_deref() == Some(exe.as_str());
+    let target_exists = program
+        .as_deref()
+        .is_some_and(|p| std::path::Path::new(p).is_file());
+    let state = if !registered {
+        "not_registered"
+    } else if path_match && target_exists {
+        "enabled"
+    } else {
+        "path_mismatch"
+    };
+    XdgAutostartStatus {
+        registered,
+        path_match,
+        target_exists,
+        expected_path: exe,
+        desktop_path,
+        desktop_exec: program,
+        enabled: state == "enabled",
+        state,
     }
 }
 
