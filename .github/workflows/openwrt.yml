@@ -20,6 +20,8 @@ jobs:
   build:
     name: OpenWrt ${{ matrix.target }}
     runs-on: ubuntu-22.04
+    # QEMU 执行 / 交叉构建挂死时按 job 级超时止损，不拖满 runner 默认 6 小时
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -97,6 +99,7 @@ jobs:
     needs: build
     if: inputs['publish-release'] == true
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: write
@@ -129,6 +132,8 @@ jobs:
     name: SDK ${{ matrix.version }} x86_64
     needs: build
     runs-on: ubuntu-22.04
+    # SDK 下载 / feeds / make 全链路最重，与 build 同档预算
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: write
