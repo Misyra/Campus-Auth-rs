@@ -7522,7 +7522,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description default 方案不可删除 */
+            /** @description default 方案不可删除，或方案有进行中的配置/录制会话（须先结束会话） */
             409: {
                 headers: {
                     [name: string]: unknown;
