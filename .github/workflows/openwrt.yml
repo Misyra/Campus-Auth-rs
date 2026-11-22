@@ -43,7 +43,12 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: ${{ matrix.target }}
-          components: clippy
+          # rustfmt 必须显式列入：rust-toolchain.toml 钉了 components=[rustfmt,
+          # clippy]，漏装时后续 cargo 调用会隐式同步并装 rustfmt，撞 hosted
+          # 镜像预装态的 bin/cargo-fmt 残留即 `detected conflict` 回滚失败
+          # （PR #33 round 5/10/12 三次不同 target 复现，非偶发）；在 action
+          # 安装阶段一次装齐，隐式同步无活可干
+          components: clippy,rustfmt
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
