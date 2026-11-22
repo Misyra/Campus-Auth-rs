@@ -237,14 +237,15 @@ pub async fn get_background(
     // ① symlink_metadata + is_symlink 拒绝符号链接——本端点免鉴权（`<img>` /
     //    CSS url() 无法携带鉴权头），目录内的链接文件不得作为逃逸读取目录
     //    外内容的通道（与 WS 内联 ws.rs 同一先例）；
-    // ② 读取字节上限——与 debug 侧同用 `ws::DEBUG_SCREENSHOT_MAX_BYTES`，
-    //    杜绝大文件借免鉴权出口被任意拉取；
+    // ② 读取字节上限——与上传/导入同用 `MAX_BACKGROUND_IMAGE_BYTES`：免鉴权
+    //    出口仍拒绝任意大文件拉取，但 GET 与写入必须同口径，否则 8–10MiB 的
+    //    背景图上传成功却永远渲染不出来（升级还会让已保存图失效）；
     // ③ magic 校验——只放行六格式位图（清单同下方 mime 匹配），目录被塞入
     //    任意文件后无法借本端点外发
     let meta = tokio::fs::symlink_metadata(&path).await?;
     if !meta.is_file()
         || meta.file_type().is_symlink()
-        || meta.len() > crate::web::ws::DEBUG_SCREENSHOT_MAX_BYTES
+        || meta.len() > MAX_BACKGROUND_IMAGE_BYTES as u64
     {
         return Err(ApiError::BadRequest("背景图文件超出大小限制或非法".into()));
     }

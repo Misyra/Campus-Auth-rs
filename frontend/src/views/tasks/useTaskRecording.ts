@@ -116,22 +116,28 @@ async function requestClose(): Promise<void> {
  * 且 start 照常落地成孤儿会话——abandonRecording 只记取消轮次，await 返回后由此处
  * 补发一次 stop(discard) 收尾；409 = 会话实际未落地，目的已达成，静默。收尾失败经
  * 全局 toast 透出（弹窗已关，就地 errorMsg 无人可见）。
+ *
+ * 收尾必须用**发起时捕获**的方案 ID：取消后退回选择阶段，用户可在 start 落地
+ * 前改选另一方案——此刻读 `profileId.value` 会 stop 到新方案（跨方案 409 被静默
+ * 吞掉），真会话成为无人收尾的孤儿、永久占用全局唯一会话。
  */
 async function startRecording(): Promise<void> {
   if (!profileId.value || phase.value !== "select") return;
+  // 发起时快照：start 与取消收尾都必须作用在同一个方案上
+  const startedProfile = profileId.value;
   phase.value = "starting";
   errorMsg.value = "";
   const runId = ++startRunId;
   try {
-    await configSessionApi.start(profileId.value);
+    await configSessionApi.start(startedProfile);
     if (runId !== startRunId) {
       // 本轮已被取代（取消后重开重发）：不推进状态机，只做本轮自己的取消收尾
-      if (cancelledStartRuns.delete(runId)) await discardCancelledSession();
+      if (cancelledStartRuns.delete(runId)) await discardCancelledSession(startedProfile);
       return;
     }
     if (cancelledStartRuns.delete(runId)) {
       // 弹窗在 start 在途时被关闭：会话此刻已登记，补发 stop 收尾后不再进录制态
-      await discardCancelledSession();
+      await discardCancelledSession(startedProfile);
       return;
     }
     phase.value = "recording";
@@ -147,10 +153,11 @@ async function startRecording(): Promise<void> {
   }
 }
 
-/** 取消轮次的收尾：stop(discard) 只关浏览器不落盘；409（会话未落地）静默，其余失败走全局 toast */
-async function discardCancelledSession(): Promise<void> {
+/** 取消轮次的收尾：stop(discard) 只关浏览器不落盘；409（会话未落地）静默，其余失败走全局 toast。
+ * 方案 ID 由调用方传入（发起时快照），不信当前选择状态 */
+async function discardCancelledSession(profile: string): Promise<void> {
   try {
-    await configSessionApi.stop(profileId.value, { discard: true });
+    await configSessionApi.stop(profile, { discard: true });
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) return;
     toastOnly(false, extractApiError(error, "取消录制失败，配置浏览器可能仍未关闭"));

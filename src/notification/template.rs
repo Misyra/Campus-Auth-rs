@@ -184,13 +184,35 @@ pub fn render_placeholders(template: &str, message: &MessageContent) -> String {
 const DEFAULT_WEBHOOK_TEMPLATE: &str = r#"{"title": "{{summary}}", "body": "{{detail}}", "event": "{{event_type}}", "profile": "{{profile}}", "time": "{{time}}"}"#;
 
 /// 渲染 webhook 请求体：用户模板非空用用户的，否则用内建默认模板
+///
+/// 占位符值先经 `json_escape` 转义再替换：sender 侧未显式指定 content-type
+/// 时按 `application/json` 投递，而事件详情常含带引号/反斜杠/换行的文本（如
+/// 浏览器任务失败原因引用选择器 `[name="login"]`），原样替换会把载荷拼成非法
+/// JSON。自定义模板同口径转义——通道载荷契约是 JSON；个别纯文本模板（自配
+/// content-type）里的值会带转义序列，属可接受展示损失。
 pub fn render_webhook_body(template: &str, message: &MessageContent) -> String {
+    let escaped = MessageContent {
+        event_type: json_escape(&message.event_type),
+        summary: json_escape(&message.summary),
+        detail: json_escape(&message.detail),
+        profile: json_escape(&message.profile),
+        time: json_escape(&message.time),
+    };
     let tpl = if template.trim().is_empty() {
         DEFAULT_WEBHOOK_TEMPLATE
     } else {
         template
     };
-    render_placeholders(tpl, message)
+    render_placeholders(tpl, &escaped)
+}
+
+/// JSON 字符串值转义（不含外层引号）：借 serde 序列化的转义规则产出，杜绝
+/// 手写转义表漏字符；序列化失败（&str 实际不可达）回退原文
+fn json_escape(value: &str) -> String {
+    serde_json::to_string(value)
+        .ok()
+        .and_then(|quoted| quoted.get(1..quoted.len() - 1).map(str::to_string))
+        .unwrap_or_else(|| value.to_string())
 }
 
 /// Bark 内建 payload：`{"title","body","group"}`
@@ -320,6 +342,31 @@ mod tests {
         assert_eq!(value["title"], "任务执行失败");
         assert_eq!(value["event"], "task_failed");
         assert_eq!(value["profile"], "-");
+    }
+
+    /// 详情含引号/反斜杠/换行时渲染仍是合法 JSON 且值可原样还原——原样替换
+    /// 会让失败原因引用的选择器 `[name="login"]` 直接破坏载荷（Codex P2 钉住）
+    #[test]
+    fn test_webhook_body_escapes_json_specials() {
+        let message = MessageContent {
+            event_type: "task_failed".into(),
+            summary: "任务执行失败".into(),
+            detail: "步骤「点击」失败: 元素 [name=\"login\"] 未找到\n路径 C:\\temp".into(),
+            profile: "-".into(),
+            time: "2026-11-22 12:00:00".into(),
+        };
+        let body = render_webhook_body("", &message);
+        let value: serde_json::Value =
+            serde_json::from_str(&body).expect("含特殊字符的详情不得破坏 JSON");
+        assert_eq!(
+            value["body"].as_str().unwrap(),
+            "步骤「点击」失败: 元素 [name=\"login\"] 未找到\n路径 C:\\temp"
+        );
+        // 自定义模板同口径
+        let custom = render_webhook_body(r#"{"text": "{{detail}}"}"#, &message);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&custom).expect("自定义模板同受转义保护");
+        assert_eq!(parsed["text"].as_str().unwrap(), message.detail);
     }
 
     /// 自定义模板：占位符位于字符串值内，渲染后仍是合法 JSON

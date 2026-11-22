@@ -1,7 +1,8 @@
 // @vitest-environment node
 /**
  * recordedTaskConverter 纯函数测试：四类动作映射、占位符原样透传、navigate 保留
- * （含无 URL 的纯标记形态）、词表外动作丢弃计数、空序列拒绝、产物字段极小集。
+ * （含无 URL 的纯标记形态）、iframe frame 链透传、词表外动作丢弃计数、空序列
+ * 拒绝、产物字段极小集。
  */
 import { describe, it, expect } from "vitest";
 import { convertRecordedActions, type RecordedTaskStep } from "./recordedTaskConverter";
@@ -72,6 +73,20 @@ describe("convertRecordedActions", () => {
       "description,id,selector,type,value", // change
       "description,id,selector,type", // click（无 value）
     ]);
+  });
+
+  it("iframe 动作 frame 链透传：非顶层录制的 click/input/select 步骤携带 frame，顶层动作不产出该键", () => {
+    const result = convertRecordedActions([
+      { type: "fill", ts: 1, selector: "#user", strategy: "id", value: "u", frame: "iframe#outer >> iframe#inner" },
+      { type: "click", ts: 2, selector: "#go", strategy: "id", frame: "iframe#outer" },
+      { type: "fill", ts: 3, selector: "#user", strategy: "id", value: "top" },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // frame 逐字透传（回放侧按 ' >> ' 链逐层下钻）；顶层动作保持最小字段集
+    expect(result.steps[0]).toMatchObject({ type: "input", frame: "iframe#outer >> iframe#inner" });
+    expect(result.steps[1]).toMatchObject({ type: "click", frame: "iframe#outer" });
+    expect(result.steps[2]).not.toHaveProperty("frame");
   });
 
   it("空序列拒绝：ok=false（后端 validate_task 拒绝空 steps，不产出必失败的任务）", () => {

@@ -112,18 +112,73 @@ pub struct LastCheckState {
 }
 
 /// 将检查结果写入状态文件（best-effort：失败仅 warn，不影响检查流程本身）
+///
+/// 写入前与盘上现状合并（[`merge_preserving_seen`]）：调用方构造的 `state`
+/// 可能携带网络请求前读取的陈旧快照，并发的手动/后台检查完成方可能已把更高
+/// 的同通道版本记入盘上——整体覆盖会抹掉它（丢失更新），回滚保护记忆只增
+/// 不减。读-合并-写三步经进程内互斥串行：同进程的检查完成方都汇入本函数，
+/// 互斥保证并发写者的合并基线不落后于彼此。
 async fn record_last_check(base_path: &std::path::Path, state: &LastCheckState) {
     let path = base_path.join(LAST_CHECK_FILE_NAME);
+    let base_path = base_path.to_path_buf();
     let state = state.clone();
     let result = tokio::task::spawn_blocking(move || {
+        static CHECK_STATE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CHECK_STATE_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(crate::utils::recover_lock);
+        let merged = merge_preserving_seen(state, read_last_check_state_file(&base_path));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::utils::io::atomic_write_json(&path, &state)
+        crate::utils::io::atomic_write_json(&path, &merged)
     })
     .await;
     if !matches!(result, Ok(Ok(()))) {
         tracing::warn!("写入上次检查状态失败: {result:?}");
+    }
+}
+
+/// 检查状态合并：同通道时盘上更高的 `highest_seen_*` 胜出（单调记忆只增
+/// 不减，防陈旧快照回写降级）；通道不同以传入方为准——通道切换本就按新
+/// 通道当前清单重建记录（[`next_highest_seen`] 同口径）；传入方通道为空
+/// （如检查起点无任何可信快照时构造的失败态）不覆盖盘上记忆；盘上记录
+/// 缺失或版本不可解析按无记录处理，传入方原样落盘
+fn merge_preserving_seen(
+    intended: LastCheckState,
+    current: Option<LastCheckState>,
+) -> LastCheckState {
+    let Some(current) = current else {
+        return intended;
+    };
+    // 盘上无可保护记录
+    if current.highest_seen_channel.is_empty() {
+        return intended;
+    }
+    // 传入方无通道记录：保留盘上记忆，只刷传入方携带的时间/错误字段
+    if intended.highest_seen_channel.is_empty() {
+        return LastCheckState {
+            highest_seen_version: current.highest_seen_version,
+            highest_seen_channel: current.highest_seen_channel,
+            ..intended
+        };
+    }
+    if current.highest_seen_channel != intended.highest_seen_channel {
+        return intended;
+    }
+    let Ok(seen) = Version::parse(&current.highest_seen_version) else {
+        return intended;
+    };
+    // 传入方版本不可解析视为无记录：保留盘上同通道有效记忆优于落盘降级值
+    let intended_lower = Version::parse(&intended.highest_seen_version).map_or(true, |v| seen > v);
+    if intended_lower {
+        LastCheckState {
+            highest_seen_version: current.highest_seen_version,
+            highest_seen_channel: current.highest_seen_channel,
+            ..intended
+        }
+    } else {
+        intended
     }
 }
 
@@ -2867,5 +2922,59 @@ mod tests {
             .expect("等版本清单应放行");
         let state = service.last_check_state().unwrap();
         assert_eq!(state.highest_seen_version, "999.0.0");
+    }
+
+    /// 落盘合并：陈旧快照回写不得抹掉并发检查已记下的更高同通道版本——
+    /// 手动/后台两路检查并发完成时互为对方的丢失更新源，合并是共同兜底
+    #[tokio::test]
+    async fn record_last_check_merges_higher_seen_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // 盘上已有并发检查记录的更高版本（模拟另一路检查先完成落盘）
+        let high = LastCheckState {
+            highest_seen_version: "999.0.0".into(),
+            highest_seen_channel: "stable".into(),
+            ..last_check_now()
+        };
+        record_last_check(dir.path(), &high).await;
+
+        // 陈旧快照（检查起点无任何记忆）失败回写：不覆盖盘上记忆，只刷错误字段
+        let stale = failed_check_state(None, "网络超时");
+        record_last_check(dir.path(), &stale).await;
+        let state = read_last_check_state_file(dir.path()).expect("状态文件应存在");
+        assert_eq!(state.highest_seen_version, "999.0.0");
+        assert_eq!(state.highest_seen_channel, "stable");
+        assert_eq!(state.error, "网络超时");
+
+        // 陈旧快照携带较低同通道记录回写：同样不降级盘上更高记忆
+        let lower = LastCheckState {
+            highest_seen_version: "500.0.0".into(),
+            highest_seen_channel: "stable".into(),
+            ..last_check_now()
+        };
+        record_last_check(dir.path(), &lower).await;
+        let state = read_last_check_state_file(dir.path()).unwrap();
+        assert_eq!(state.highest_seen_version, "999.0.0");
+
+        // 同通道且传入更高 → 正常上推不受合并影响
+        let higher = LastCheckState {
+            highest_seen_version: "1000.0.0".into(),
+            highest_seen_channel: "stable".into(),
+            ..last_check_now()
+        };
+        record_last_check(dir.path(), &higher).await;
+        let state = read_last_check_state_file(dir.path()).unwrap();
+        assert_eq!(state.highest_seen_version, "1000.0.0");
+
+        // 通道切换 → 传入方按新通道重建记录（不同通道不比较版本）
+        let switched = LastCheckState {
+            highest_seen_version: "5.0.0".into(),
+            highest_seen_channel: "prerelease".into(),
+            ..last_check_now()
+        };
+        record_last_check(dir.path(), &switched).await;
+        let state = read_last_check_state_file(dir.path()).unwrap();
+        assert_eq!(state.highest_seen_version, "5.0.0");
+        assert_eq!(state.highest_seen_channel, "prerelease");
     }
 }

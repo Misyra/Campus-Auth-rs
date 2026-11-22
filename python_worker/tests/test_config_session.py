@@ -469,6 +469,54 @@ def test_recorder_sink_dedup_only_consecutive_same_element():
     assert sink.add({**click_a, "ts": 200}) is True, "间隔内插入他元素后不误伤"
 
 
+def test_recorder_sink_same_selector_different_frames_both_kept():
+    """frame 参与去重键：兄弟 iframe 里同 ID 元素是不同目标，不得互相去重。
+
+    修复钉住：键只含 (type, selector) 时，两个 frame 各填一次 #user 会被窗口
+    去重吞掉一条——回放漏输入。
+    """
+    sink = RecorderSink()
+    fill_outer = {
+        "type": "fill", "selector": "#user", "strategy": "id", "ts": 100,
+        "value": "outer-user", "frame": "iframe#outer",
+    }
+    fill_inner = {
+        "type": "fill", "selector": "#user", "strategy": "id", "ts": 130,
+        "value": "inner-user", "frame": "iframe#outer >> iframe#inner",
+    }
+    assert sink.add(fill_outer) is True
+    assert sink.add(fill_inner) is True, "不同 frame 同选择器是不同目标，窗口内也不丢"
+    # fill 同 frame 相邻走合并（取最终值）而非窗口丢弃——合并先于去重窗口
+    assert sink.add({**fill_inner, "ts": 180, "value": "inner-user-2"}) is True
+    actions = sink.recorded_actions()
+    assert [a["value"] for a in actions] == ["outer-user", "inner-user-2"]
+
+
+def test_recorder_sink_fill_merge_only_within_same_frame():
+    """fill 合并取最终值只在同 frame 内生效：跨 frame 不得顶掉对方的值。"""
+    sink = RecorderSink()
+    assert sink.add({
+        "type": "fill", "selector": "#user", "strategy": "id", "ts": 100,
+        "value": "outer-final", "frame": "iframe#outer",
+    }) is True
+    assert sink.add({
+        "type": "fill", "selector": "#user", "strategy": "id", "ts": 900,
+        "value": "inner-final", "frame": "iframe#inner",
+    }) is True, "跨 frame 合并会把前一 frame 的输入顶掉（回放漏输入）"
+    # 合并与「最近一条已记录动作」比较：同 frame（inner 是末条）后值顶前值
+    assert sink.add({
+        "type": "fill", "selector": "#user", "strategy": "id", "ts": 950,
+        "value": "inner-final-2", "frame": "iframe#inner",
+    }) is True
+    actions = sink.recorded_actions()
+    assert len(actions) == 2, "合并替换不增计数"
+    by_frame = {a["frame"]: a["value"] for a in actions}
+    assert by_frame == {
+        "iframe#outer": "outer-final",
+        "iframe#inner": "inner-final-2",
+    }
+
+
 def test_recorder_sink_cap_and_truncated():
     """上限 50 条：触顶丢弃后续并标记 truncated。"""
     sink = RecorderSink()

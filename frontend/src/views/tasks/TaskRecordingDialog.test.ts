@@ -390,6 +390,46 @@ describe("TaskRecordingDialog", () => {
     expect(rec.open.value).toBe(false);
   });
 
+  it("start 在途取消后改选方案：补发 stop 用发起时的方案 ID，不打到新选择上", async () => {
+    // 捕获修复钉住：取消退回选择阶段后用户改选另一方案，start 落地的补发收尾
+    // 必须 stop 原方案——读当前选择会 stop 到新方案（跨方案 409 被静默吞掉），
+    // 原会话成为无人收尾的孤儿、永久占用全局唯一会话
+    const start = deferred<undefined>();
+    const stopUrls: string[] = [];
+    stubFetch((url) => {
+      if (url.includes("/config-session/start")) {
+        return start.promise.then(() => jsonResponse({ data: { started: true } }));
+      }
+      if (url.includes("/config-session/stop")) {
+        stopUrls.push(url);
+        return Promise.resolve(
+          jsonResponse({ data: { recorded_count: 0, truncated: false, persistent_session_enabled: false } }),
+        );
+      }
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    mountDialog();
+    await flush();
+    const rec = useTaskRecording();
+    rec.profileId.value = "dorm";
+    await flush();
+    click("record-start");
+    await settle();
+    expect(rec.phase.value).toBe("starting");
+
+    // 取消（关弹窗）退回选择阶段，改选另一个方案后 start 才落地
+    const closePromise = rec.requestClose();
+    await flush();
+    useConfirm().resolveConfirm(true);
+    await closePromise;
+    rec.profileId.value = "lab";
+
+    start.resolve(undefined);
+    await settle();
+    expect(stopUrls).toHaveLength(1);
+    expect(stopUrls[0]).toContain("/profiles/dorm/config-session/stop");
+  });
+
   it("start 在途取消后补发 stop 撞 409（会话未落地）：静默收场，不弹失败提示", async () => {
     const stopUrls: string[] = [];
     const start = deferred<undefined>();

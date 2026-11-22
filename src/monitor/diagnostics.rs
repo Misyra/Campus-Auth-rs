@@ -967,7 +967,8 @@ pub const BUNDLE_REDACTED: &str = "[已脱敏]";
 /// - active_profile.network.proxy_url（HTTP/SOCKS5 代理可含 Basic 认证，URL 口径）
 /// - active_profile.recorded_actions[].value（持久会话录制动作的值：fill/change
 ///   是录制时的真实输入——含录制器启发式漏判时落入的明文密码，一律置空；
-///   navigate 的落地页 URL 保留排障、click 无值键不动）
+///   navigate 的落地页 URL 剥 query/fragment/userinfo、host/path 保留排障，
+///   click 无值键不动）
 /// - llm.api_key_enc / llm.api_keys_enc.*（AI 任务生成的 API key 密文，按服务商槽位）
 ///
 /// 有意保留：profile.username（诊断必需的账号线索，非密钥）、telegram.chat_id
@@ -1181,19 +1182,24 @@ fn sanitize_url_field(obj: &mut serde_json::Map<String, serde_json::Value>, key:
 
 /// 录制动作数组的值脱敏：`fill`/`change` 的值是录制时的真实输入（含录制器
 /// 启发式漏判时落入的明文密码，见 P1-1 组合链），一律替换 [`BUNDLE_REDACTED`]；
-/// `navigate` 的落地页 URL 保留排障、`click` 无值键不动（结构保留口径同上）
+/// `navigate` 落地页 URL 走 [`sanitize_url_field`] 口径剥 query/fragment/userinfo
+/// （录制器抓的是整条 `location.href`，门户重定向常把一次性令牌放进 query 或
+/// fragment——诊断包是外发排障件，host/path 的排障价值保留、令牌段不进包）；
+/// `click` 无值键不动（结构保留口径同上）
 fn redact_recorded_action_values(actions: &mut [serde_json::Value]) {
     for action in actions {
         let Some(obj) = action.as_object_mut() else {
             continue;
         };
-        if !matches!(
-            obj.get("type").and_then(|v| v.as_str()),
-            Some("fill") | Some("change")
-        ) {
-            continue;
+        match obj.get("type").and_then(|v| v.as_str()) {
+            Some("fill") | Some("change") => {
+                redact_string_field(obj, "value");
+            }
+            Some("navigate") => {
+                sanitize_url_field(obj, "value");
+            }
+            _ => {}
         }
-        redact_string_field(obj, "value");
     }
 }
 
@@ -2100,8 +2106,10 @@ mod tests {
     const RECORDED_FILL_SECRET: &str = "rec-plain-pw-777";
     /// 录制 change 值（选择项同样可能内嵌真实输入）
     const RECORDED_CHANGE_SECRET: &str = "rec-isp-choice-888";
-    /// 录制 navigate 落地页 URL（非凭据，应保留）
-    const RECORDED_NAVIGATE_URL: &str = "http://portal.example.edu/login";
+    /// 录制 navigate 落地页 URL（门户重定向常把一次性令牌放进 query/fragment，
+    /// 脱敏应剥掉这两段、host/path 保留排障）
+    const RECORDED_NAVIGATE_URL: &str =
+        "http://portal.example.edu/login?token=one-time-999&next=%2Fhome#sso";
 
     fn full_sensitive_settings() -> SettingsData {
         let mut settings = SettingsData::default();
@@ -2331,10 +2339,11 @@ mod tests {
     }
 
     /// P3-18：录制动作值脱敏——fill/change 值（录制时的真实输入，含启发式
-    /// 漏判落入的明文密码）一律占位；navigate 落地页 URL 保留、click 无值键
-    /// 不动；selector/strategy 等结构字段原样保留排障
+    /// 漏判落入的明文密码）一律占位；navigate 落地页 URL 剥 query/fragment
+    /// （录制器抓整条 location.href，门户重定向令牌不进外发排障件，host/path
+    /// 保留）；click 无值键不动；selector/strategy 等结构字段原样保留排障
     #[test]
-    fn 脱敏_录制动作fill_change值置占位navigate保留() {
+    fn 脱敏_录制动作fill_change置占位navigate剥参() {
         let value = sanitize_config_snapshot(
             &SettingsData::default(),
             &full_sensitive_profile(),
@@ -2349,8 +2358,8 @@ mod tests {
         assert_eq!(actions[0]["strategy"], "id");
         // change：值占位
         assert_eq!(actions[1]["value"], BUNDLE_REDACTED);
-        // navigate：落地页 URL 非凭据，原样保留排障
-        assert_eq!(actions[2]["value"], RECORDED_NAVIGATE_URL);
+        // navigate：一次性令牌 query/fragment 剥除，host/path 保留排障
+        assert_eq!(actions[2]["value"], "http://portal.example.edu/login");
         // click：无值键保持缺失（结构口径不变）
         assert_eq!(actions[3].get("value"), None);
     }

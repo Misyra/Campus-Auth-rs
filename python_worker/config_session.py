@@ -702,11 +702,13 @@ def build_recorder_init_script() -> str:
 class RecorderSink:
     """录制动作汇聚器：JS 经 expose_binding 实时推送，Python 侧统一权威收口。
 
-    - 去重：click / change 同一 (type, selector) 在窗口期内重复事件只记一次
-      （相邻语义，锚点为最近一条**已记录**动作；跨文档仍有效）；fill /
-      navigate 与最近一条已记录动作同 (type, selector) 时**就地合并取最终值**
-      （fill 取输入会话最终值——值不同不可按窗口丢弃；navigate 取重定向链
-      最终落地页），不受窗口约束；
+    - 去重：click / change 同一 (type, selector, frame) 在窗口期内重复事件只记
+      一次（相邻语义，锚点为最近一条**已记录**动作；跨文档仍有效）；fill /
+      navigate 与最近一条已记录动作同 (type, selector, frame) 时**就地合并取
+      最终值**（fill 取输入会话最终值——值不同不可按窗口丢弃；navigate 取重定向
+      链最终落地页），不受窗口约束。frame 参与键：兄弟 iframe 里同 ID 的元素是
+      不同目标，跨 frame 不得互相去重/合并（否则前一个 frame 的输入被后一个
+      顶掉，回放漏输入）；
     - 上限：动作数达上限后丢弃后续并置 ``truncated``；JS 侧文档内触顶时回传
       ``{"type": "truncated"}`` 标记补报（文档计数随导航归零，Python 侧权威
       计数可能未满），同样置 ``truncated``（合并替换不增计数，触顶下仍放行）；
@@ -734,7 +736,7 @@ class RecorderSink:
         self._dedup_ms = dedup_ms
         self._actions: list[dict] = []
         self._truncated = False
-        self._last_key: tuple[str, str] | None = None
+        self._last_key: tuple[str, str, str | None] | None = None
         self._last_ts = 0
 
     def add_json(self, _source: Any, payload_json: str) -> list[dict]:
@@ -821,7 +823,7 @@ class RecorderSink:
             del self._actions[i]
             if self._actions:
                 last = self._actions[-1]
-                self._last_key = (last["type"], last["selector"])
+                self._last_key = (last["type"], last["selector"], last.get("frame"))
                 self._last_ts = int(last.get("ts") or 0)
             else:
                 self._last_key = None
@@ -832,17 +834,18 @@ class RecorderSink:
     def add(self, action: dict) -> bool:
         """记录一条规范化动作；返回是否被记录（去重/触顶丢弃返回 False）。
 
-        fill / navigate 与最近一条**已记录**动作同 (type, selector) 时就地
-        替换（合并取最终值/最终落地页），替换不增计数、触顶下仍放行。
+        fill / navigate 与最近一条**已记录**动作同 (type, selector, frame) 时
+        就地替换（合并取最终值/最终落地页），替换不增计数、触顶下仍放行。
         """
-        key = (action["type"], action["selector"])
+        key = (action["type"], action["selector"], action.get("frame"))
         ts = int(action.get("ts") or 0)
         # 合并语义只对携带载荷的 fill/navigate 生效：窗口丢弃会让「同一目标的
         # 后一个值」顶不掉「前一个值」（回放必须取最终值）；重定向链多条
-        # navigate 合并为最终落地页
+        # navigate 合并为最终落地页。键含 frame——兄弟 iframe 同选择器是不同
+        # 目标，跨 frame 合并会把前一个 frame 的输入顶掉
         if action["type"] in ("fill", "navigate") and self._actions:
             last = self._actions[-1]
-            if (last["type"], last["selector"]) == key:
+            if (last["type"], last["selector"], last.get("frame")) == key:
                 self._actions[-1] = action
                 self._last_key = key
                 self._last_ts = ts

@@ -518,7 +518,7 @@ fn classify_response(
 /// 尝试开始前的输入构造统一在 [`AttemptContext::prepare`] 完成：出口路由准备 →
 /// 出口绑定地址填充本机 IP/MAC → 共用 HTTP 客户端 → 内置占位符表与脱敏字典。
 /// 调用方解构取用各字段（`bound` 由 [`run_once`] 持有以遮蔽原请求，其余传给
-/// [`run_flow_once`]）。
+/// [`run_flow_once`]；`egress` 由调用方以 `_` 前缀绑定持活至尝试结束）。
 ///
 /// 共用 HTTP 客户端的口径（原 run_once 内联注释随实现上收至此）：退出登录请求 /
 /// 登录页抓取 / 各请求步骤都用它——连接池挂在 `Client` 上，CSRF 令牌绑定 TCP 连接
@@ -539,6 +539,10 @@ struct AttemptContext {
     secrets: Vec<String>,
     /// 尝试计时起点（构造前取，中止与成功报告的耗时口径一致）
     start: Instant,
+    /// 出口租约：`client` 的代理 URL 指向其 LocalProxy 监听，租约 Drop 即取消
+    /// 转发任务并关闭监听（见 `network::egress`），必须存活到尝试内最后一次
+    /// 请求发出——解构侧以 `_` 前缀绑定持活，防提取上下文时被提前释放
+    egress: std::sync::Arc<crate::network::egress::PreparedEgress>,
 }
 
 impl AttemptContext {
@@ -591,6 +595,7 @@ impl AttemptContext {
             vars,
             secrets,
             start,
+            egress,
         })
     }
 }
@@ -608,6 +613,10 @@ pub(crate) async fn run_once(req: &HttpLoginRequest) -> HttpAttemptReport {
         vars,
         secrets,
         start,
+        // 出口租约持活到尝试结束：client 的代理 URL 指向 LocalProxy 的监听，
+        // 租约 Drop 即取消转发任务并关监听（network::egress）——提取共享上下
+        // 文时若不随行持有，接口绑定的下线/登录/流程请求全打向死端口
+        egress: _egress,
     } = match AttemptContext::prepare(req).await {
         Ok(context) => context,
         Err(report) => return report,

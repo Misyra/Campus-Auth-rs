@@ -217,6 +217,13 @@ impl SinkWriter {
             tracing::warn!("事件流写入失败，本条事件丢弃并待下次事件重开文件: {e}");
             // 置空以便下一条事件重开（半写入状态不可信）
             self.current = None;
+            return;
+        }
+        // 逐条 flush：只在跨日/停止时刷会让低频会话的近期事件长期滞留 BufWriter
+        // ——读侧（GET /api/events 与诊断包）直接读文件，落盘以读得到为准
+        if let Err(e) = file.flush().await {
+            tracing::warn!("事件流 flush 失败，本条事件丢弃并待下次事件重开文件: {e}");
+            self.current = None;
         }
     }
 
@@ -301,6 +308,50 @@ mod tests {
         let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(second["type"], "task_failed");
         assert_eq!(second["task_id"], "t-1");
+    }
+
+    /// 逐条 flush：事件写入后无需等停止/跨日即可从文件读到——GET /api/events
+    /// 与诊断包都直接读文件，BufWriter 长期滞留等于读侧永远落后（钉住修复）
+    #[tokio::test]
+    async fn test_sink_event_visible_without_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let bus = Arc::new(EventBus::new());
+        let sink = spawn_event_sink(
+            dir.path().to_path_buf(),
+            bus.clone(),
+            CancellationToken::new(),
+        );
+
+        bus.publish(AppEvent::TaskFailed(TaskSummary {
+            task_id: "t-flush".into(),
+            task_kind: None,
+            reason: None,
+        }));
+
+        // 落盘经独立任务异步完成：轮询文件直到该行可见，不靠停止触发 flush
+        let file = dir
+            .path()
+            .join("events")
+            .join(format!("{}.jsonl", Utc::now().date_naive()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if let Ok(content) = std::fs::read_to_string(&file)
+                && content.lines().count() >= 1
+            {
+                let value: serde_json::Value =
+                    serde_json::from_str(content.lines().next().unwrap()).unwrap();
+                assert_eq!(value["type"], "task_failed");
+                assert_eq!(value["task_id"], "t-flush");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "事件应在未停止时即可从文件读到"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        sink.stop_with_timeout(std::time::Duration::from_secs(2))
+            .await;
     }
 
     /// 无事件时不建文件（惰性打开）

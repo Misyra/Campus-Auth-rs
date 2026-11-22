@@ -28,8 +28,9 @@
 //!
 //! # 配置读取
 //!
-//! 服务内缓存 [`NotificationSettings`]，每 `CONFIG_REFRESH_INTERVAL` 从配置源
-//! 重读一次：修改推送配置最多一个周期后生效，避免为低频事件逐条读盘。
+//! 逐事件实时读配置源（[`NotificationConfigSource`]）：推送配置的保存即刻对
+//! 下一事件生效——不做服务内周期缓存，避免「已关闭通道在窗口期内继续外发」
+//! 的陈旧窗口（配置读取口径见 AGENTS.md「配置系统」）。
 //!
 //! # Lagged 处理口径
 //!
@@ -42,7 +43,6 @@ pub mod template;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::{broadcast, watch};
 
@@ -65,9 +65,6 @@ impl NotificationConfigSource for Arc<dyn ConfigApi> {
         self.load_settings_async().await.global.notification
     }
 }
-
-/// 配置刷新间隔：修改推送配置到生效的最大延迟
-const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 /// 启动推送通知服务（订阅 [`crate::events::EventBus`]，按配置过滤并发送）
 ///
@@ -92,22 +89,20 @@ pub fn spawn_notification_service(
     }
 }
 
-/// 服务主循环：select 配置刷新 / 停止信号 / 事件接收（ServiceHandle 统一模式）
+/// 服务主循环：select 停止信号 / 事件接收（ServiceHandle 统一模式）
+///
+/// 配置逐事件在派发任务内实时读取（不做服务内缓存）：保存开关/通道后，下一
+/// 事件即按新设置投递——周期缓存会让「已关闭或已改址的通道」在窗口期内继续
+/// 外发。读取在派发任务内进行，主循环不因此阻塞。
 async fn run_notification_loop(
     mut rx: broadcast::Receiver<EventEnvelope>,
     config_source: Arc<dyn NotificationConfigSource>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
-    let mut cached = config_source.load_notification_settings().await;
-    let mut refresh = tokio::time::interval(CONFIG_REFRESH_INTERVAL);
-    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // stop_tx 是否仍存活（句柄未经 stop 被 drop 后停用该信号源，与事件落盘同口径）
     let mut watch_alive = true;
     loop {
         tokio::select! {
-            _ = refresh.tick() => {
-                cached = config_source.load_notification_settings().await;
-            }
             changed = stop_rx.changed(), if watch_alive => {
                 match changed {
                     Ok(()) => {
@@ -123,7 +118,7 @@ async fn run_notification_loop(
                 }
             }
             recv = rx.recv() => match recv {
-                Ok(envelope) => dispatch_event_detached(envelope, cached.clone()),
+                Ok(envelope) => dispatch_event_detached(envelope, config_source.clone()),
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     // Lagged 处理口径（见 bus 模块 doc）：warn 留痕继续收
                     tracing::warn!("推送通知落后 {n} 条，最旧事件已丢弃（继续收后续）");
@@ -138,13 +133,17 @@ async fn run_notification_loop(
     // 「停机排空」：只有经 ServiceHandle 显式 stop 才会执行——这是优雅关闭
     // 流程对通知句柄显式 stop_with_timeout 的直接动机（P3-10，语义见模块 doc）
     while let Ok(envelope) = rx.try_recv() {
-        dispatch_event_detached(envelope, cached.clone());
+        dispatch_event_detached(envelope, config_source.clone());
     }
 }
 
-/// 单事件投递入口（独立任务派发）：慢 HTTP 不阻塞事件消费循环
-fn dispatch_event_detached(envelope: EventEnvelope, settings: NotificationSettings) {
+/// 单事件投递入口（独立任务派发）：慢 HTTP 与配置读取都不阻塞事件消费循环
+fn dispatch_event_detached(
+    envelope: EventEnvelope,
+    config_source: Arc<dyn NotificationConfigSource>,
+) {
     tokio::spawn(async move {
+        let settings = config_source.load_notification_settings().await;
         dispatch_event(&envelope, &settings).await;
     });
 }

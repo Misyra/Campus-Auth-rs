@@ -15,6 +15,10 @@
  *
  * `value` 一律原样透传：`{{USERNAME}}` / `{{PASSWORD}}` 占位符留给运行时的变量解析
  * 管线（浏览器任务已支持系统变量直填步骤值），前端不展开、不改写。
+ *
+ * iframe 链同理透传：非顶层 frame 内录制的动作携带 `frame`（CSS 选择器链，与
+ * Worker 回放侧 `' >> '` 逐层下钻契约一致），丢弃会让步骤回放到主文档、命中
+ * 错误元素或超时；顶层动作不产出该键（后端按缺省顶层处理）。
  */
 
 import type { RecordedAction } from "@/api/types";
@@ -31,6 +35,8 @@ export interface RecordedTaskStep {
   selector?: string;
   /** 填写值 / 选中值 / 跳转 URL（原样透传，占位符留给运行时） */
   value?: string;
+  /** iframe CSS 选择器链（仅非顶层 frame 录制的动作携带；后端 StepConfig.frame 同名直传） */
+  frame?: string;
 }
 
 /** 转换结果：`ok=false` 仅在无可转换动作（空序列 / 词表外动作）时出现 */
@@ -38,12 +44,24 @@ export type RecordedTaskConversion =
   | { ok: true; steps: RecordedTaskStep[]; /** 词表外被丢弃的动作数 */ skippedUnknown: number }
   | { ok: false; reason: "empty" };
 
+/** iframe 动作的帧定位透传：仅非顶层 frame 录制的动作携带，顶层动作不产出
+ * 该键（保持产物最小字段集，后端 StepConfig.frame 缺省按顶层处理） */
+function frameField(action: RecordedAction): { frame?: string } {
+  return action.frame === undefined ? {} : { frame: action.frame };
+}
+
 /** 单个动作 → 单个步骤；词表外类型返回 null（丢弃并计数，不让一个未知值中断整段转换） */
 function convertOne(action: RecordedAction, index: number): RecordedTaskStep | null {
   const id = `recorded_${index}`;
   switch (action.type) {
     case "click":
-      return { id, type: "click", description: `点击 ${action.selector}`, selector: action.selector };
+      return {
+        id,
+        type: "click",
+        description: `点击 ${action.selector}`,
+        selector: action.selector,
+        ...frameField(action),
+      };
     case "fill":
       return {
         id,
@@ -51,6 +69,7 @@ function convertOne(action: RecordedAction, index: number): RecordedTaskStep | n
         description: `在 ${action.selector} 中输入`,
         selector: action.selector,
         value: action.value,
+        ...frameField(action),
       };
     case "change":
       return {
@@ -59,6 +78,7 @@ function convertOne(action: RecordedAction, index: number): RecordedTaskStep | n
         description: `选择 ${action.selector}：${action.value}`,
         selector: action.selector,
         value: action.value,
+        ...frameField(action),
       };
     case "navigate":
       // Worker 的 navigate 从 extra.url / value / selector 依次取目标地址，value 原样透传即可；
