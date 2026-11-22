@@ -85,8 +85,11 @@ fn main() -> anyhow::Result<()> {
         return handle_autostart(action, &base_path);
     }
 
-    // 控制平面以网络等待为主，限制常驻线程开销；低核设备按实际可用核数创建。
-    let worker_threads = std::thread::available_parallelism().map_or(1, |cpus| cpus.get().min(8));
+    // 单用户本地控制面以网络等待为主，少量 worker 即可承载全站异步任务：
+    // 探测 / 登录 / WS 的并发是 I/O 多路复用而非 CPU 并行，磁盘等重活本就
+    // 走 spawn_blocking 的独立阻塞池、不占 worker；上限 3 已含「登录重试 +
+    // 更新下载 + Web 服务」同跑的余量。低核设备按实际可用核数创建。
+    let worker_threads = std::thread::available_parallelism().map_or(1, |cpus| cpus.get().min(3));
 
     // 4. 构建 tokio Runtime -> block_on(launcher::run)
     let runtime = tokio::runtime::Builder::new_multi_thread()
