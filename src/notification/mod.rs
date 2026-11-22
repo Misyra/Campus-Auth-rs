@@ -12,7 +12,7 @@
 //!
 //! 本服务**不监听应用级关闭令牌**（只消费 EventBus 广播），停用只能经
 //! [`crate::ServiceHandle`] 的 stop 通道：`stop` / `stop_with_timeout` 发出
-//! `true` 后主循环即刻退出并执行停机排空（[`run_notification_loop`] 尾部的
+//! `true` 后主循环即刻退出并执行停机排空（`run_notification_loop` 尾部的
 //! `try_recv` 段，在途积压事件照常派发为独立任务）；`stop_tx` 被 drop 仅
 //! 停用该信号源、生命周期随应用退出（与事件落盘同口径）。优雅关闭流程
 //! （`launcher::shutdown` 第 2 步）据此对通知句柄显式 `stop_with_timeout`，

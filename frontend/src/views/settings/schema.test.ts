@@ -11,11 +11,19 @@
  * - 标准行绑定路径都能在 DEFAULT_CONFIG 上解析（渲染器读写不落 undefined）；
  * - chromeless 面板必须声明 component、非 chromeless 面板必须声明 entries。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SETTINGS_SECTIONS, type SettingsPanelEntry } from "./schema";
 import { SETTINGS_PANEL_SLOTS } from "./panels";
 import { DEFAULT_CONFIG } from "@/utils/constants";
 import type { Config } from "@/api/types";
+
+// happy-dom 在 Windows runner 上导入真实 BrowserIcon 模块即触发模板
+// <img src="/icons/…"> 的文件系统解析（盘符路径非法抛 TypeError，CI 首跑
+// 实锤，PR #33）——经 panels 槽位组件转导入亦然。本文件纯数据守卫、图标
+// 与断言无关，桩掉即断掉资源解析路径（同 SetupWizard.focus.test.ts）
+vi.mock("../../components/common/BrowserIcon.vue", () => ({
+  default: { name: "BrowserIcon", render: () => null },
+}));
 
 /** 收集一个面板条目的 id（标准行与槽位共用 id 域：搜索命中单元全局唯一） */
 function entryIds(entries: readonly SettingsPanelEntry[]): string[] {

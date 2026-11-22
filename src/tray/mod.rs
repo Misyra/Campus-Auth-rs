@@ -147,7 +147,7 @@ impl TrayManager {
     ///
     /// 返回 [`ServiceHandle`]，调用其 [`ServiceHandle::stop`] 可优雅停止并 join OS 线程。
     ///
-    /// **平台事件循环分工**（三平台各自的线程约束，收敛于 [`run_os_thread`]）：
+    /// **平台事件循环分工**（三平台各自的线程约束，收敛于 `run_os_thread`）：
     /// - Windows：托盘直接构建在专用 OS 线程，线程内 pump 消息循环
     /// - Linux：构建前 `gtk::init`，线程内持续 gtk 主循环
     /// - macOS：**专用线程只作命令代理**——AppKit 要求托盘/菜单构建与事件分发

@@ -304,7 +304,7 @@ fn local_token_allowed(policy: HostPolicy, allow_unauthenticated_bind: bool) -> 
 /// 取舍见模块文档：回环绑定视为「本机可信」（与能读配置/执行脚本的同用户权限
 /// 等价）；非回环且未显式豁免时一律 404——远程仍只认管理密码，不存在
 /// 远程免鉴权入口。android 构建同样 404（信任边界重裁，见
-/// [`local_token_allowed`]）。响应为 `{"data":{"token":"..."}}` +
+/// `local_token_allowed`）。响应为 `{"data":{"token":"..."}}` +
 /// `Cache-Control: no-store`。
 pub async fn local_token_handler(State(state): State<AppState>) -> Response {
     if !local_token_allowed(state.host_policy, state.allow_unauthenticated_bind) {

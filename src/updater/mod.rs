@@ -332,7 +332,7 @@ pub trait UpdaterApi: Send + Sync {
     /// 前端 pin 的版本是否被版本单调闸门放行（回滚保护，T6-4）
     ///
     /// `POST /api/system/update` 的 pin 路径不经过清单拉取（「pin 不走清单」
-    /// 取舍），天然绕过清单侧的 [`ensure_manifest_not_rollback`]；本方法把同一
+    /// 取舍），天然绕过清单侧的 `ensure_manifest_not_rollback`；本方法把同一
     /// 闸门单独暴露给 Web 层：版本落在「> 当前 && < 同通道已见最高」区间
     /// （疑似驱动降级安装）返回 `false`，其余情形（无记录 / 通道切换 /
     /// 记录损坏 / 不高于当前）返回 `true`。
@@ -763,7 +763,7 @@ impl UpdaterService {
     /// 前端 pin 的版本是否被版本单调闸门放行（Web 层 pin 路径的回滚保护）
     ///
     /// pin 不走清单，但 `update/last_check.json` 的 `highest_seen_*` 单调记忆
-    /// 同样适用：复用清单路径的 [`ensure_manifest_not_rollback`] 同一闸门，
+    /// 同样适用：复用清单路径的 `ensure_manifest_not_rollback` 同一闸门，
     /// 仅「> 当前 && < 同通道已见最高」区间（疑似驱动降级安装）拒绝，其余
     /// （无记录 / 通道切换 / 记录损坏 / 不高于当前）放行。
     pub fn pinned_version_allowed(&self, version: &str) -> bool {
