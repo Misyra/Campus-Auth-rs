@@ -110,10 +110,17 @@ describe("AppDropdownMenu 行为层（E6）", () => {
     await openMenu();
     expect(document.querySelector(".tsk-menu")).not.toBeNull();
 
-    pressKey("Escape");
-    await settle();
-    expect(document.querySelector(".tsk-menu")).toBeNull();
-    expect(document.activeElement).toBe(triggerButton());
+    // Esc 监听与 FocusScope 焦点归还都排在 reka 的 setTimeout(0) 延迟队列
+    // （见 settle 注释）：慢 runner 上队列清空可超任何固定预算——轮询内重放
+    // Esc（菜单已关时再按是无害 no-op）并断言双终态
+    await vi.waitFor(
+      () => {
+        pressKey("Escape");
+        expect(document.querySelector(".tsk-menu")).toBeNull();
+        expect(document.activeElement).toBe(triggerButton());
+      },
+      { timeout: 3000, interval: 50 },
+    );
   });
 
   it("外部 pointerdown 关闭（原文档级监听的职责，由库接管）", async () => {
@@ -121,12 +128,13 @@ describe("AppDropdownMenu 行为层（E6）", () => {
     await openMenu();
     expect(document.querySelector(".tsk-menu")).not.toBeNull();
 
-    document.getElementById("outside")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-    // 慢 runner（CI windows 矩阵，PR #33）上关闭链路的宏任务队列超出 settle
-    // 的固定 20ms 真实预算，改 waitFor 轮询等最终态；round 6 实测重度导入抖动
-    // （Import 占整轮 40%）下关闭可超 waitFor 1s 默认预算，放宽到 3s
+    // 外点监听器的注册同样在 reka 延迟队列：事件发在挂载前即永久丢失，
+    // waitFor 等再久也等不到（round 6/8 windows 实测，预算放宽无效）——
+    // 轮询内重放 pointerdown，挂载后必有下一发命中；外点按下除关闭外
+    // 无副作用，重放安全
     await vi.waitFor(
       () => {
+        document.getElementById("outside")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
         expect(document.querySelector(".tsk-menu")).toBeNull();
       },
       { timeout: 3000, interval: 50 },
