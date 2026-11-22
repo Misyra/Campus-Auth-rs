@@ -175,6 +175,11 @@ impl LoginHistoryService {
         let line = serde_json::to_string(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         file.write_all(format!("{line}\n").as_bytes()).await?;
+        // 显式 flush 才返回：drop 的「尽力异步 flush」挡不住短命进程
+        // （login-once 记完即退出）——缓冲未落盘文件成空，记录凭空丢失
+        // （PR #33 round 13 windows 矩阵实测：历史文件存在但 0 字节）；
+        // 顺带使同实例内写入顺序与调用顺序一致（串行锁内逐条持久化）
+        file.flush().await?;
         Ok(())
     }
 
@@ -441,6 +446,23 @@ mod tests {
         // start > end → 空集
         let r = date_range(d(2025, 7, 11), d(2025, 7, 9));
         assert!(r.is_empty());
+    }
+
+    // ============ record 落盘持久性 ============
+
+    /// record 返回即持久化：短命进程（login-once 记完即退出）不得出现
+    /// 「文件在但内容空」——显式 flush 钉住（PR #33 round 13 实测丢记录）
+    #[tokio::test]
+    async fn test_record_is_durable_immediately_after_return() {
+        let dir = TempDir::new().unwrap();
+        let service = LoginHistoryService::new(dir.path());
+        service.record(&sample_entry()).await.unwrap();
+        // 返回后立刻同步读回：不经任何 drop/等待窗口
+        let path = service.file_for(sample_entry().timestamp.date_naive());
+        let text = std::fs::read_to_string(&path).expect("记录文件应存在");
+        assert!(!text.trim().is_empty(), "record 返回时内容必须已落盘");
+        let value: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(value["result"], "success");
     }
 
     // ============ LoginHistoryEntry serde 测试 ============
