@@ -271,6 +271,39 @@ async fn connect_tunnel_relays_bytes_and_lease_drop_closes_connections() {
 }
 
 #[tokio::test]
+async fn connect_tunnel_preserves_greeting_coalesced_with_connect_response() {
+    // server-first 协议（SSH/SMTP 一类）在隧道建立瞬间即回问候，代理可能把
+    // 「CONNECT 200」与问候字节合并写出——越读进适配层的字节是有效隧道数据，
+    // 必须随流回放而非让 connect 报错（可达目标误判失败，Codex 复审钉住）
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let relay = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut proxy = HeadBufferedReader::new(stream);
+        let head = read_http_head(&mut proxy).await.unwrap();
+        assert!(String::from_utf8_lossy(&head).starts_with("CONNECT "));
+        // 单次写出：响应头与问候合流，钉死越读场景
+        proxy
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-OpenSSH_9.9")
+            .await
+            .unwrap();
+        // 持住连接直至客户端侧读毕，避免提前 EOF 干扰
+        let mut tail = [0; 1];
+        let _ = proxy.read(&mut tail).await;
+    });
+    let proxy_url = url::Url::parse(&format!("http://{addr}/")).unwrap();
+    let mut tunnel = connect_http_proxy(&proxy_url, "ssh.example", 22)
+        .await
+        .expect("问候与响应合流时 connect 必须成功");
+    let mut greeting = [0; 19];
+    tunnel.read_exact(&mut greeting).await.unwrap();
+    assert_eq!(&greeting, b"SSH-2.0-OpenSSH_9.9");
+    // 先关客户端侧再等代理任务：tail 读以客户端断开为退出条件
+    drop(tunnel);
+    relay.await.unwrap();
+}
+
+#[tokio::test]
 async fn http_keep_alive_preserves_one_connection_across_token_and_login() {
     let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = target.local_addr().unwrap();

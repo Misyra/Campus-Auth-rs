@@ -145,18 +145,29 @@ impl PreparedEgress {
     }
 
     /// TCP 探测和入口预检使用同一出口，代理模式通过 HTTP CONNECT 或 SOCKS5 连接。
-    pub async fn connect(&self, host: &str, port: u16) -> io::Result<TcpStream> {
+    ///
+    /// 统一返回 [`HeadBufferedReader`]：HTTP CONNECT 引导可能越读到隧道首包
+    /// （server-first 协议的问候与代理响应合流），越读字节随流回放——丢弃
+    /// 是数据丢失、报错会把可达目标误判失败，回放是唯一两全口径。
+    pub async fn connect(&self, host: &str, port: u16) -> io::Result<HeadBufferedReader> {
         tokio::time::timeout(CONNECT_TIMEOUT, async {
             if let Some(binding) = &self.binding {
-                binding.connect(host, port).await
+                binding
+                    .connect(host, port)
+                    .await
+                    .map(HeadBufferedReader::new)
             } else if let Some(proxy) = &self.proxy {
                 if proxy.scheme() == "http" {
                     connect_http_proxy(proxy, host, port).await
                 } else {
-                    connect_socks_proxy(proxy, host, port).await
+                    connect_socks_proxy(proxy, host, port)
+                        .await
+                        .map(HeadBufferedReader::new)
                 }
             } else {
-                TcpStream::connect((host, port)).await
+                TcpStream::connect((host, port))
+                    .await
+                    .map(HeadBufferedReader::new)
             }
         })
         .await
@@ -553,19 +564,23 @@ const HTTP_HEAD_LIMIT: usize = 32 * 1024;
 /// await 路径。
 const HTTP_HEAD_CHUNK: usize = 4096;
 
-/// 回环代理连接的读取适配层（A24）。
+/// 回环代理连接的读取适配层（A24），兼作出口连接的统一流类型。
 ///
 /// `read_http_head` 整块读取时，单次 `read` 可能越过 `\r\n\r\n` 预读后续字节
 ///（请求/响应消息体、CONNECT 隧道数据、keep-alive 流水线的下一请求）。这些
 /// 字节既不能丢弃也不能回写套接字，暂存在本层；之后的读取（消息体拷贝、
 /// 双向隧道、下一轮请求头）先于底层流消费它们，字节序与逐字节读取一致。
-struct HeadBufferedReader {
+/// [`PreparedEgress::connect`] 统一返回本类型：HTTP CONNECT 引导越读到的
+/// 隧道首包（server-first 协议在隧道建立瞬间即回问候，可能与代理响应合流）
+/// 随流回放而非报错——可达目标不得因有效隧道数据被误判失败（Codex 复审）。
+pub struct HeadBufferedReader {
     stream: TcpStream,
     pending: Vec<u8>,
 }
 
 impl HeadBufferedReader {
-    fn new(stream: TcpStream) -> Self {
+    /// 包装底层流（`pub(crate)`：外部无需自行构造，仅出口路径内部与测试使用）
+    pub(crate) fn new(stream: TcpStream) -> Self {
         Self {
             stream,
             pending: Vec::new(),
@@ -577,16 +592,6 @@ impl HeadBufferedReader {
     fn push_back(&mut self, mut extra: Vec<u8>) {
         extra.extend_from_slice(&std::mem::take(&mut self.pending));
         self.pending = extra;
-    }
-
-    /// 头读取后回收底层流：仅当头后没有越读字节时允许，否则数据会静默丢失。
-    /// 用于 CONNECT 引导（目的端只会在收到请求后回包，正常不会带头后数据）。
-    fn finish(self) -> io::Result<TcpStream> {
-        if self.pending.is_empty() {
-            Ok(self.stream)
-        } else {
-            Err(io::Error::other("代理响应头后存在未预期的数据"))
-        }
     }
 }
 
@@ -1011,7 +1016,11 @@ async fn connect_socks_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Res
     Ok(stream)
 }
 
-async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Result<TcpStream> {
+async fn connect_http_proxy(
+    proxy: &url::Url,
+    host: &str,
+    port: u16,
+) -> io::Result<HeadBufferedReader> {
     let mut stream = TcpStream::connect((
         proxy
             .host_str()
@@ -1041,8 +1050,8 @@ async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Resu
             format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth}\r\n").as_bytes(),
         )
         .await?;
-    // A24：响应头整块读取；CONNECT 引导后不能带越读字节（隧道数据会丢失），
-    // finish 对此显式报错而非静默吞掉
+    // A24：响应头整块读取；越读字节（server-first 协议的问候与代理响应合流）
+    // 留在适配层随流回放——CONNECT 隧道里它们是有效数据而非异常
     let mut reader = HeadBufferedReader::new(stream);
     let response = read_http_head(&mut reader).await?;
     let first = std::str::from_utf8(&response)
@@ -1053,7 +1062,7 @@ async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Resu
     if first.split_whitespace().nth(1) != Some("200") {
         return Err(io::Error::other("代理拒绝 TCP CONNECT"));
     }
-    reader.finish()
+    Ok(reader)
 }
 
 #[cfg(test)]

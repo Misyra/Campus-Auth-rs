@@ -126,7 +126,12 @@ _RECORDER_JS_TEMPLATE = r"""
 (() => {
   if (window.__campusAuthRecorderInstalled) return;
   window.__campusAuthRecorderInstalled = true;
-  const BINDING = window["__BINDING_NAME__"];
+  // binding 只记名字、每次使用时从 window 解析：expose_binding 的注入与本
+  // init script 的文档内执行顺序不受保证（实测 init 阶段可能尚未定义），
+  // init 时捕获的常量 undefined 后永不变化——就绪重试轮询捕获值等于永远
+  // 轮询一个 undefined，重试从未真正生效（Codex 复审）；用时解析让迟到
+  // 安装的 binding 立即可用
+  const BINDING_NAME = "__BINDING_NAME__";
   const DELETE_TYPE = "__DELETE_TYPE__";
   const MAX_ACTIONS = __MAX_ACTIONS__;
   const DEDUP_MS = __DEDUP_MS__;
@@ -174,10 +179,8 @@ _RECORDER_JS_TEMPLATE = r"""
   };
   const structural = (el) => {
     const parts = [];
-    let node = el;
-    let depth = 0;
-    while (node && node.nodeType === 1 && depth < STRUCTURE_MAX_DEPTH &&
-           node.tagName !== "BODY" && node.tagName !== "HTML") {
+    // 单段入链：tag + 兄弟序，自目标向上 unshift 保持「祖先在前」
+    const collect = (node) => {
       const parent = node.parentElement;
       let index = 1;
       if (parent) {
@@ -187,21 +190,24 @@ _RECORDER_JS_TEMPLATE = r"""
         }
       }
       parts.unshift(node.tagName.toLowerCase() + ":nth-child(" + index + ")");
-      node = parent;
+      return parent;
+    };
+    let node = el;
+    let depth = 0;
+    while (node && node.nodeType === 1 && depth < STRUCTURE_MAX_DEPTH &&
+           node.tagName !== "BODY" && node.tagName !== "HTML") {
+      node = collect(node);
       depth++;
     }
     // 深度预算用尽仍未及 body：无锚结构链在回放 strict 模式下跨子树多匹配
-    // 失败率显著上升——不计片段继续回溯（只求锚点，防病态深度无界循环由
-    // BODY/HTML/parentElement 判空兜底），命中 body 即以 "body > " 锚定，
-    // 可回放性优先于片段长度
-    if (node && node.nodeType === 1 && node.tagName !== "BODY" &&
-        node.tagName !== "HTML") {
-      let probe = node.parentElement;
-      while (probe && probe.nodeType === 1 && probe.tagName !== "BODY" &&
-             probe.tagName !== "HTML") {
-        probe = probe.parentElement;
-      }
-      if (probe && probe.tagName === "BODY") node = probe;
+    // 失败率显著上升，继续回溯锚定 body——**被跳过的中间层必须一并入链**：
+    // "body > x" 的直系语义要求 x 是 body 直接子级，缺层即永假（Codex 复审，
+    // 缺层选择器在回放/生成任务两侧都必然失配）。预算只约束常见浅层的片段
+    // 长度，锚定后不再截断——DOM 深度天然有界，BODY/HTML/parentElement 判空
+    // 兜底防病态环链，可回放性优先于片段长度
+    while (node && node.nodeType === 1 && node.tagName !== "BODY" &&
+           node.tagName !== "HTML") {
+      node = collect(node);
     }
     const prefix = node && node.tagName === "BODY" ? "body > " : "";
     return { selector: prefix + parts.join(" > "), strategy: "structure" };
@@ -351,7 +357,7 @@ _RECORDER_JS_TEMPLATE = r"""
       return;
     }
     sent++;
-    if (typeof BINDING !== "function") return;  // 绑定未就绪的极端早期事件：丢弃
+    if (typeof window[BINDING_NAME] !== "function") return;  // 绑定未就绪的极端早期事件：丢弃
     const payload = { type: type, selector: sel.selector, strategy: sel.strategy, ts: now };
     if (type === "change" || type === "fill") payload.value = clip(value, TEXT_MAX);
     // iframe 内捕获的动作附带 frame 链（顶层 frame 的 FRAME_CHAIN 为空串，
@@ -514,13 +520,15 @@ _RECORDER_JS_TEMPLATE = r"""
     renderPanel();
   };
   // 上报并同步面板：binding 回调即汇聚器本体，返回值为权威全量列表，回包后
-  // 整体收敛；乐观本地渲染先行，保证点击即时可见
+  // 整体收敛；乐观本地渲染先行，保证点击即时可见。binding 每次从 window
+  // 解析（见文件头 BINDING_NAME 注释），迟到安装即立即可用
   const report = (payload) => {
-    if (typeof BINDING !== "function") return;
+    const send = window[BINDING_NAME];
+    if (typeof send !== "function") return;
     let json;
     try { json = JSON.stringify(payload); } catch (e) { return; }
     try {
-      const ret = BINDING(json);
+      const ret = send(json);
       if (ret && typeof ret.then === "function") {
         ret.then((v) => { if (Array.isArray(v)) renderFromServer(v); }).catch(() => {});
       }
@@ -658,12 +666,13 @@ _RECORDER_JS_TEMPLATE = r"""
       // 从本页镜像切换到跨页全量显示。
       // binding 就绪重试：expose_binding 的注入脚本与本 init script 的文档内
       // 执行顺序不受保证（实测 init 阶段 binding 可能尚未定义，report 的
-      // typeof 守卫会静默丢弃上报——实测全部 navigate 丢失）；交互期上报
-      // （fill/click 等）到达时 binding 早已就绪不受影响。短轮询等 binding
-      // 出现后再报，40 次 ×50ms ≈2s 足够覆盖注入时差，仍失败则放弃（会话
-      // 即将关闭或环境异常，静默降级与既有口径一致）
+      // typeof 守卫会静默丢弃上报——实测全部 navigate 丢失）；重试**每次从
+      // window 重新解析**——init 时捕获的常量 undefined 后永不变化，轮询捕获
+      // 值等于永远轮询一个 undefined（重试从未真正生效，Codex 复审）。短轮询
+      // 等 binding 出现后再报，40 次 ×50ms ≈2s 足够覆盖注入时差，仍失败则
+      // 放弃（会话即将关闭或环境异常，静默降级与既有口径一致）
       const navReport = (tries) => {
-        if (typeof BINDING === "function") {
+        if (typeof window[BINDING_NAME] === "function") {
           report(payload);
           return;
         }

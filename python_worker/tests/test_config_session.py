@@ -698,9 +698,10 @@ def test_recorder_js_fill_debounce_and_navigate_shape():
     assert 'type: "navigate"' in js
     assert "location.href, URL_MAX" in js
     # navigate 就绪重试：init 阶段 binding 可能尚未注入（实测全部丢失），
-    # 短轮询等 binding 出现后再报（40 次 ×50ms）
+    # 短轮询等 binding 出现后再报（40 次 ×50ms）——且必须每次从 window
+    # 重新解析：捕获常量 undefined 后重试永不生效（Codex 复审钉住）
     assert "const navReport = (tries)" in js
-    assert 'if (typeof BINDING === "function") {' in js
+    assert 'if (typeof window[BINDING_NAME] === "function") {' in js
     assert "setTimeout(() => navReport(tries - 1), 50)" in js
     assert "navReport(40);" in js
     # 面板挂载推迟到 DOM 就绪：init script 执行时 body/documentElement 均可能
@@ -1146,13 +1147,21 @@ _RECORDER_JS_TOPOLOGY_TOP = "window.top = window;\nwindow.parent = window;"
 _RECORDER_JS_EPILOGUE = "console.log(JSON.stringify(payloads));\nprocess.exit(0);\n"
 
 
-def _run_recorder_js(scenario: str, *, topology: str = _RECORDER_JS_TOPOLOGY_TOP) -> list:
-    """Node 基座执行录制器 init 脚本 + 场景代码，返回 binding 捕获的上报列表。"""
+def _run_recorder_js(
+    scenario: str,
+    *,
+    topology: str = _RECORDER_JS_TOPOLOGY_TOP,
+    stubs: str | None = None,
+) -> list:
+    """Node 基座执行录制器 init 脚本 + 场景代码，返回 binding 捕获的上报列表。
+
+    ``stubs`` 供注入时序场景替换默认基座（如 binding 预装改名模拟迟到安装）。"""
     node = shutil.which("node")
     if node is None:
         pytest.skip("当前环境未安装 Node.js（录制器 JS 行为测试需要）")
     harness = "\n".join((
-        _RECORDER_JS_STUBS.replace("__WINDOW_TOPOLOGY__", topology),
+        (stubs if stubs is not None else _RECORDER_JS_STUBS)
+        .replace("__WINDOW_TOPOLOGY__", topology),
         build_recorder_init_script(),
         scenario,
         _RECORDER_JS_EPILOGUE,
@@ -1360,8 +1369,9 @@ def test_recorder_js_select_change_with_empty_value_not_reported():
 
 
 def test_recorder_js_structure_selector_anchors_body_when_depth_exhausted():
-    """深度预算（5 层）用尽时继续回溯锚到 body：深嵌套无属性元素的选择器
-    带 body 前缀，避免回放 strict 模式下跨子树多匹配。"""
+    """深度预算（5 层）用尽时锚到 body 且被跳过的中间层一并入链："body > x"
+    的直系语义要求链完整——缺层选择器在回放/生成任务两侧必然失配（Codex
+    复审：修复前 7 层夹具产出 5 段缺层链，回放必败）。"""
     payloads = _run_recorder_js(
         # 7 层包裹（超过 STRUCTURE_MAX_DEPTH=5）且无任何稳定属性 → structure 策略
         "const tree = makeTree(7, { tagName: 'BUTTON' });"
@@ -1373,8 +1383,14 @@ def test_recorder_js_structure_selector_anchors_body_when_depth_exhausted():
     assert len(clicks) == 1
     sel = clicks[0]["selector"]
     assert sel.startswith("body > "), "深度用尽也必须锚到 body"
-    assert sel.count(":nth-child(") == 5, "片段仍受深度预算约束（锚点不计片段）"
+    # 全链入列：7 层包裹 = 6 段 div + 1 段 button，缺层即永假
+    assert sel.count(":nth-child(") == 7, "被跳过的中间层必须一并入链"
     assert sel.endswith("button:nth-child(1)")
+    assert (
+        sel
+        == "body > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)"
+        " > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > button:nth-child(1)"
+    )
 
 
 def test_recorder_js_structure_selector_shallow_unchanged():
@@ -1387,6 +1403,32 @@ def test_recorder_js_structure_selector_shallow_unchanged():
     )
     sel = [p for p in payloads if p["type"] == "click"][0]["selector"]
     assert sel == "body > div:nth-child(1) > button:nth-child(1)"
+
+
+def test_recorder_js_binding_resolved_at_use_time():
+    """binding 用时解析钉住：init 阶段 binding 尚未安装（expose_binding 与
+    init script 的注入顺序不受保证）时，迟到安装后的上报仍可达——修复前
+    init 时捕获的常量 undefined 后永不变化，后续事件与就绪重试全部静默失效。"""
+    # 把基座预装的 binding 改名：真实绑定名在 init 执行时缺席，模拟注入时序竞态
+    late_stubs = _RECORDER_JS_STUBS.replace(
+        'window["__campusRecordAction"]', 'window["__campusRecordActionLater"]'
+    )
+    payloads = _run_recorder_js(
+        "const btn = makeEl({ id: 'y', tagName: 'BUTTON' });"
+        "btn.closest = () => btn;"
+        # binding 缺席：守卫丢弃
+        "fire('click', { target: btn });"
+        # 迟到安装真实绑定名
+        "window['__campusRecordAction'] = (json) => {"
+        " payloads.push(JSON.parse(json)); return []; };"
+        "const btn2 = makeEl({ id: 'z', tagName: 'BUTTON' });"
+        "btn2.closest = () => btn2;"
+        # 用时解析：迟到安装立即可用
+        "fire('click', { target: btn2 });",
+        stubs=late_stubs,
+    )
+    clicks = [p for p in payloads if p["type"] == "click"]
+    assert [c["selector"] for c in clicks] == ["#z"], "迟到安装的 binding 必须可上报"
 
 
 def test_recorder_js_click_listener_flush_precedes_closest():

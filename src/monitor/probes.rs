@@ -114,7 +114,10 @@ async fn tcp_connect(
         if let Some(route) = egress {
             route.connect(host, port).await
         } else {
-            TcpStream::connect((host, port)).await
+            // 出口未启用时走直连；统一经同款包装层维持分支同型
+            TcpStream::connect((host, port))
+                .await
+                .map(crate::network::egress::HeadBufferedReader::new)
         }
     })
     .await

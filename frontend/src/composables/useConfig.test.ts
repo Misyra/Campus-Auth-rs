@@ -287,6 +287,46 @@ describe("dirty 快照比对", () => {
     expect(config.dirty.value).toBe(true);
   });
 
+  it("多段保存部分成功后基准逐段前移：已落盘段改回旧值在重试中补发", async () => {
+    await config.fetchConfig();
+    // 两段同时 dirty：monitor（先发、将成功落盘）+ notification（后发、将被 400 拒）
+    const initialNotification = config.config.notification.enabled;
+    config.config.monitor.enable_tcp_check = false;
+    config.config.notification.enabled = !initialNotification;
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+
+    patchSectionMock.mockImplementation(async (section: string) => {
+      if (section === "notification") throw new ApiError("通知配置无效", 400);
+      return {};
+    });
+    await config.saveConfig();
+    expect(patchSectionMock).toHaveBeenCalledTimes(2);
+    expect(config.saveFailed.value).toBe(true);
+
+    // 用户修正 notification、把 monitor 改回旧值：整表值与旧快照完全一致——
+    // 若基准停在旧快照，dirty 不亮、重试不含 monitor，monitor 的落盘值与
+    // 界面静默背离；基准前移后 monitor 相对新基准是变更，必须重显 dirty
+    config.config.notification.enabled = initialNotification;
+    config.config.monitor.enable_tcp_check = true;
+    await flushWatch();
+    expect(config.dirty.value).toBe(true);
+
+    // 重试：monitor 的回退值必须补发（补偿 PATCH），notification 与基准
+    // 一致不再发送
+    patchSectionMock.mockImplementation(
+      async (_s: string, _b: Record<string, unknown>) => ({}),
+    );
+    patchSectionMock.mockClear();
+    await config.saveConfig();
+    const sections = patchSectionMock.mock.calls.map((c) => c[0]);
+    expect(sections).toEqual(["monitor"]);
+    const monitorBody = patchSectionMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(monitorBody.enable_tcp_check).toBe(true);
+    expect(config.dirty.value).toBe(false);
+    expect(config.saveFailed.value).toBe(false);
+  });
+
   it("后端仍在扁平响应里回传方案凭据时，本 composable 不接收", async () => {
     // 后端兼容既有客户端，GET 顶层依旧带 username/auth_url 等；
     // 若这里接收了，方案数据就再次有了第二个可写入口。

@@ -252,6 +252,18 @@ async function saveConfig(force = false): Promise<void> {
   // dirty 被置 false —— 实际从未提交，属静默丢改动。
   const submittedSnapshot = JSON.stringify(config);
 
+  // 分节保存部分成功后的基准前移：以提交快照为源只吸收已落盘段——基准
+  // 若停在旧值，用户把已落盘段改回旧值会因「与旧基准一致」被判无变更，
+  // 重试不再包含该段，落盘值与界面静默背离（Codex 复审）。在途编辑对已
+  // 落盘段的新改动不属于「已保存值」，不吸收、保持 dirty 待下次保存
+  const advanceBaseline = (applied: readonly string[]) => {
+    if (!applied.length) return;
+    const snap = JSON.parse(savedSnapshot) as Record<string, unknown>;
+    const source = JSON.parse(submittedSnapshot) as Record<string, unknown>;
+    for (const section of applied) snap[section] = source[section];
+    savedSnapshot = JSON.stringify(snap);
+  };
+
   try {
     // T5-3：按 dirty 所属 section 分组，逐段走 PATCH /api/config/{section}
     //（多段同时 dirty 按列表顺序逐个发送；本保存入口是按钮触发、无防抖合并
@@ -263,11 +275,13 @@ async function saveConfig(force = false): Promise<void> {
       await configApi.patch(fullPayload, { signal: controller.signal });
     } else {
       let fellBack = false;
+      const applied: string[] = [];
       for (const section of sections) {
         try {
           await configApi.patchSection(section, config[section], {
             signal: controller.signal,
           });
+          applied.push(section);
         } catch (error) {
           // 防御性回退：404 = 端点未挂载（过渡期理论上不该发生，见
           // patchSection 注释）。一次性回退全量 PATCH——语义与改动前完全
@@ -278,10 +292,15 @@ async function saveConfig(force = false): Promise<void> {
             fellBack = true;
             break;
           }
+          // 中断点之前的段已真实落盘：基准即时前移，重试按新基准判变更
+          advanceBaseline(applied);
           throw error;
         }
       }
       if (fellBack) {
+        // 回退全量 PATCH 前同样前移已逐段落盘的段：全量失败时重试判定不失真
+        // （成功则由下方整体快照前移覆盖，前移是其真子集、无冲突）
+        advanceBaseline(applied);
         await configApi.patch(fullPayload, { signal: controller.signal });
       }
     }
@@ -289,8 +308,8 @@ async function saveConfig(force = false): Promise<void> {
     try {
       await nextTick();
       // 以**已提交值**为新快照：用户把值改回原样时 dirty 自动消失。
-      // 部分段失败时快照不前移（走 catch），已落盘的段下次保存按同值幂等
-      // 合并重发，无副作用。
+      // 部分段失败时不走到这里（catch 提前返回），已落盘段的基准由
+      // advanceBaseline 前移、未落盘段保持 dirty。
       savedSnapshot = submittedSnapshot;
       // 只有"当前值与已提交值一致"才清 dirty。在途编辑必须保留未保存标记，
       // 否则用户看不到脏提示、也不会再点一次保存（suppressDirty 窗口内被抑制的
