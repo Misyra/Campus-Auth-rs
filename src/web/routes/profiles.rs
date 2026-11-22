@@ -957,14 +957,26 @@ pub async fn update_profile(
     responses(
         (status = 200, description = "删除成功", body = DataEnvelope<String>),
         (status = 404, description = "方案不存在", body = ErrorResponse),
-        (status = 409, description = "default 方案不可删除", body = ErrorResponse),
+        (status = 409, description = "default 方案不可删除，或方案有进行中的配置/录制会话（须先结束会话）", body = ErrorResponse),
         (status = 500, description = "方案删除失败", body = ErrorResponse),
     )
 )]
 pub async fn delete_profile(
+    State(bridge): State<Arc<dyn BridgeApi>>,
     State(profiles): State<Arc<dyn ProfileApi>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    // 活跃配置/录制会话归属本方案时拒绝删除：会话命令按方案 ID 派发
+    // （stop 端点先 load_profile），方案文件一删、收尾即 404，录制/配置
+    // 浏览器沦为无人能收的孤儿——且配置会话豁免空闲回收，会活到应用退出。
+    // 删除前必须先结束会话（Codex 三轮）
+    if let Some(owner) = bridge.config_session_owner()
+        && owner.profile_id == id
+    {
+        return Err(ApiError::Conflict(
+            "该方案有进行中的配置/录制会话，请先在对应页面结束会话再删除".into(),
+        ));
+    }
     profiles.delete_profile(&id).await?;
     tracing::info!(profile_id = %id, "删除 Profile");
     Ok(data(Value::String("ok".into())))
@@ -2160,6 +2172,58 @@ mod tests {
             .unwrap();
         assert_ne!(resp.status(), StatusCode::OK);
         assert_eq!(inner.lock().unwrap().profiles.len(), 2);
+    }
+
+    /// 活跃配置/录制会话归属本方案时拒绝删除：方案一删、按方案派发的
+    /// stop 即 404，浏览器沦为无人能收的孤儿（配置会话豁免空闲回收）——
+    /// 必须先结束会话（Codex 三轮钉住）
+    #[tokio::test]
+    async fn test_delete_profile_with_active_config_session_rejected() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(Vec::new())));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/profiles/dorm")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // 方案原样保留（删除未执行）
+        assert!(
+            inner
+                .lock()
+                .unwrap()
+                .profiles
+                .iter()
+                .any(|p| p.id == "dorm")
+        );
+
+        // 会话归属其他方案时不拦本方案的删除
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "other".into(),
+            record: true,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/profiles/dorm")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// auto-switch 落库并回显 active

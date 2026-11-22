@@ -339,9 +339,11 @@ _RECORDER_JS_TEMPLATE = r"""
     const sel = selectorFor(el, type === "click");
     const now = Date.now();
     // 防抖/去重：同一元素（同 type + 同 selector）DEDUP_MS 内重复事件只记一次；
-    // fill 不走窗口丢弃——每次结算携带该输入会话最终值，值不同不可丢，
-    // 连续 fill 由 Python 侧合并取最终值
-    if (type !== "fill" && type === lastType && sel.selector === lastSelector && now - lastTs < DEDUP_MS) return;
+    // fill/change 均为值携带型，不走窗口丢弃——change 键盘连选（方向键逐项
+    // 到达目标）值各不相同，按窗口盲丢会漏掉最终选中（Codex 三轮），连续
+    // 同目标一律放行、由 Python 侧合并取最终值
+    if (type !== "fill" && type !== "change" && type === lastType &&
+        sel.selector === lastSelector && now - lastTs < DEDUP_MS) return;
     lastType = type;
     lastSelector = sel.selector;
     lastTs = now;
@@ -711,13 +713,13 @@ def build_recorder_init_script() -> str:
 class RecorderSink:
     """录制动作汇聚器：JS 经 expose_binding 实时推送，Python 侧统一权威收口。
 
-    - 去重：click / change 同一 (type, selector, frame) 在窗口期内重复事件只记
-      一次（相邻语义，锚点为最近一条**已记录**动作；跨文档仍有效）；fill /
+    - 去重：click 同一 (type, selector, frame) 在窗口期内重复事件只记一次
+      （相邻语义，锚点为最近一条**已记录**动作；跨文档仍有效）；fill / change /
       navigate 与最近一条已记录动作同 (type, selector, frame) 时**就地合并取
-      最终值**（fill 取输入会话最终值——值不同不可按窗口丢弃；navigate 取重定向
-      链最终落地页），不受窗口约束。frame 参与键：兄弟 iframe 里同 ID 的元素是
-      不同目标，跨 frame 不得互相去重/合并（否则前一个 frame 的输入被后一个
-      顶掉，回放漏输入）；
+      最终值**（fill 取输入会话最终值、change 取键盘连选的最终选中——值不同
+      不可按窗口丢弃，navigate 取重定向链最终落地页），不受窗口约束。frame
+      参与键：兄弟 iframe 里同 ID 的元素是不同目标，跨 frame 不得互相去重/
+      合并（否则前一个 frame 的输入被后一个顶掉，回放漏输入）；
     - 上限：动作数达上限后丢弃后续并置 ``truncated``；JS 侧文档内触顶时回传
       ``{"type": "truncated"}`` 标记补报（文档计数随导航归零，Python 侧权威
       计数可能未满），同样置 ``truncated``（合并替换不增计数，触顶下仍放行）；
@@ -843,16 +845,18 @@ class RecorderSink:
     def add(self, action: dict) -> bool:
         """记录一条规范化动作；返回是否被记录（去重/触顶丢弃返回 False）。
 
-        fill / navigate 与最近一条**已记录**动作同 (type, selector, frame) 时
-        就地替换（合并取最终值/最终落地页），替换不增计数、触顶下仍放行。
+        fill / change / navigate 与最近一条**已记录**动作同 (type, selector,
+        frame) 时就地替换（合并取最终值/最终落地页），替换不增计数、触顶下仍
+        放行。
         """
         key = (action["type"], action["selector"], action.get("frame"))
         ts = int(action.get("ts") or 0)
-        # 合并语义只对携带载荷的 fill/navigate 生效：窗口丢弃会让「同一目标的
-        # 后一个值」顶不掉「前一个值」（回放必须取最终值）；重定向链多条
-        # navigate 合并为最终落地页。键含 frame——兄弟 iframe 同选择器是不同
-        # 目标，跨 frame 合并会把前一个 frame 的输入顶掉
-        if action["type"] in ("fill", "navigate") and self._actions:
+        # 合并语义只对携带载荷的值型动作生效：窗口丢弃会让「同一目标的
+        # 后一个值」顶不掉「前一个值」（回放必须取最终值）；change 键盘连选
+        # （方向键逐项到达目标）值各不相同，按值盲丢会漏掉最终选中；重定向链
+        # 多条 navigate 合并为最终落地页。键含 frame——兄弟 iframe 同选择器
+        # 是不同目标，跨 frame 合并会把前一个 frame 的输入顶掉
+        if action["type"] in ("fill", "change", "navigate") and self._actions:
             last = self._actions[-1]
             if (last["type"], last["selector"], last.get("frame")) == key:
                 self._actions[-1] = action

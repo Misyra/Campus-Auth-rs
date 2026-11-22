@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
+import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -114,6 +115,9 @@ class MainActivity : Activity() {
         webView.setDownloadListener { url, _, mimetype, _, _ ->
             handleDownload(url, mimetype)
         }
+        // blob: 导出的 data URL 回传桥：evaluateJavascript 不等待 Promise，
+        // 异步结果只能由 JS 侧完成后主动投递（见 BlobBridge 注释）
+        webView.addJavascriptInterface(BlobBridge(), "CampusBlobBridge")
     }
 
     // ============ 文件选择（P2-10，onShowFileChooser → 系统选择器） ============
@@ -198,27 +202,45 @@ class MainActivity : Activity() {
     }
 
     /**
-     * blob: URL 下载：在 WebView 内 fetch 转 data URL，主线程回调里解码落盘
+     * blob: 数据回传桥：evaluateJavascript 对 async 脚本的回调拿到的是
+     * **Promise 对象自身**的 JSON 表示（Chromium 只序列化立即执行结果、不
+     * 等待落定），异步读出的 data URL 必须由 JS 侧完成后经本接口主动投递
+     * （Codex 三轮：此前按回调串当 data URL 解码，`data:` 前缀校验必失败，
+     * blob 导出在安卓结构性不可用）。桥对象对 WebView 内所有页面暴露——
+     * 本应用 WebView 仅承载本机 axum 界面（外链一律转系统浏览器），暴露面
+     * 可控；接口只落盘调用方提交的数据、无其他副作用
+     */
+    private inner class BlobBridge {
+        @JavascriptInterface
+        fun deliver(dataUrl: String?, mimetype: String?) {
+            runOnUiThread {
+                if (dataUrl == null) {
+                    Toast.makeText(this@MainActivity, R.string.download_failed, Toast.LENGTH_SHORT).show()
+                    return@runOnUiThread
+                }
+                writeDataUrlToDownloads(dataUrl, mimetype)
+            }
+        }
+    }
+
+    /**
+     * blob: URL 下载：在 WebView 内 fetch 转 data URL，经 CampusBlobBridge 回传
      *
      * blob: URL 只在本 WebView 进程内有意义（DownloadManager/浏览器均无法
-     * 消费），用一次性脚本 fetch 回读；evaluateJavascript 的结果以 JSON 字符串
-     * 形态回传，data URL 仅含 base64 字母表无转义字符，去引号即可还原
+     * 消费），用一次性脚本 fetch 回读；data URL 仅含 base64 字母表与
+     * `data:` 头部字符，经桥方法参数传递无转义损耗
      */
     private fun saveBlobDownload(url: String, mimetype: String?) {
+        val mimeJs = mimetype ?: ""
         val script = "(async()=>{try{" +
             "const b=await fetch('$url').then(r=>r.blob());" +
-            "return await new Promise(res=>{const fr=new FileReader();" +
+            "const r=await new Promise(res=>{const fr=new FileReader();" +
             "fr.onload=()=>res(fr.result);fr.onerror=()=>res(null);" +
             "fr.readAsDataURL(b);});" +
-            "}catch(e){return null}})()"
-        webView.evaluateJavascript(script) { result ->
-            val dataUrl = result?.takeIf { it != "null" }?.removeSurrounding("\"")
-            if (dataUrl == null) {
-                Toast.makeText(this, R.string.download_failed, Toast.LENGTH_SHORT).show()
-                return@evaluateJavascript
-            }
-            writeDataUrlToDownloads(dataUrl, mimetype)
-        }
+            "window.CampusBlobBridge.deliver(r==null?null:r,'$mimeJs');" +
+            "}catch(e){window.CampusBlobBridge.deliver(null,'$mimeJs')}})()"
+        // 回调无用的空壳：真实结果走 BlobBridge.deliver
+        webView.evaluateJavascript(script) { }
     }
 
     /** data URL 解码后写入系统下载集合（API 29+）/应用外部下载目录（旧版本回退） */

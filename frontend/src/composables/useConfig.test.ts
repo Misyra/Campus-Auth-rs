@@ -327,6 +327,45 @@ describe("dirty 快照比对", () => {
     expect(config.saveFailed.value).toBe(false);
   });
 
+  it("在途编辑不随段载荷外发：后段 PATCH 携带提交快照值而非活值", async () => {
+    await config.fetchConfig();
+    const initialNotification = config.config.notification.enabled;
+    config.config.monitor.enable_tcp_check = false;
+    config.config.notification.enabled = !initialNotification;
+    await flushWatch();
+
+    // 让 monitor 段挂起，制造"前段在途"窗口
+    let releaseMonitor!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseMonitor = resolve;
+    });
+    patchSectionMock.mockImplementation(async (section: string) => {
+      if (section === "monitor") await held;
+      return {};
+    });
+
+    // saveConfig 同步推进到首个 await（monitor PATCH 已进入挂起）后返回
+    const saving = config.saveConfig();
+    // 前段在途时编辑后段：不属于本次提交
+    config.config.notification.enabled = initialNotification;
+
+    releaseMonitor();
+    await saving;
+
+    const notificationCall = patchSectionMock.mock.calls.find((c) => c[0] === "notification");
+    expect(notificationCall).toBeDefined();
+    expect(
+      (notificationCall?.[1] as Record<string, unknown>).enabled,
+      "载荷必须是提交快照值，不含在途编辑",
+    ).toBe(!initialNotification);
+    // 保存成功后基准 = 提交快照：在途编辑保持 dirty，待下次保存
+    expect(config.dirty.value).toBe(true);
+    // 还原默认 mock 实现，供后续用例
+    patchSectionMock.mockImplementation(
+      async (_s: string, _b: Record<string, unknown>) => ({}),
+    );
+  });
+
   it("后端仍在扁平响应里回传方案凭据时，本 composable 不接收", async () => {
     // 后端兼容既有客户端，GET 顶层依旧带 username/auth_url 等；
     // 若这里接收了，方案数据就再次有了第二个可写入口。

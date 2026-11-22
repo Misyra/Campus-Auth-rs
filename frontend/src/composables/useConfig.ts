@@ -276,9 +276,15 @@ async function saveConfig(force = false): Promise<void> {
     } else {
       let fellBack = false;
       const applied: string[] = [];
+      // 提交快照的深解析副本：段载荷的唯一来源。不能用 fullPayload——它只
+      // 是浅快照（各段与活 config 共享同一对象引用），早段 PATCH 在途时用户
+      // 对后段的编辑会穿透引用改写载荷；也不能直接读活值——落盘值会与
+      // 「保存成功后的基准（提交快照）」脱钩，随后改回快照值被判「无变更」
+      // 而漏发（Codex 三轮）。深解析彻底切断引用共享
+      const submitted = JSON.parse(submittedSnapshot) as SaveConfigPayload;
       for (const section of sections) {
         try {
-          await configApi.patchSection(section, config[section], {
+          await configApi.patchSection(section, submitted[section], {
             signal: controller.signal,
           });
           applied.push(section);

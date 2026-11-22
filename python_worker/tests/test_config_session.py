@@ -690,8 +690,9 @@ def test_recorder_js_fill_debounce_and_navigate_shape():
     assert "pendingFill.value = value;" in js
     # 结算点：blur / change / Enter 提交 / 点击提交按钮
     assert js.count("flushFill();") >= 4
-    # fill 不走窗口丢弃（值不同不可丢），连续 fill 由 Python 侧合并取最终值
-    assert 'if (type !== "fill" && type === lastType' in js
+    # fill/change 均不走窗口丢弃（值不同不可丢，键盘连选的最终选中必须留存），
+    # 连续同目标一律由 Python 侧合并取最终值
+    assert 'if (type !== "fill" && type !== "change" && type === lastType' in js
     # navigate：主框架 + 非 about:blank 守卫；value=location.href
     assert "window.top === window" in js
     assert 'location.href !== "about:blank"' in js
@@ -742,6 +743,21 @@ def test_recorder_sink_fill_merge_takes_final_value():
     assert len(actions) == 1, "同目标连续 fill 合并为一条最终值"
     assert actions[0]["value"] == "admin@school.edu", "取最终输入值"
     assert actions[0]["ts"] == 60000
+
+
+def test_recorder_sink_change_merge_takes_final_value():
+    """连续同目标 change 就地合并取最终值：键盘连选（方向键逐项到达目标）
+    的第二次 change 值不同，按窗口盲丢会漏掉最终选中（Codex 三轮钉住）。"""
+    sink = RecorderSink()
+    assert sink.add({"type": "change", "selector": "#isp", "strategy": "id",
+                     "value": "cmcc", "ts": 100}) is True
+    # 窗口内（DEDUP_MS=500）值变的 change：不得丢弃，就地合并取最终值
+    assert sink.add({"type": "change", "selector": "#isp", "strategy": "id",
+                     "value": "ctcc", "ts": 130}) is True
+    actions = sink.recorded_actions()
+    assert len(actions) == 1, "同目标连续 change 合并为一条最终值"
+    assert actions[0]["value"] == "ctcc", "取最终选中值"
+    assert actions[0]["ts"] == 130
 
 
 def test_recorder_sink_fill_merge_not_across_other_actions():
@@ -1366,6 +1382,22 @@ def test_recorder_js_select_change_with_empty_value_not_reported():
     )
     changes = [p for p in payloads if p["type"] == "change"]
     assert [c["value"] for c in changes] == ["cmcc"], "空值 change 不上报"
+
+
+def test_recorder_js_change_value_shift_passes_dedup_window():
+    """键盘连选场景钉住：窗口内值变的 change 不被 JS 守卫丢弃——修复前按
+    窗口盲丢只留首次值，最终选中丢失（Codex 三轮；合并取最终值由 Python 侧
+    test_recorder_sink_change_merge_takes_final_value 钉住）。"""
+    payloads = _run_recorder_js(
+        "const isp = makeEl({ id: 'isp', tagName: 'SELECT' });"
+        "isp.value = 'cmcc';"
+        "fire('change', { target: isp });"
+        "isp.value = 'ctcc';"
+        "fire('change', { target: isp });"
+    )
+    changes = [p for p in payloads if p["type"] == "change"]
+    assert [c["value"] for c in changes] == ["cmcc", "ctcc"], \
+        "窗口内值变的 change 必须双双放行（最终值由 Python 合并）"
 
 
 def test_recorder_js_structure_selector_anchors_body_when_depth_exhausted():
