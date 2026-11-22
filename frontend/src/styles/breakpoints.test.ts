@@ -61,7 +61,8 @@ const tsUrls = walk(SRC, ".ts").filter((u) => !u.pathname.endsWith(".d.ts"));
 
 const usages: BpUsage[] = [];
 for (const url of [...cssUrls, ...vueUrls]) {
-  const file = relative(SRC.pathname, url.pathname);
+  // Windows 上 path.relative 返回反斜杠，统一归一为正斜杠再与例外清单比对
+  const file = relative(SRC.pathname, url.pathname).replace(/\\/g, "/");
   let text = stripComments(readFileSync(url, "utf8"));
   if (file.endsWith(".vue")) {
     // 只扫 <style> 块做媒体查询；模板/脚本里的 @media 是普通字符串，不构成查询
@@ -72,7 +73,8 @@ for (const url of [...cssUrls, ...vueUrls]) {
 }
 // JS 视口判断（matchMedia）与 CSS 同一套数值口径
 for (const url of [...tsUrls, ...vueUrls]) {
-  const file = relative(SRC.pathname, url.pathname);
+  // Windows 上 path.relative 返回反斜杠，统一归一为正斜杠再与例外清单比对
+  const file = relative(SRC.pathname, url.pathname).replace(/\\/g, "/");
   const text = stripComments(readFileSync(url, "utf8"));
   for (const m of text.matchAll(/matchMedia\(\s*["'`]\((min|max)-width:\s*(\d+)px\)/g)) {
     usages.push({ file, kind: "js", minmax: m[1] as "min" | "max", value: Number(m[2]) });

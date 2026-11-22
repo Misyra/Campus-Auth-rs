@@ -12,12 +12,21 @@
  * Reka 测试要点：Esc/焦点监听经 setTimeout(0) 落 window，合成事件需 bubbles: true
  * 并留 ~20ms 宏任务沉降（同 Modal.focus.test.ts 的 settle）。
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createApp, nextTick, type App } from "vue";
 import SetupWizard from "./SetupWizard.vue";
 import { useUi } from "../../composables/useUi";
+
+// happy-dom 在 Windows runner 上会尝试从文件系统解析模板里的
+// <img src="/icons/...">，盘符路径非法直接抛 TypeError（CI 首跑实锤，PR #33；
+// 仓库内仅本文件渲染 BrowserIcon，未处理 rejection 还会漂移归因到同 worker
+// 的下一个测试文件）。向导焦点语义与图标渲染无关，桩掉图标组件即断掉
+// 资源解析路径（vi.mock 具提升语义，写在导入语句之后仍先于模块求值生效）
+vi.mock("./BrowserIcon.vue", () => ({
+  default: { name: "BrowserIcon", render: () => null },
+}));
 
 let app: App | null = null;
 let trigger: HTMLElement | null = null;

@@ -1,4 +1,5 @@
-// @vitest-environment happy-dom
+// @vitest-environment happy-dom（导入链经 panels → router 的 createWebHistory
+// 需要 window；本文件纯数据守卫、不渲染组件，无 img 资源解析路径）
 /**
  * 设置页 schema 完整性守卫。
  *

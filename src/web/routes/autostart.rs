@@ -155,7 +155,9 @@ pub async fn get_autostart(
             );
         status["source"] = "system".into();
         status["cached_enabled"] = settings.global.app.autostart_enabled.into();
-        status["method"] = "desktop file".into();
+        // method 不在此覆写：初始 json 的通用字段已按 enabled 正确给出
+        // 「desktop file」/「-」（linux-only 状态测试在 CI 首跑抓出禁用态被
+        // 覆写成 desktop file 的问题）
         status["location"] = observed.desktop_path.clone().into();
     }
     // 其余平台（openwrt/BSD 等）保留既有注册机制与兼容字段。

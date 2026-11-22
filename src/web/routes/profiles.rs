@@ -3482,11 +3482,10 @@ mod tests {
         assert_eq!(sent.len(), 1, "应恰好派发一条命令");
         assert_eq!(sent[0].0, "profile_session_start");
         let params = &sent[0].1;
+        // Windows 路径分隔符为反斜杠，统一按正斜杠口径断言（CI windows 矩阵）
+        let user_data_dir = params["user_data_dir"].as_str().unwrap().replace('\\', "/");
         assert!(
-            params["user_data_dir"]
-                .as_str()
-                .unwrap()
-                .ends_with("browser_profiles/dorm"),
+            user_data_dir.ends_with("browser_profiles/dorm"),
             "持久目录应按方案 id 拼接: {params}"
         );
         assert!(

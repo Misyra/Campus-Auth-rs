@@ -2360,6 +2360,11 @@ mod tests {
         let mut probe1_done = false;
         for _ in 0..40 {
             tokio::time::advance(Duration::from_millis(100)).await;
+            // 真实小睡一拍：虚拟时钟推进不产生真实时间，本地 stall 服务的真实
+            // TCP 连接完成与超时注册需要真实调度窗口——CI 慢 runner 上不插真实
+            // 睡，4s 虚拟预算在探测任务获得轮询前就耗尽（PR #33 windows 矩阵
+            // 实锤）；每次阻塞 5ms 不影响虚拟时钟语义
+            std::thread::sleep(Duration::from_millis(5));
             if snap().probe_total == 1 {
                 probe1_done = true;
                 break;

@@ -218,8 +218,11 @@ describe("TaskRecordingDialog", () => {
     const steps = putBody!.steps as Array<Record<string, unknown>>;
     expect(steps.map((s) => s.type)).toEqual(["navigate", "input", "input", "select", "click"]);
     expect(steps[1]).toMatchObject({ selector: "#username", value: "{{USERNAME}}" });
-    // 保存成功：弹窗关闭 + 成功 toast
-    expect(document.querySelector('[data-testid="record-steps"]')).toBeNull();
+    // 保存成功：弹窗关闭 + 成功 toast（关闭链路在慢 runner 上超出 settle 的
+    // 固定真实预算，waitFor 轮询等最终态——CI windows 矩阵首跑实锤）
+    await vi.waitFor(() => {
+      expect(document.querySelector('[data-testid="record-steps"]')).toBeNull();
+    });
     expect(useToast().toast.message).toContain("已保存为任务");
     expect(fetchMock).toHaveBeenCalled();
   });

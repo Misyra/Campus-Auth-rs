@@ -1709,6 +1709,9 @@ mod tests {
         #[cfg(windows)]
         {
             let mut writable = file_perm.clone();
+            // Windows 上 set_readonly(false) 是恢复可写的正确 API；clippy 该 lint
+            // 按 Unix 语义（等效全员可写）跨平台开火，本块仅 Windows 编译，显式豁免
+            #[allow(clippy::permissions_set_readonly_false)]
             writable.set_readonly(false);
             std::fs::set_permissions(&profile_path, writable).unwrap();
         }

@@ -2657,6 +2657,9 @@ mod tests {
         {
             let seed = browser.join("default.json");
             let mut perm = std::fs::metadata(&seed).unwrap().permissions();
+            // Windows 上 set_readonly(false) 是恢复可写的正确 API（clippy 按 Unix
+            // 语义跨平台开火，仅 Windows 编译的测试恢复块显式豁免）
+            #[allow(clippy::permissions_set_readonly_false)]
             perm.set_readonly(false);
             std::fs::set_permissions(&seed, perm).unwrap();
         }

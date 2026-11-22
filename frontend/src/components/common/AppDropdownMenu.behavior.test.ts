@@ -5,7 +5,7 @@
  * 不引入 @vue/test-utils，用 Vue 运行时 createApp 直接挂载（同 Modal.focus.test.ts）。
  * 静态守卫：四个任务面板不得再手写菜单状态 / 文档级监听（防回潮）。
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
@@ -122,8 +122,11 @@ describe("AppDropdownMenu 行为层（E6）", () => {
     expect(document.querySelector(".tsk-menu")).not.toBeNull();
 
     document.getElementById("outside")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
-    await settle();
-    expect(document.querySelector(".tsk-menu")).toBeNull();
+    // 慢 runner（CI windows 矩阵，PR #33）上关闭链路的宏任务队列超出 settle
+    // 的固定 20ms 真实预算，改 waitFor 轮询等最终态
+    await vi.waitFor(() => {
+      expect(document.querySelector(".tsk-menu")).toBeNull();
+    });
   });
 
   it("ArrowDown 高亮聚焦首项，Enter 选中并自动关闭（方向键 / 选择 / 关闭一体）", async () => {
