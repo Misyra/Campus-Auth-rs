@@ -46,9 +46,16 @@ RECORDER_MAX_ACTIONS = 50
 #: JS 侧逐文档去重 + Python 侧跨文档去重，窗口常量两端同源。
 RECORDER_DEDUP_MS = 500
 
-#: 可见文本（button 文案 / select 选中值 / fill 字面值）截断长度：控制 IPC 体积
-#: 与选择器确定性。占位符值（{{USERNAME}}/{{PASSWORD}}）远小于该上限不受影响。
+#: 可见文本（button 文案 / text 选择器匹配文本）截断长度：控制 IPC 体积与
+#: 选择器确定性。仅作用于展示与选择器目标；**录制的 value 是回放数据**，
+#: 截断会让 select_option 找不到选项、文本框填入残句——值走独立预算
+#: （RECORDER_VALUE_MAX_CHARS）。
 RECORDER_TEXT_MAX_CHARS = 40
+
+#: fill / change 录制值的截断上限：值是回放本体（与 navigate 的 URL 同纪律），
+#: 40 字展示预算截断会静默损毁数据（Codex 四轮：52 字 select 值只录 40 字，
+#: select_option 失配）。预算只防 1MiB NDJSON 行上限，512 同 URL 口径。
+RECORDER_VALUE_MAX_CHARS = 512
 
 #: navigate 动作 value（location.href）截断长度：与 selector 上限同纪律——
 #: 门户长查询串 URL 无界进入 IPC 会撑爆 1MiB NDJSON 行上限（整行丢弃 →
@@ -136,6 +143,8 @@ _RECORDER_JS_TEMPLATE = r"""
   const MAX_ACTIONS = __MAX_ACTIONS__;
   const DEDUP_MS = __DEDUP_MS__;
   const TEXT_MAX = __TEXT_MAX__;
+  // 录制值（回放本体）独立于展示文本预算：40 字截断会静默损毁数据
+  const VALUE_MAX = __VALUE_MAX__;
   const ATTR_MAX = __ATTR_MAX__;
   const STRUCTURE_MAX_DEPTH = __STRUCTURE_DEPTH__;
   const URL_MAX = __URL_MAX__;
@@ -361,7 +370,8 @@ _RECORDER_JS_TEMPLATE = r"""
     sent++;
     if (typeof window[BINDING_NAME] !== "function") return;  // 绑定未就绪的极端早期事件：丢弃
     const payload = { type: type, selector: sel.selector, strategy: sel.strategy, ts: now };
-    if (type === "change" || type === "fill") payload.value = clip(value, TEXT_MAX);
+    // 值是回放数据：按 VALUE_MAX（512）预算截断，不得用 40 字展示预算（Codex 四轮）
+    if (type === "change" || type === "fill") payload.value = clip(value, VALUE_MAX);
     // iframe 内捕获的动作附带 frame 链（顶层 frame 的 FRAME_CHAIN 为空串，
     // 不带该键；navigate 仅主框架上报，天然无链）
     if (FRAME_CHAIN) payload.frame = clip(FRAME_CHAIN, FRAME_MAX);
@@ -696,6 +706,7 @@ def build_recorder_init_script() -> str:
         "__MAX_ACTIONS__": str(RECORDER_MAX_ACTIONS),
         "__DEDUP_MS__": str(RECORDER_DEDUP_MS),
         "__TEXT_MAX__": str(RECORDER_TEXT_MAX_CHARS),
+        "__VALUE_MAX__": str(RECORDER_VALUE_MAX_CHARS),
         "__ATTR_MAX__": str(RECORDER_ATTR_MAX_CHARS),
         "__STRUCTURE_DEPTH__": str(RECORDER_STRUCTURE_MAX_DEPTH),
         "__URL_MAX__": str(RECORDER_URL_MAX_CHARS),
@@ -791,7 +802,8 @@ class RecorderSink:
         # 畸形丢弃——无 URL 的 navigate 无回放意义）；点击不录 value
         if action_type in ("change", "fill"):
             value = payload.get("value")
-            action["value"] = (value if isinstance(value, str) else "")[:RECORDER_TEXT_MAX_CHARS]
+            # 值是回放数据：按独立值预算截断（40 字展示预算会损毁数据，Codex 四轮）
+            action["value"] = (value if isinstance(value, str) else "")[:RECORDER_VALUE_MAX_CHARS]
         elif action_type == "navigate":
             value = payload.get("value")
             if not isinstance(value, str) or not value:

@@ -13,8 +13,12 @@
  * - `change`  → `select`（下拉选择）
  * - `navigate`→ `navigate`（页面跳转）
  *
- * `value` 一律原样透传：`{{USERNAME}}` / `{{PASSWORD}}` 占位符留给运行时的变量解析
- * 管线（浏览器任务已支持系统变量直填步骤值），前端不展开、不改写。
+ * `value` 原样透传：`{{USERNAME}}` / `{{PASSWORD}}` 占位符留给运行时的变量解析
+ * 管线（浏览器任务已支持系统变量直填步骤值），前端不展开、不改写。唯一例外：
+ * **首个带 URL 的 navigate 参数化为 `{{LOGIN_URL}}`**——配置会话自动打开的
+ * 门户页即首个导航标记，保留字面量会让复用任务的浏览器被拉回录制时方案的
+ * 旧门户（方案改址 / 换方案挂此任务即必败）；后续导航是用户真实浏览轨迹，
+ * 字面量保留。
  *
  * iframe 链同理透传：非顶层 frame 内录制的动作携带 `frame`（CSS 选择器链，与
  * Worker 回放侧 `' >> '` 逐层下钻契约一致），丢弃会让步骤回放到主文档、命中
@@ -51,7 +55,11 @@ function frameField(action: RecordedAction): { frame?: string } {
 }
 
 /** 单个动作 → 单个步骤；词表外类型返回 null（丢弃并计数，不让一个未知值中断整段转换） */
-function convertOne(action: RecordedAction, index: number): RecordedTaskStep | null {
+function convertOne(
+  action: RecordedAction,
+  index: number,
+  parameterizePortal: boolean,
+): RecordedTaskStep | null {
   const id = `recorded_${index}`;
   switch (action.type) {
     case "click":
@@ -81,8 +89,13 @@ function convertOne(action: RecordedAction, index: number): RecordedTaskStep | n
         ...frameField(action),
       };
     case "navigate":
-      // Worker 的 navigate 从 extra.url / value / selector 依次取目标地址，value 原样透传即可；
-      // 纯标记动作（无 URL）也保留，运行时缺目标地址会以明确的步骤失败暴露，不在此静默吞掉
+      // 首个带 URL 的导航 = 配置会话自动打开的门户页：参数化为 {{LOGIN_URL}}
+      // （任务本体已先打开同值，重复导航幂等且随方案走）；后续导航是真实
+      // 浏览轨迹，value 原样透传。纯标记动作（无 URL）保留，运行时缺目标
+      // 地址会以明确的步骤失败暴露，不在此静默吞掉
+      if (parameterizePortal) {
+        return { id, type: "navigate", description: "跳转登录页 {{LOGIN_URL}}", value: "{{LOGIN_URL}}" };
+      }
       return action.value === undefined
         ? { id, type: "navigate", description: "页面跳转" }
         : { id, type: "navigate", description: `跳转 ${action.value}`, value: action.value };
@@ -100,10 +113,17 @@ function convertOne(action: RecordedAction, index: number): RecordedTaskStep | n
 export function convertRecordedActions(actions: readonly RecordedAction[]): RecordedTaskConversion {
   const steps: RecordedTaskStep[] = [];
   let skippedUnknown = 0;
+  let portalParameterized = false;
   for (const action of actions) {
-    const step = convertOne(action, steps.length + 1);
-    if (step) steps.push(step);
-    else skippedUnknown += 1;
+    const isPortalCandidate =
+      action.type === "navigate" && action.value !== undefined && !portalParameterized;
+    const step = convertOne(action, steps.length + 1, isPortalCandidate);
+    if (step) {
+      if (isPortalCandidate) portalParameterized = true;
+      steps.push(step);
+    } else {
+      skippedUnknown += 1;
+    }
   }
   if (!steps.length) return { ok: false, reason: "empty" };
   return { ok: true, steps, skippedUnknown };

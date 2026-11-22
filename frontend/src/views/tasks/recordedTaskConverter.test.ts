@@ -1,8 +1,8 @@
 // @vitest-environment node
 /**
- * recordedTaskConverter 纯函数测试：四类动作映射、占位符原样透传、navigate 保留
- * （含无 URL 的纯标记形态）、iframe frame 链透传、词表外动作丢弃计数、空序列
- * 拒绝、产物字段极小集。
+ * recordedTaskConverter 纯函数测试：四类动作映射、占位符原样透传、navigate
+ * 首导航参数化 {{LOGIN_URL}}（后续字面量保留、无 URL 纯标记保留）、iframe
+ * frame 链透传、词表外动作丢弃计数、空序列拒绝、产物字段极小集。
  */
 import { describe, it, expect } from "vitest";
 import { convertRecordedActions, type RecordedTaskStep } from "./recordedTaskConverter";
@@ -45,12 +45,15 @@ describe("convertRecordedActions", () => {
     expect(result.steps[3]).toMatchObject({ type: "select", selector: "select[name=isp]", value: "cmcc" });
   });
 
-  it("navigate 保留：带 URL 时 value 原样透传；纯标记（无 URL）也保留为步骤", () => {
+  it("navigate：首个带 URL 的参数化为 {{LOGIN_URL}}，后续字面量保留，纯标记也保留", () => {
+    // 首个带 URL 的导航 = 配置会话自动打开的门户页：字面量会把复用任务的
+    // 浏览器拉回录制时方案的旧门户（方案改址/换方案挂此任务即必败），
+    // 参数化为 {{LOGIN_URL}}（Codex 四轮钉住）
     const withUrl = convertRecordedActions([{ type: "navigate", ts: 1, value: "http://p.example/success" }]);
     expect(withUrl).toEqual({
       ok: true,
       skippedUnknown: 0,
-      steps: [{ id: "recorded_1", type: "navigate", description: "跳转 http://p.example/success", value: "http://p.example/success" }],
+      steps: [{ id: "recorded_1", type: "navigate", description: "跳转登录页 {{LOGIN_URL}}", value: "{{LOGIN_URL}}" }],
     });
 
     const markerOnly = convertRecordedActions([{ type: "navigate", ts: 1 }]);
@@ -58,6 +61,22 @@ describe("convertRecordedActions", () => {
       ok: true,
       skippedUnknown: 0,
       steps: [{ id: "recorded_1", type: "navigate", description: "页面跳转" }],
+    });
+
+    // 后续导航是真实浏览轨迹：参数化只消费一次，第二个带 URL 导航字面量保留
+    const followUp = convertRecordedActions([
+      { type: "navigate", ts: 1, value: "http://p.example/login" },
+      { type: "click", ts: 2, selector: "#go", strategy: "id" },
+      { type: "navigate", ts: 3, value: "http://p.example/welcome" },
+    ]);
+    expect(followUp).toEqual({
+      ok: true,
+      skippedUnknown: 0,
+      steps: [
+        { id: "recorded_1", type: "navigate", description: "跳转登录页 {{LOGIN_URL}}", value: "{{LOGIN_URL}}" },
+        { id: "recorded_2", type: "click", description: "点击 #go", selector: "#go" },
+        { id: "recorded_3", type: "navigate", description: "跳转 http://p.example/welcome", value: "http://p.example/welcome" },
+      ],
     });
   });
 

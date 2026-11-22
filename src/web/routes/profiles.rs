@@ -1157,7 +1157,11 @@ pub async fn start_config_session(
             "请先启用本方案的持久会话（勾选「启用持久会话」并保存）后再打开浏览器".into(),
         ));
     }
-    // portal_url 与 browser_settings 取运行时口径（含认证地址回退链与全局浏览器设置）
+    // portal_url / browser_settings / network 取运行时口径（含认证地址回退链与
+    // 全局浏览器设置）；**network 必须随载荷下发**——bridge 的 apply_browser 在
+    // 载荷无 network 键时回退**活跃方案**的出口：非活跃方案的录制/配置会话会
+    // 用错出口（需代理的方案按直连开门户、无关活跃方案的坏网卡连累本会话
+    // 启动）（Codex 四轮）
     let rt = config.runtime_config_for_profile(&id)?;
     let user_data_dir = crate::utils::paths::browser_profile_dir(&config.base_path(), &id);
     // 持久目录由编排侧 ensure（登录编排同口径）：目录建不出来时 Worker 启动
@@ -1173,6 +1177,7 @@ pub async fn start_config_session(
         "portal_url": rt.profile.effective_browser_login_url(),
         "record": query.record,
         "browser_settings": rt.browser,
+        "network": rt.network,
     });
     let resp = bridge.execute_config_session_start(params).await?;
     // Worker 结构化失败（success=false）：占用互斥命中（重复启动）归 409，
@@ -3560,6 +3565,10 @@ mod tests {
         assert!(
             params["browser_settings"].is_object(),
             "browser_settings 整体下发: {params}"
+        );
+        assert!(
+            params["network"].is_object(),
+            "network（所选方案出口）必须随载荷下发——bridge 无键时回退活跃方案出口: {params}"
         );
         let owner = bridge.owner().expect("start 成功后应记录归属");
         assert_eq!(owner.session_id, "sess-1");

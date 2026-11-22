@@ -26,6 +26,7 @@ from config_session import (
     RECORDER_PLACEHOLDER_USERNAME,
     RECORDER_TEXT_MAX_CHARS,
     RECORDER_USERNAME_HINTS,
+    RECORDER_VALUE_MAX_CHARS,
     SELECTOR_STRATEGY_PRIORITY,
     RecorderSink,
     build_recorder_init_script,
@@ -614,9 +615,9 @@ def test_recorder_js_embeds_python_constants():
     assert json.dumps(list(RECORDER_USERNAME_HINTS)) in js
     for token in (
         "__BINDING_NAME__", "__DELETE_TYPE__", "__MAX_ACTIONS__", "__DEDUP_MS__",
-        "__TEXT_MAX__", "__ATTR_MAX__", "__STRUCTURE_DEPTH__", "__STRATEGIES__",
-        "__URL_MAX__", "__FRAME_MAX__", "__FILL_PASSWORD__", "__FILL_USERNAME__",
-        "__USERNAME_HINTS__",
+        "__TEXT_MAX__", "__VALUE_MAX__", "__ATTR_MAX__", "__STRUCTURE_DEPTH__",
+        "__STRATEGIES__", "__URL_MAX__", "__FRAME_MAX__", "__FILL_PASSWORD__",
+        "__FILL_USERNAME__", "__USERNAME_HINTS__",
     ):
         assert token not in js, f"模板占位符 {token} 未被替换"
 
@@ -760,6 +761,24 @@ def test_recorder_sink_change_merge_takes_final_value():
     assert actions[0]["ts"] == 130
 
 
+def test_recorder_sink_value_budget_is_512_not_display_40():
+    """录制值按 512 值预算截断（回放本体），不得沿用 40 字展示预算
+    （Codex 四轮：Python 侧 add_json 兜底同样改为值预算）。"""
+    sink = RecorderSink()
+    long_value = "x" * 52
+    sink.add_json({}, json.dumps(
+        {"type": "change", "selector": "#isp", "strategy": "id",
+         "value": long_value, "ts": 1}))
+    over = "y" * (RECORDER_VALUE_MAX_CHARS + 10)
+    sink.add_json({}, json.dumps(
+        {"type": "fill", "selector": "#user", "strategy": "id",
+         "value": over, "ts": 2}))
+    actions = sink.recorded_actions()
+    assert actions[0]["value"] == long_value, "52 字值完整保留"
+    assert len(actions[1]["value"]) == RECORDER_VALUE_MAX_CHARS, \
+        "超长值按 512 值预算截断（NDJSON 行纪律），非 40 字展示预算"
+
+
 def test_recorder_sink_fill_merge_not_across_other_actions():
     """合并只看最近一条已记录动作：穿插其他动作后同目标 fill 各自保留。"""
     sink = RecorderSink()
@@ -797,11 +816,14 @@ def test_recorder_sink_navigate_and_fill_malformed_dropped():
 
 
 def test_recorder_sink_fill_value_defensive_clip():
-    """fill 字面值兜底截断（JS 已截断，此处防畸形/恶意载荷撑爆 IPC）。"""
+    """fill 字面值兜底截断（JS 已按值预算截断，此处防畸形/恶意载荷撑爆 IPC）。
+
+    预算是 512 值口径（回放数据，Codex 四轮），非 40 字展示口径。
+    """
     sink = RecorderSink()
     sink.add_json({}, json.dumps(
         {"type": "fill", "selector": "#a", "strategy": "id", "value": "x" * 600, "ts": 1}))
-    assert len(sink.recorded_actions()[0]["value"]) == RECORDER_TEXT_MAX_CHARS
+    assert len(sink.recorded_actions()[0]["value"]) == RECORDER_VALUE_MAX_CHARS
 
 
 def test_recorder_sink_accepts_frame_field():
@@ -1398,6 +1420,20 @@ def test_recorder_js_change_value_shift_passes_dedup_window():
     changes = [p for p in payloads if p["type"] == "change"]
     assert [c["value"] for c in changes] == ["cmcc", "ctcc"], \
         "窗口内值变的 change 必须双双放行（最终值由 Python 合并）"
+
+
+def test_recorder_js_long_value_not_display_truncated():
+    """录制值是回放数据：超 40 字展示预算的 select 值必须完整上报——
+    截断会让 select_option 找不到选项（Codex 四轮钉住）。"""
+    long_value = "v" * 52
+    payloads = _run_recorder_js(
+        "const isp = makeEl({ id: 'isp', tagName: 'SELECT' });"
+        f"isp.value = '{long_value}';"
+        "fire('change', { target: isp });"
+    )
+    changes = [p for p in payloads if p["type"] == "change"]
+    assert len(changes) == 1
+    assert changes[0]["value"] == long_value, "52 字值不得按 40 字展示预算截断"
 
 
 def test_recorder_js_structure_selector_anchors_body_when_depth_exhausted():
