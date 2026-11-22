@@ -423,7 +423,10 @@ jobs:
           per = {k: [0.0, 0.0] for k in DOMAINS}
           for f in files:
               for domain in DOMAINS:
-                  if f["filename"].startswith(f"src/{domain}/"):
+                  # llvm-cov 的 filename 为工作区绝对路径（前缀平台相关，本地
+                  # 与 CI 实测一致），相对形态一并兼容——首次真跑 0.00% 即此
+                  name = f["filename"]
+                  if name.startswith(f"src/{domain}/") or f"/src/{domain}/" in name:
                       per[domain][0] += f["summary"]["lines"]["covered"]
                       per[domain][1] += f["summary"]["lines"]["count"]
 
