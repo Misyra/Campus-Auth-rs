@@ -123,10 +123,14 @@ describe("AppDropdownMenu 行为层（E6）", () => {
 
     document.getElementById("outside")!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     // 慢 runner（CI windows 矩阵，PR #33）上关闭链路的宏任务队列超出 settle
-    // 的固定 20ms 真实预算，改 waitFor 轮询等最终态
-    await vi.waitFor(() => {
-      expect(document.querySelector(".tsk-menu")).toBeNull();
-    });
+    // 的固定 20ms 真实预算，改 waitFor 轮询等最终态；round 6 实测重度导入抖动
+    // （Import 占整轮 40%）下关闭可超 waitFor 1s 默认预算，放宽到 3s
+    await vi.waitFor(
+      () => {
+        expect(document.querySelector(".tsk-menu")).toBeNull();
+      },
+      { timeout: 3000, interval: 50 },
+    );
   });
 
   it("ArrowDown 高亮聚焦首项，Enter 选中并自动关闭（方向键 / 选择 / 关闭一体）", async () => {
