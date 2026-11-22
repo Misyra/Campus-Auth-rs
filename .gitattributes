@@ -9,3 +9,7 @@ Dockerfile text eol=lf
 .dockerignore text eol=lf
 docker-compose*.yml text eol=lf
 docker/docker-compose*.yml text eol=lf
+# openapi 契约与前端生成物参与逐字节比对（npm run typegen:check），Windows
+# 工作区必须 LF——autocrlf=true 检出 CRLF 后比对必失败（CI 首跑实锤）：
+openapi.json text eol=lf
+frontend/src/api/generated/api.d.ts text eol=lf

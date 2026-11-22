@@ -119,6 +119,10 @@ impl WorkerProcess {
                 health_task: idle(),
             },
             kill_tx: None,
+            // Job Object 字段为 Windows 门控（其余平台结构体无此字段），测试桩
+            // 同口径补 None——PR #33 CI windows 矩阵首跑抓出的缺字段
+            #[cfg(windows)]
+            job: None,
         }
     }
 }

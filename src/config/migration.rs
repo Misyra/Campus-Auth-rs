@@ -1677,6 +1677,7 @@ mod tests {
 
         // 注入写回失败：Unix 让方案目录只读（atomic_write_bytes 建临时文件即失败）；
         // Windows 让目标文件只读（rename 覆盖只读文件被拒绝）
+        #[cfg(unix)]
         let dir_perm = std::fs::metadata(&profiles_dir).unwrap().permissions();
         #[cfg(windows)]
         let file_perm = std::fs::metadata(&profile_path).unwrap().permissions();

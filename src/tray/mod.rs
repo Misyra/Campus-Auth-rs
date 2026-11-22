@@ -1104,13 +1104,16 @@ async fn copy_to_clipboard(text: &str) -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
+        // 候选命令长度不一：数组字面量按首元素推断定长 [&str; 1]，xclip 三元组
+        // 塞不进——统一 &[&str] 切片元素（linux 分支 macOS 不编译，此类错误
+        // 只有 CI linux 矩阵可见，PR #33 首跑抓出）
         for command in [
-            ["wl-copy"],
-            ["xclip", "-selection", "clipboard"],
-            ["xsel", "--clipboard", "--input"],
+            &["wl-copy"][..],
+            &["xclip", "-selection", "clipboard"][..],
+            &["xsel", "--clipboard", "--input"][..],
         ] {
             if which::which(command[0]).is_ok() {
-                return clipboard_via(&command, text).await;
+                return clipboard_via(command, text).await;
             }
         }
         Err("未找到可用的剪贴板工具（wl-copy / xclip / xsel），请手动复制".to_string())

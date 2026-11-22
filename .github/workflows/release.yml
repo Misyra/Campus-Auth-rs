@@ -43,9 +43,9 @@ jobs:
     name: OpenWrt 服务包与 LuCI 插件
     # 桌面发布任务已创建 Release 后再上传，复用版本说明并避免创建竞态。
     needs: build
-    # caller 级超时约束整条被调工作流（内部 build 60 / upload 15 / sdk 60 各自独立
-    # 生效）；90 为正常链路预算，QEMU/SDK 挂死不再拖满 runner 默认 6 小时
-    timeout-minutes: 90
+    # caller job 只允许 name/uses/with/secrets/needs/if/permissions——不支持
+    # timeout-minutes（CI 首跑 startup_failure 实锤，actionlint 钉死）；超时
+    # 预算由 openwrt.yml 内部各 job 的 timeout-minutes 承担（60/15/60）
     uses: ./.github/workflows/openwrt.yml
     permissions:
       actions: read
