@@ -6,24 +6,61 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use std::sync::Arc;
 
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 
 /// 背景图文件最大字节数（上传与远程下载统一）。
 pub(crate) const MAX_BACKGROUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 /// multipart 请求体需要为边界与字段头预留少量空间。
 pub(crate) const BACKGROUND_UPLOAD_BODY_LIMIT: usize = MAX_BACKGROUND_IMAGE_BYTES + 64 * 1024;
 
+// ---- 契约 DTO（T5-1c background 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。背景图读取是二进制图片
+// 响应（非 JSON），按真实下发的七种 MIME 逐一声明 binary 内容（范式同
+// repo 域 `RepoImageBody`）。
+
+/// GET /api/background/{filename} 200 响应体 schema 载体
+///
+/// wire 上是原始图片字节流（按存储扩展名对应的 MIME 下发），不是 JSON 包裹；
+/// 本类型仅用于把 OpenAPI schema 声明为
+/// `{"type": "string", "format": "binary"}`，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：仅在 OpenAPI 生成时被 utoipa 引用，字段值不参与任何
+// 运行时路径（handler 直接下发字节流），dead_code 属预期
+#[allow(dead_code)]
+pub struct BackgroundImageBody(Vec<u8>);
+
+/// POST /api/background/upload multipart `file` 字段的 schema 载体
+///
+/// `multipart/form-data` 单字段 `file`；字段值是图片字节，schema 声明为 binary。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：同 [`BackgroundImageBody`]，dead_code 属预期
+#[allow(dead_code)]
+pub struct BackgroundUploadFile(Vec<u8>);
+
+/// POST /api/background/upload 与 /api/background/fetch-url 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BackgroundUploadData {
+    /// 落盘文件名（`bg-<stem>-<uuid>.<ext>`，已做 Windows 设备名/ADS 消毒）
+    pub filename: String,
+    /// 可直接引用的相对 URL（`/api/background/<filename>`）
+    pub url: String,
+}
+
 // ---- 背景图管理 ----
 
 /// POST /api/background/fetch-url 请求体：待拉取的远程图片地址（仅允许 HTTPS，走 SSRF 防护通道）
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct BackgroundFetchBody {
     /// 图片 URL
     pub url: String,
@@ -65,23 +102,10 @@ fn ext_from_content_type(ct: &str) -> Option<&'static str> {
 }
 
 /// 根据 magic bytes 识别图片格式（Content-Type 缺失或不可信时兜底）
-fn ext_from_magic(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("webp")
-    } else if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
-        Some("png")
-    } else if bytes.len() >= 3 && &bytes[0..3] == b"\xFF\xD8\xFF" {
-        Some("jpg")
-    } else if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
-        Some("gif")
-    } else if bytes.len() >= 2 && &bytes[0..2] == b"BM" {
-        Some("bmp")
-    } else if bytes.len() >= 4 && (&bytes[0..4] == b"\x00\x00\x01\x00") {
-        Some("ico")
-    } else {
-        None
-    }
-}
+///
+/// 六格式判定已上提至 `crate::web::validate`（与 repo 域 `detect_image_mime`
+/// 共用同一 [`crate::web::validate::ImageMagic`] 实现），本域取规范化扩展名。
+use crate::web::validate::{detect_image_mime, ext_from_magic};
 
 /// 按真实文件签名验证背景图，返回规范化扩展名。
 fn validate_background_image(bytes: &[u8], content_type: &str) -> Result<&'static str, ApiError> {
@@ -138,6 +162,9 @@ fn background_filename(original: Option<String>, ext: &str) -> String {
 }
 
 /// 在读取远程响应时执行实际字节数上限，不能只信任可缺失或可伪造的 Content-Length。
+///
+/// 流式循环已上提至 `crate::web::validate::read_stream_capped`（与 repo 域
+/// 仓库代理共用），本函数保留 Content-Length 预检与背景图专属错误文案。
 async fn read_response_limited(
     response: reqwest::Response,
     limit: usize,
@@ -151,24 +178,43 @@ async fn read_response_limited(
             limit / (1024 * 1024)
         )));
     }
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| ApiError::Internal(format!("读取图片字节失败: {e}")))?;
-        if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(ApiError::BadRequest(format!(
-                "远程图片超过 {}MB 上限",
-                limit / (1024 * 1024)
-            )));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
+    crate::web::validate::read_stream_capped(
+        response,
+        limit,
+        || ApiError::BadRequest(format!("远程图片超过 {}MB 上限", limit / (1024 * 1024))),
+        |e| ApiError::Internal(format!("读取图片字节失败: {e}")),
+    )
+    .await
 }
 
 /// GET /api/background/{filename} — 获取背景图
 ///
 /// 返回原始图片字节 + 正确 Content-Type，供前端 CSS url() 直接引用。
+#[utoipa::path(
+    get,
+    path = "/api/background/{filename}",
+    operation_id = "get_api_background_filename",
+    tag = "background",
+    params(("filename" = String, Path, description = "背景图文件名（拒绝路径穿越）")),
+    responses(
+        // 图片端点：200 是二进制图片而非 JSON 信封，按真实下发的七种 MIME
+        // 逐一声明 binary 内容（错误路径仍是统一 JSON 错误信封）
+        (status = 200, description = "背景图原始字节（MIME 按存储扩展名下发，非 JSON 信封）",
+            content(
+                (BackgroundImageBody = "image/png"),
+                (BackgroundImageBody = "image/jpeg"),
+                (BackgroundImageBody = "image/gif"),
+                (BackgroundImageBody = "image/webp"),
+                (BackgroundImageBody = "image/bmp"),
+                (BackgroundImageBody = "image/x-icon"),
+                (BackgroundImageBody = "application/octet-stream"),
+            ),
+        ),
+        (status = 400, description = "文件名非法、SVG 背景图、超出大小上限、符号链接或不是有效位图", body = ErrorResponse),
+        (status = 404, description = "背景图不存在", body = ErrorResponse),
+        (status = 500, description = "文件读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_background(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
@@ -187,6 +233,22 @@ pub async fn get_background(
     if !path.exists() {
         return Err(ApiError::NotFound(format!("背景图 {} 不存在", safe_name)));
     }
+    // 免鉴权 GET 与 debug 截图（debug_screenshot）同款三件套防护（H4 口径）：
+    // ① symlink_metadata + is_symlink 拒绝符号链接——本端点免鉴权（`<img>` /
+    //    CSS url() 无法携带鉴权头），目录内的链接文件不得作为逃逸读取目录
+    //    外内容的通道（与 WS 内联 ws.rs 同一先例）；
+    // ② 读取字节上限——与上传/导入同用 `MAX_BACKGROUND_IMAGE_BYTES`：免鉴权
+    //    出口仍拒绝任意大文件拉取，但 GET 与写入必须同口径，否则 8–10MiB 的
+    //    背景图上传成功却永远渲染不出来（升级还会让已保存图失效）；
+    // ③ magic 校验——只放行六格式位图（清单同下方 mime 匹配），目录被塞入
+    //    任意文件后无法借本端点外发
+    let meta = tokio::fs::symlink_metadata(&path).await?;
+    if !meta.is_file()
+        || meta.file_type().is_symlink()
+        || meta.len() > MAX_BACKGROUND_IMAGE_BYTES as u64
+    {
+        return Err(ApiError::BadRequest("背景图文件超出大小限制或非法".into()));
+    }
     let bytes = tokio::fs::read(&path).await?;
     let ext = path
         .extension()
@@ -195,6 +257,13 @@ pub async fn get_background(
         .to_lowercase();
     if ext == "svg" {
         return Err(ApiError::BadRequest("不支持 SVG 背景图".into()));
+    }
+    // magic 校验在 MIME 下发前执行：字节必须命中六格式位图之一（SVG 等
+    // 可执行格式与任意文本在结构上即被拒绝）
+    if detect_image_mime(&bytes).is_none() {
+        return Err(ApiError::BadRequest(
+            "背景图文件不是有效的 PNG/JPEG/GIF/WebP/BMP/ICO 图片".into(),
+        ));
     }
     let mime = match ext.as_str() {
         "png" => "image/png",
@@ -209,6 +278,22 @@ pub async fn get_background(
 }
 
 /// POST /api/background/upload — 上传背景图（multipart/form-data，字段名 file）
+#[utoipa::path(
+    post,
+    path = "/api/background/upload",
+    operation_id = "post_api_background_upload",
+    tag = "background",
+    request_body(
+        content = BackgroundUploadFile,
+        content_type = "multipart/form-data",
+        description = "字段名 file：图片文件（PNG/JPEG/GIF/WebP/BMP/ICO，≤10 MiB，拒绝 SVG，声明类型须与 magic bytes 一致）",
+    ),
+    responses(
+        (status = 200, description = "已落盘并返回可访问 URL", body = DataEnvelope<BackgroundUploadData>),
+        (status = 400, description = "multipart 解析失败、缺 file 字段、文件为空、超过 10 MiB、SVG、格式无法识别或声明类型与实际内容不一致", body = ErrorResponse),
+        (status = 500, description = "文件落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn upload_background(
     State(config): State<Arc<dyn ConfigApi>>,
     mut multipart: axum::extract::Multipart,
@@ -245,6 +330,18 @@ pub async fn upload_background(
 }
 
 /// POST /api/background/fetch-url — 从 URL 获取背景图
+#[utoipa::path(
+    post,
+    path = "/api/background/fetch-url",
+    operation_id = "post_api_background_fetch_url",
+    tag = "background",
+    request_body = BackgroundFetchBody,
+    responses(
+        (status = 200, description = "图片已落盘并返回可访问 URL", body = DataEnvelope<BackgroundUploadData>),
+        (status = 400, description = "URL 非法 / 非 HTTPS、SSRF 防护拒绝、返回非图片 Content-Type、超过 10 MiB、SVG 或声明类型与实际内容不一致", body = ErrorResponse),
+        (status = 500, description = "图片字节读取或落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn fetch_url_background(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<BackgroundFetchBody>,
@@ -302,6 +399,19 @@ pub async fn fetch_url_background(
 }
 
 /// DELETE /api/background/{filename} — 删除背景图
+#[utoipa::path(
+    delete,
+    path = "/api/background/{filename}",
+    operation_id = "delete_api_background_filename",
+    tag = "background",
+    params(("filename" = String, Path, description = "背景图文件名（拒绝路径穿越）")),
+    responses(
+        (status = 200, description = "已删除（data 为 \"ok\"）", body = DataEnvelope<String>),
+        (status = 400, description = "文件名非法", body = ErrorResponse),
+        (status = 404, description = "背景图不存在", body = ErrorResponse),
+        (status = 500, description = "文件删除失败", body = ErrorResponse),
+    )
+)]
 pub async fn delete_background(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(filename): Path<String>,
@@ -495,6 +605,51 @@ mod route_tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()["content-type"], "image/png");
+    }
+
+    /// 符号链接拒绝（H4 三件套）：目录内指向外部的链接文件不得经免鉴权 GET
+    /// 逃逸读取（参照 debug 截图侧同口径；Windows 无创建符号链接权限故仅 Unix）
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn get_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("config").join("background");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 目录外目标：若防护缺失，链接即成免鉴权逃逸读取通道
+        let secret = tmp.path().join("secret.png");
+        std::fs::write(&secret, png_bytes()).unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("link.png")).unwrap();
+        let (app, _) = mock_app(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/background/link.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 非图片字节拒绝（magic 校验）：免鉴权出口不下发任意文件
+    #[tokio::test]
+    async fn get_rejects_non_image_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("config").join("background");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.png"), b"not-an-image-at-all").unwrap();
+        let (app, _) = mock_app(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/background/x.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     fn multipart_file(boundary: &str, filename: &str, content_type: &str, bytes: &[u8]) -> Vec<u8> {

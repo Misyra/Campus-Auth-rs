@@ -77,7 +77,9 @@ impl InstanceLock {
     pub fn record_port(&self, port: u16) -> anyhow::Result<()> {
         let pid = std::process::id();
         let data = format!("{pid}\n{port}\n");
-        std::fs::write(&self.info_path, data)?;
+        // 原子写（tempfile + persist + fsync）：崩溃只可能留下旧完整内容或新完整内容，
+        // 不会留半截文件导致 query_instance 解析失败
+        crate::utils::atomic_write_bytes(&self.info_path, data.as_bytes())?;
         Ok(())
     }
 }
@@ -119,7 +121,7 @@ pub fn query_instance(base_path: &Path) -> Option<InstanceInfo> {
 
 /// 优雅停止运行实例
 ///
-/// 通过 HTTP POST `/api/system/shutdown` 通知实例关闭，然后轮询等待进程退出（最多 10 秒）。
+/// 通过 HTTP POST `/api/system/shutdown` 通知实例关闭，然后轮询等待进程退出（最多 30 秒）。
 pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     let info =
         query_instance(base_path).ok_or_else(|| anyhow::anyhow!("未找到运行中的实例信息"))?;
@@ -131,7 +133,14 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
     }
 
     if info.port == 0 {
-        anyhow::bail!("实例运行于轻量模式且 Web 控制台尚未启动，无法远程停止；请通过系统托盘退出");
+        // 轻量模式无 Web 控制台可发关机请求；托盘指引只对有托盘的实例成立
+        //（轻量 + 显式无托盘的组合里托盘不存在，P3-40），必须同时给出
+        // 手动 kill 出口，否则指引是死路
+        anyhow::bail!(
+            "实例运行于轻量模式且 Web 控制台尚未启动，无法远程停止；\
+             若有系统托盘请从托盘退出，否则请手动结束进程（PID {}）",
+            info.pid
+        );
     }
 
     // 发送关机请求（忽略 HTTP 错误，进程可能已开始关闭）。
@@ -151,12 +160,14 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
         tracing::debug!("停止请求发送失败（目标进程可能已退出）: {e}");
     }
 
-    // 轮询等待进程退出；上限须覆盖优雅关闭的最坏预算
-    // （bridge 3s + scheduler 5s + engine 8s = 16s），取 20s 留余量。
+    // 轮询等待进程退出；上限须覆盖优雅关闭的最坏预算（P3-12）：
+    // 托盘 3s + scheduler 5s + engine 5s + bridge 8s + axum 5s ≈ 26s，
+    // 与 shutdown 侧 spawn_exit_watchdog 统一取 30s——轮询上限低于该值
+    // 会在 Windows 慢场景把仍在正常关闭中的实例误报成「停止失败」。
     // unix 附加"监听端口已关闭"判据：若父进程未回收子进程，已退出的实例
     // 会以僵尸形态存在，kill(pid,0) 仍返回成功——此时端口关闭才是可靠的
     // 停止信号（shutdown POST 已送达，Axum 关闭即代表实例已停止）。
-    for _ in 0..200 {
+    for _ in 0..300 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !is_process_alive(info.pid) {
             return Ok(());
@@ -166,12 +177,14 @@ pub async fn stop_instance(base_path: &Path) -> anyhow::Result<()> {
         }
     }
 
-    anyhow::bail!("等待进程退出超时（20 秒）")
+    anyhow::bail!("等待进程退出超时（30 秒）")
 }
 
 /// 校验 PID 是否为本程序实例（防 PID 复用误杀）
 ///
 /// 比对目标进程可执行文件名是否含 `campus-auth`；取不到路径时保守返回 false。
+/// 同时接受下划线拼写 `campus_auth`：部署产物为连字符，而 cargo 测试二进制为
+/// `campus_auth-<hash>`，两者都是本程序，不应因文件名分隔符差异而漏识别。
 pub fn is_own_process(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -192,20 +205,53 @@ pub fn is_own_process(pid: u32) -> bool {
                 return false;
             }
             let path = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
-            path.contains("campus-auth")
+            path.contains("campus-auth") || path.contains("campus_auth")
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 无 /proc：用 libproc.h 的 proc_pidpath（extern "C" 直接声明，无需新依赖）
+        // 取目标 PID 的可执行路径。缓冲区取 PROC_PIDPATHINFO_MAXSIZE = 4 * 1024。
+        let mut buf = [0u8; 4096];
+        // SAFETY: 缓冲区指针与容量如实传入；proc_pidpath 只在缓冲区内写入并返回实际长度
+        let len = unsafe {
+            proc_pidpath(
+                pid as libc::pid_t,
+                buf.as_mut_ptr().cast::<libc::c_void>(),
+                buf.len() as libc::c_uint,
+            )
+        };
+        // 取不到路径（进程已退出/无权限）按「非本进程」保守处理：误判 false 只会
+        // 跳过 kill、清理残留后重新抢锁（代价小）；误判 true 则会杀掉疑似 PID 复用的
+        // 无辜进程（不可接受），所以失败方向必须选 false。
+        if len <= 0 {
+            return false;
+        }
+        let path = String::from_utf8_lossy(&buf[..len as usize]).to_lowercase();
+        // 本 cfg 块即函数末尾分支：块尾表达式就是返回值，不存在会误落入的尾部 false
+        path.contains("campus-auth") || path.contains("campus_auth")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // /proc/<pid>/exe 读不到（已退出/无权限）即视为非本程序
         if let Ok(link) = std::fs::read_link(format!("/proc/{pid}/exe")) {
             let s = link.to_string_lossy().to_lowercase();
             // 必须显式 return：漏写会静默落到末尾的 false，unix 上 --force 永远杀不掉旧实例
-            return s.contains("campus-auth");
+            return s.contains("campus-auth") || s.contains("campus_auth");
         }
-        // macOS 无 /proc：退化为保守拒绝（由调用方清理残留文件后抢锁）
+        // 未知平台无 /proc：退化为保守拒绝（由调用方清理残留文件后抢锁）
         false
     }
+}
+
+// 目标 PID 的可执行文件路径（macOS libproc，返回路径长度，失败返回 0）
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn proc_pidpath(
+        pid: libc::pid_t,
+        buffer: *mut libc::c_void,
+        buffersize: libc::c_uint,
+    ) -> libc::c_int;
 }
 
 /// 强制杀死指定 PID 的进程
@@ -323,5 +369,83 @@ mod tests {
             assert!(query_instance(dir.path()).is_some());
         }
         assert!(query_instance(dir.path()).is_none());
+    }
+
+    /// record_port 走原子写：persist 后 config 目录不留 `.tmp_` 临时残留
+    #[test]
+    fn test_record_port_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let lock = InstanceLock::try_acquire(dir.path()).expect("加锁");
+        lock.record_port(54323).expect("记录端口");
+        let config_dir = crate::utils::paths::config_dir(dir.path());
+        let leftovers: Vec<_> = std::fs::read_dir(&config_dir)
+            .expect("读 config 目录")
+            .map(|e| e.expect("目录项"))
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp_"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "record_port 后不应残留临时文件: {leftovers:?}"
+        );
+    }
+
+    /// P3-40：轻量模式（端口未监听）下 `--stop` 无法远程停止，错误指引必须
+    /// 同时给出手动 kill 出口——「轻量 + 显式无托盘」组合里托盘指引是死路
+    #[tokio::test]
+    async fn stop_instance_lightweight_without_console_reports_kill_exit() {
+        let dir = tempfile::tempdir().expect("创建临时目录");
+        let info_path = crate::utils::paths::instance_info_path(dir.path());
+        std::fs::create_dir_all(info_path.parent().expect("父目录")).unwrap();
+        // 自身 PID + 端口 0：query_instance 判定存活、无端口可发关机请求
+        std::fs::write(&info_path, format!("{}\n0\n", std::process::id())).unwrap();
+        let err = stop_instance(dir.path())
+            .await
+            .expect_err("轻量模式必须无法远程停止");
+        let message = format!("{err:#}");
+        assert!(message.contains("轻量模式"), "{message}");
+        // kill 出口指引：须含手动结束提示与实例 PID
+        assert!(message.contains("手动结束进程"), "{message}");
+        assert!(
+            message.contains(&std::process::id().to_string()),
+            "指引须带实例 PID: {message}"
+        );
+    }
+
+    /// 自身 PID 必须识别为本程序进程
+    ///
+    /// macOS 走 proc_pidpath、Linux 走 /proc/exe；cargo 测试二进制名为
+    /// `campus_auth-<hash>`，依赖实现里的下划线归一才能命中。
+    #[cfg(unix)]
+    #[test]
+    fn test_is_own_process_self_pid() {
+        assert!(is_own_process(std::process::id()));
+    }
+
+    /// 异名子进程（/bin/sleep）路径不含 campus-auth，不得误判为本程序进程
+    #[cfg(unix)]
+    #[test]
+    fn test_is_own_process_foreign_child_is_false() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn /bin/sleep");
+        let pid = child.id();
+        assert!(!is_own_process(pid), "/bin/sleep 不应被识别为本程序");
+        child.kill().expect("终止 sleep 子进程");
+        child.wait().expect("回收 sleep 子进程");
+    }
+
+    /// 已退出并被回收的 PID 取不到路径，按保守方向返回 false
+    #[cfg(unix)]
+    #[test]
+    fn test_is_own_process_dead_pid_is_false() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn /bin/sleep");
+        let pid = child.id();
+        child.kill().expect("终止 sleep 子进程");
+        child.wait().expect("回收 sleep 子进程");
+        assert!(!is_own_process(pid), "已回收的 PID 不应被识别为本程序");
     }
 }

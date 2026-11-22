@@ -10,8 +10,10 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use utoipa::ToSchema;
 
 use crate::ai::prompt::CaptureContext;
 use crate::ai::{self, LlmSettings};
@@ -20,7 +22,139 @@ use crate::config::ConfigApi;
 use crate::environment::EnvironmentApi;
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::operations::{OperationRegistration, WebOperations};
+
+// ---- 契约 DTO（T5-1c ai 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。LLM 配置/模型列表/捕获状态
+// 等本地可定形面定义强类型 DTO；捕获正文（Worker page_capture 定义）与生成流
+// 事件帧由 Worker / LLM 编排定义——捕获响应以 `DataEnvelope<Value>` 诚实标注，
+// SSE 流事件帧的字段级契约归 T5-4 流事件批次（本端点只注解 HTTP 触发面）。
+
+/// GET/PUT /api/ai/llm-config 响应载荷（脱敏视图）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LlmConfigData {
+    /// 服务商标识（glm / deepseek / custom 等，`crate::ai::validate_provider` 口径）
+    pub provider: String,
+    /// API Base URL
+    pub base_url: String,
+    /// 模型名
+    pub model: String,
+    /// 是否已设置 API Key（Key 本体永不出站）
+    pub has_api_key: bool,
+    /// 已保存过 Key 的服务商列表
+    pub configured_providers: Vec<String>,
+    /// 单次生成 max_tokens 上限；null 表示交由服务商默认
+    pub max_tokens: Option<u32>,
+}
+
+/// PUT /api/ai/llm-config 请求体
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LlmConfigUpdateBody {
+    /// 服务商标识；缺省时按 base_url 推断
+    pub provider: Option<String>,
+    /// API Base URL（必填；做 URL 规范化与 provider 匹配校验）
+    pub base_url: String,
+    /// 模型名（必填）
+    pub model: String,
+    /// API Key 三态：缺省保持不变、空串清除、非空更新（AES-256-GCM 加密落盘）
+    pub api_key: Option<String>,
+    /// 单次生成 max_tokens 上限（1..=200000）：缺省保持不变、null 恢复服务商默认
+    pub max_tokens: Option<u32>,
+}
+
+/// POST /api/ai/llm-config/test 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LlmConnectionTestData {
+    /// 链路与凭据是否连通（回复被测试上限截断也算连通，附 note）
+    pub connected: bool,
+    /// 测试耗时（毫秒）
+    pub latency_ms: u64,
+    /// 实际请求的 chat/completions 端点
+    pub request_url: String,
+    /// 截断说明（回复被 256 token 测试上限截断时出现）
+    pub note: Option<String>,
+}
+
+/// POST /api/ai/models 请求体
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LlmModelsBody {
+    /// 服务商标识；缺省时按 base_url 推断
+    pub provider: Option<String>,
+    /// API Base URL（必填）
+    pub base_url: String,
+    /// API Key；缺省或空串回退该服务商已保存的 Key
+    pub api_key: Option<String>,
+}
+
+/// POST /api/ai/models 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LlmModelsData {
+    /// 模型数量
+    pub count: usize,
+    /// 模型 ID 列表
+    pub models: Vec<String>,
+}
+
+/// POST /api/ai/capture 请求体
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CaptureBody {
+    /// 待捕获页面 URL（http/https）
+    pub url: String,
+}
+
+/// GET /api/ai/capture/status 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CaptureStatusData {
+    /// 最近一次捕获产物是否完整可用（meta + page.html + screenshot.png 齐备且 meta 可解析）
+    pub available: bool,
+    /// 原始请求 URL（不可用时缺省）
+    pub request_url: Option<String>,
+    /// 导航最终 URL（不可用时缺省）
+    pub final_url: Option<String>,
+    /// 页面标题（不可用时缺省）
+    pub title: Option<String>,
+    /// 页面结构摘要（捕获时原值透传，不可用时缺省）
+    pub structure_summary: Option<Value>,
+}
+
+/// POST /api/ai/generate/stream 请求体
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GenerateStreamBody {
+    /// 追加到提示词的用户补充说明（≤4000 字符，可省略）
+    pub extra_prompt: Option<String>,
+}
+
+/// POST /api/ai/generate/stream 200 响应体 schema 载体
+///
+/// wire 上是 `text/event-stream` 逐帧文本（`data: <json>\n\n`），非 JSON 信封；
+/// 本类型仅声明帧的文本形态（`{"type": "string"}`，非 Binary）。事件帧 type 枚举
+/// （started / attempt_start / delta / attempt_delta_done / validation_failed /
+/// retrying / validated / done / error）的字段级契约由 T5-4 流事件批次钉死。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String)]
+// 纯 schema 载体：dead_code 属预期
+#[allow(dead_code)]
+pub struct GenerateStreamFrame(Vec<u8>);
+
+/// GET /api/ai/capture/screenshot 200 响应体 schema 载体（PNG 字节流）
+///
+/// 同 repo 域 `RepoImageBody` 的二进制载体范式，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：dead_code 属预期
+#[allow(dead_code)]
+pub struct CaptureScreenshotBody(Vec<u8>);
+
+/// GET /api/ai/capture/bundle 200 响应体 schema 载体（zip 字节流）
+///
+/// 同 repo 域 `RepoImageBody` 的二进制载体范式，不参与序列化。
+#[derive(Debug, ToSchema)]
+#[schema(value_type = String, format = Binary)]
+// 纯 schema 载体：dead_code 属预期
+#[allow(dead_code)]
+pub struct CaptureBundleBody(Vec<u8>);
 
 /// capture 单次超时：导航 + networkidle 等待 + CDP 资源快照，宽于常规命令
 const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -46,6 +180,15 @@ fn masked_view(settings: &LlmSettings) -> Value {
 }
 
 /// GET /api/ai/llm-config — 读取 LLM 配置（脱敏）
+#[utoipa::path(
+    get,
+    path = "/api/ai/llm-config",
+    operation_id = "get_api_ai_llm_config",
+    tag = "ai",
+    responses(
+        (status = 200, description = "脱敏后的 LLM 配置（API Key 永不出站，仅 has_api_key 布尔位）", body = DataEnvelope<LlmConfigData>),
+    )
+)]
 pub async fn get_llm_config(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -58,6 +201,18 @@ pub async fn get_llm_config(
 /// body: `{ provider?, base_url, model, api_key?, max_tokens? }`。`api_key` 缺省表示保持不变，
 /// 空串表示清除，非空表示更新（AES-256-GCM 加密落盘）；`max_tokens` 为整数或
 /// `null`（不携带该字段，交由服务商默认），缺省表示保持不变。
+#[utoipa::path(
+    put,
+    path = "/api/ai/llm-config",
+    operation_id = "put_api_ai_llm_config",
+    tag = "ai",
+    request_body = LlmConfigUpdateBody,
+    responses(
+        (status = 200, description = "已保存，返回脱敏视图", body = DataEnvelope<LlmConfigData>),
+        (status = 400, description = "请求体非对象 / 缺 base_url / 模型名为空 / URL 非法（userinfo、非 http(s)）/ 服务商与地址不匹配 / max_tokens 越界", body = ErrorResponse),
+        (status = 500, description = "API Key 加密或配置落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn put_llm_config(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<Value>,
@@ -122,6 +277,17 @@ pub async fn put_llm_config(
 /// 判定口径是"能通"而非"输出完整"：模型回复被 max_tokens 截断（推理/话痨模型的
 /// 常见表现）、或 HTTP 200 却没吐正文，都说明链路与凭据正常，按连通返回并附 `note`
 /// 说明；只有真正的传输/鉴权/协议错误才判失败。
+#[utoipa::path(
+    post,
+    path = "/api/ai/llm-config/test",
+    operation_id = "post_api_ai_llm_config_test",
+    tag = "ai",
+    responses(
+        (status = 200, description = "链路与凭据连通（回复被 256 token 测试上限截断也判连通并附 note）", body = DataEnvelope<LlmConnectionTestData>),
+        (status = 400, description = "未保存 LLM 配置或 API Key 解密失败", body = ErrorResponse),
+        (status = 503, description = "连接测试超时（30 秒）、传输/协议错误或远端返回错误状态（含 4xx/5xx）", body = ErrorResponse),
+    )
+)]
 pub async fn test_llm_connection(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -176,6 +342,18 @@ pub async fn test_llm_connection(
 /// body: `{ provider, base_url, api_key? }`。`api_key` 缺省或为空时回退到该服务商
 /// **已保存** 的 Key，因此「选服务商 → 拉列表 → 选模型 → 保存」这条顺序可用，
 /// 不必为了看列表先存一次配置（GLM/DeepSeek 的 `/models` 需要鉴权）。
+#[utoipa::path(
+    post,
+    path = "/api/ai/models",
+    operation_id = "post_api_ai_models",
+    tag = "ai",
+    request_body = LlmModelsBody,
+    responses(
+        (status = 200, description = "当前服务商可用模型 ID 列表", body = DataEnvelope<LlmModelsData>),
+        (status = 400, description = "请求体非对象 / 缺 base_url / URL 或服务商校验失败 / Key 解密失败 / 远端返回 4xx（原文透传）", body = ErrorResponse),
+        (status = 503, description = "模型列表请求超时、建连失败或远端返回 5xx", body = ErrorResponse),
+    )
+)]
 pub async fn list_models(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<Value>,
@@ -231,6 +409,22 @@ pub async fn list_models(
 ///
 /// body: `{ url }`。产物固定写入 `captures/latest/`（Worker 侧落盘，响应只回
 /// 轻量元数据——NDJSON 单行上限 1 MiB，门户页 HTML/JS 普遍超限）。
+#[utoipa::path(
+    post,
+    path = "/api/ai/capture",
+    operation_id = "post_api_ai_capture",
+    tag = "ai",
+    request_body = CaptureBody,
+    responses(
+        // 捕获正文（request_url/final_url/title/structure_summary 等）由 Worker
+        // page_capture 定义，以 Value 诚实标注；screenshot_url 为本端点追加的固定字段
+        (status = 200, description = "捕获完成：Worker 捕获元数据（形状由 Worker page_capture 定义）+ screenshot_url（固定 /api/ai/capture/screenshot）", body = DataEnvelope<Value>),
+        (status = 400, description = "缺少 url 或协议非 http/https", body = ErrorResponse),
+        (status = 409, description = "页面捕获或任务生成正在进行（单飞登记）或 Worker 忙", body = ErrorResponse),
+        (status = 503, description = "Python 环境未就绪或 Worker 不可用（未安装/启动超时/网络出口受限）", body = ErrorResponse),
+        (status = 500, description = "捕获失败（透传 Worker 错误）", body = ErrorResponse),
+    )
+)]
 pub async fn capture(
     State(bridge): State<Arc<dyn BridgeApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -288,6 +482,19 @@ pub async fn capture(
 ///
 /// `<img>` 引用无法携带自定义鉴权头（同 debug 截图豁免先例），路径固定于
 /// `captures/latest/`，无用户输入参与，不存在穿越面。
+#[utoipa::path(
+    get,
+    path = "/api/ai/capture/screenshot",
+    operation_id = "get_api_ai_capture_screenshot",
+    tag = "ai",
+    responses(
+        (status = 200, description = "最近一次捕获的截图 PNG 原始字节（非 JSON 信封）",
+            content((CaptureScreenshotBody = "image/png")),
+        ),
+        (status = 404, description = "尚无捕获截图，请先执行捕获", body = ErrorResponse),
+        (status = 500, description = "截图文件读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn capture_screenshot(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -302,6 +509,15 @@ pub async fn capture_screenshot(
 /// GET /api/ai/capture/status — 查询最近一次捕获产物是否可用
 ///
 /// 页面刷新后前端据此恢复捕获状态（避免强制重新捕获）；meta 损坏按不可用处理。
+#[utoipa::path(
+    get,
+    path = "/api/ai/capture/status",
+    operation_id = "get_api_ai_capture_status",
+    tag = "ai",
+    responses(
+        (status = 200, description = "最近一次捕获产物可用性与元信息（不可用时仅 available=false）", body = DataEnvelope<CaptureStatusData>),
+    )
+)]
 pub async fn capture_status(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -423,6 +639,23 @@ async fn finalize_generation(
 /// 每个 LLM 增量、校验/重试状态均以 `data: <json>` 帧发出，前端据此在
 /// 最下方同步展示进度（流式文本预览 + 步骤状态）。请求同时受分块空闲超时与
 /// 10 分钟总预算约束，持续输出也不会超过总预算。
+#[utoipa::path(
+    post,
+    path = "/api/ai/generate/stream",
+    operation_id = "post_api_ai_generate_stream",
+    tag = "ai",
+    request_body = GenerateStreamBody,
+    responses(
+        // SSE 流式响应：本批只注解 HTTP 触发面（状态码/内容类型/请求体），
+        // 事件帧的字段级契约归 T5-4 流事件批次
+        (status = 200, description = "SSE 流（text/event-stream）：`data: <json>` 帧推送 LLM 增量与校验/重试状态，全流程总预算 10 分钟，`: keepalive` 注释帧保活；同一时刻至多一个生成任务，客户端断连将取消后端 LLM 调用；帧 type 枚举 started/attempt_start/delta/attempt_delta_done/validation_failed/retrying/validated/done/error 的字段级契约由 T5-4 钉死",
+            content((GenerateStreamFrame = "text/event-stream")),
+        ),
+        (status = 400, description = "未配置 LLM / API Key 解密失败 / 尚无捕获产物或截图缺失", body = ErrorResponse),
+        (status = 409, description = "页面捕获或任务生成正在进行（单飞登记）", body = ErrorResponse),
+        (status = 500, description = "捕获元数据损坏或 HTML 读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn generate_stream(
     State(config): State<Arc<dyn ConfigApi>>,
     State(tasks): State<Arc<dyn TaskApi>>,
@@ -636,6 +869,20 @@ async fn load_capture_context(
 /// 活 DOM，喂给 LLM 的材质）+ page.offline.html（资源引用改写到 resources/ 的
 /// 离线还原副本）+ page_structure.json + CSS/JS 资源快照 + 截图 + meta.json。
 /// 供离线分析或分享适配；需鉴权。
+#[utoipa::path(
+    get,
+    path = "/api/ai/capture/bundle",
+    operation_id = "get_api_ai_capture_bundle",
+    tag = "ai",
+    responses(
+        // 二进制导出包：200 是 zip 字节流而非 JSON 信封
+        (status = 200, description = "最近一次捕获的完整页面文件 zip（MHTML / page.html / 离线副本 / 结构 JSON / CSS-JS 资源 / 截图 / meta.json；超 50 MiB 预算的文件跳过并附 _skipped_by_quota.txt 清单）",
+            content((CaptureBundleBody = "application/zip")),
+        ),
+        (status = 404, description = "尚无捕获产物，请先执行页面捕获", body = ErrorResponse),
+        (status = 500, description = "压缩包写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn capture_bundle(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -658,6 +905,10 @@ pub async fn capture_bundle(
         let opts = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
             .unix_permissions(0o644);
+        // zip 写入失败 → 统一中文动作标签（原始 zip/IO 错误文本保留在末尾供排障）
+        fn zip_err<E: std::fmt::Display>(e: E) -> ApiError {
+            ApiError::Internal(format!("写入导出压缩包失败: {e}"))
+        }
 
         // 按预算判定可收入的文件：读前先查大小，超限跳过并记录说明
         async fn read_within_budget(
@@ -689,8 +940,8 @@ pub async fn capture_bundle(
             }
             match read_within_budget(&path, &mut total, MAX_CAPTURE_BYTES).await {
                 Some(bytes) => {
-                    zw.start_file(name, opts).map_err(ApiError::internal)?;
-                    zw.write_all(&bytes).map_err(ApiError::internal)?;
+                    zw.start_file(name, opts).map_err(zip_err)?;
+                    zw.write_all(&bytes).map_err(zip_err)?;
                 }
                 None => skipped.push(name.to_string()),
             }
@@ -704,8 +955,8 @@ pub async fn capture_bundle(
                 match read_within_budget(&entry.path(), &mut total, MAX_CAPTURE_BYTES).await {
                     Some(bytes) => {
                         zw.start_file(format!("resources/{name}"), opts)
-                            .map_err(ApiError::internal)?;
-                        zw.write_all(&bytes).map_err(ApiError::internal)?;
+                            .map_err(zip_err)?;
+                        zw.write_all(&bytes).map_err(zip_err)?;
                     }
                     None => skipped.push(format!("resources/{name}")),
                 }
@@ -714,7 +965,7 @@ pub async fn capture_bundle(
         // 跳过说明随 zip 附带，导出者能感知产物不完整而非默默缺失
         if !skipped.is_empty() {
             zw.start_file("_skipped_by_quota.txt", opts)
-                .map_err(ApiError::internal)?;
+                .map_err(zip_err)?;
             zw.write_all(
                 format!(
                     "以下文件因捕获包总量超过 {} MiB 上限被跳过：\n{}",
@@ -723,9 +974,9 @@ pub async fn capture_bundle(
                 )
                 .as_bytes(),
             )
-            .map_err(ApiError::internal)?;
+            .map_err(zip_err)?;
         }
-        zw.finish().map_err(ApiError::internal)?;
+        zw.finish().map_err(zip_err)?;
     }
     let bytes = buf.into_inner();
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");

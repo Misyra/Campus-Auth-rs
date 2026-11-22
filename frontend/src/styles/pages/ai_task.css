@@ -3,18 +3,20 @@
  * 顶部步进器 + 卡片完成态指示；流式输出与底部同步进度条为本次新增。
  */
 
-/* AI 生成页作为「任务」页的一个 Tab 由容器渲染。入场动画不再在此手抄——
-   统一出口见 layout.css 的 `.content-wrapper > *`（页面级，每个页面都自动带上）。 */
+/* AI 生成页作为「任务」页的嵌套路由由 TasksView 渲染，不是 content-wrapper 的
+   直接子层：入场动画由外层外壳的 `.page-in`（motion.css 基元）承担，本页根容器
+   不再手抄任何入场规则；切 Tab 属瞬时换内容，不重复播入场。 */
 .ai-task-page {
-  padding-bottom: 24px;
+  /* 页面差异：向导卡片较重，本页内容底部需要比外壳 padding 多一档呼吸空间 */
+  padding-bottom: var(--space-lg);
   --ai-rail: rgba(var(--primary-rgb), 0.16);
 }
 .ai-stepper {
   display: flex;
   align-items: center;
   gap: 0;
-  margin-bottom: 14px;
-  padding: 14px 18px;
+  margin-bottom: var(--space-md);
+  padding: var(--space-md);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: rgba(var(--primary-rgb), 0.035);
@@ -23,7 +25,7 @@
 .ai-step {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   font-size: var(--text-md);
   opacity: 0.7;
 }
@@ -46,7 +48,7 @@
 .ai-step-sep {
   flex: 1;
   height: 2px;
-  margin: 0 10px;
+  margin: 0 var(--space-sm);
   background: var(--border);
   border-radius: var(--radius-full);
 }
@@ -57,7 +59,7 @@
 .ai-task-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 18px;
+  gap: var(--space-md);
   align-items: start;
 }
 .ai-task-grid .card {
@@ -97,13 +99,13 @@
 .ai-provider-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin: 2px 0 16px;
+  gap: var(--space-sm);
+  margin: 2px 0 var(--space-md);
 }
 .ai-provider-card {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 4px 9px;
+  gap: var(--space-xs) var(--space-sm);
   min-height: 82px;
   padding: 12px;
   color: inherit;
@@ -134,7 +136,7 @@
   box-shadow: 0 0 0 4px rgba(var(--primary-rgb), 0.13);
 }
 .ai-provider-copy { display: flex; flex-direction: column; min-width: 0; }
-.ai-provider-copy small { margin-top: 3px; color: var(--text-secondary); line-height: 1.35; }
+.ai-provider-copy small { margin-top: var(--space-xs); color: var(--text-secondary); line-height: 1.35; }
 .ai-key-state {
   grid-column: 2;
   width: fit-content;
@@ -149,7 +151,7 @@
 .ai-capture-meta {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-xs);
   margin: 12px 0 var(--space-sm);
   font-size: var(--text-sm);
   opacity: 0.9;
@@ -164,15 +166,15 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  margin: 10px 0 14px;
+  gap: var(--space-sm);
+  margin: var(--space-sm) 0 var(--space-md);
   padding: 11px 12px;
   border: 1px solid rgba(var(--primary-rgb), 0.2);
   border-radius: var(--radius-sm);
   background: rgba(var(--primary-rgb), 0.055);
 }
 .ai-structure-summary span {
-  padding: 4px 9px;
+  padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-full);
   background: var(--bg-card);
   font-size: var(--text-sm);
@@ -207,7 +209,7 @@
   overflow-y: auto;
 }
 .ai-json-error {
-  margin-top: 4px;
+  margin-top: var(--space-xs);
   color: var(--error);
   font-size: var(--text-sm);
 }
@@ -234,9 +236,9 @@
 .ai-dev-notice {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   margin-bottom: 12px;
-  padding: 8px 12px;
+  padding: var(--space-sm) 12px;
   border: 1px solid rgba(var(--warning-rgb), 0.2);
   border-radius: var(--radius-sm);
   background: rgba(var(--warning-rgb), 0.1);
@@ -249,9 +251,9 @@
 .ai-capture-warn {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--space-sm);
   margin: 0 0 var(--space-sm);
-  padding: 8px 12px;
+  padding: var(--space-sm) 12px;
   border: 1px solid rgba(var(--warning-rgb), 0.2);
   border-radius: var(--radius-sm);
   background: rgba(var(--warning-rgb), 0.1);
@@ -259,21 +261,22 @@
   font-size: var(--text-sm);
   line-height: 1.6;
 }
-.ai-steps-hint {
-  margin-bottom: 16px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: rgba(var(--slate-rgb), 0.08);
+/* 步骤说明收进步进器行尾的 ？（FieldHelp）：常驻灰字块（三步 ol）改为悬停可见，
+   行内只占一个圆标；小屏步进器改三列网格后 ？ 移到整行居中（见下方 640px 分支，
+   不再隐藏——安卓 WebView 复用同一前端，触屏也要能看到使用步骤） */
+.ai-steps-help {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  flex: none;
 }
-.ai-steps-hint ol { margin: 6px 0 0; padding-left: 20px; }
-.ai-steps-hint li + li { margin-top: 4px; }
 
 .ai-config-toggle {
   display: flex;
   align-items: center;
   gap: 12px;
   width: 100%;
-  padding: 8px 12px;
+  padding: var(--space-sm) 12px;
   margin-bottom: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -301,15 +304,15 @@
 .ai-generate-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   flex-wrap: wrap;
-  margin: 10px 0 8px;
-  padding: 10px 12px;
+  margin: var(--space-sm) 0 var(--space-sm);
+  padding: var(--space-sm) 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: rgba(var(--slate-rgb), 0.04);
 }
-.ai-idle-group { display: flex; align-items: center; gap: 8px; flex: none; }
+.ai-idle-group { display: flex; align-items: center; gap: var(--space-sm); flex: none; }
 .ai-idle-label { font-weight: 600; font-size: var(--text-sm); white-space: nowrap; }
 .ai-idle-select { min-width: 160px; }
 .ai-idle-hint { flex: 1 1 220px; font-size: var(--text-sm); opacity: 0.78; }
@@ -326,20 +329,20 @@
 .ai-stream-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
   border-bottom: 1px solid var(--border);
   background: rgba(var(--slate-rgb), 0.06);
   font-size: var(--text-sm);
   flex-wrap: wrap;
 }
 .ai-stream-title { display: flex; align-items: center; gap: 6px; font-weight: 600; }
-.ai-stream-actions { margin-left: auto; display: flex; gap: 8px; }
+.ai-stream-actions { margin-left: auto; display: flex; gap: var(--space-sm); }
 .ai-stream-preview {
   max-height: 340px;
   overflow: auto;
   margin: 0;
-  padding: 10px 12px;
+  padding: var(--space-sm) 12px;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   line-height: 1.5;
@@ -351,12 +354,12 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 8px 10px;
+  padding: var(--space-sm);
   border-top: 1px solid var(--border);
   background: rgba(var(--slate-rgb), 0.02);
 }
 .ai-stream-chip {
-  padding: 2px 8px;
+  padding: 2px var(--space-sm);
   border-radius: var(--radius-full);
   font-size: var(--text-xs);
   background: rgba(var(--slate-rgb), 0.1);
@@ -371,7 +374,7 @@
   position: sticky;
   bottom: 10px;
   z-index: var(--z-sticky);
-  margin-top: 16px;
+  margin-top: var(--space-md);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-card);
@@ -381,8 +384,8 @@
 .ai-bottom-progress-inner {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: var(--space-sm);
+  padding: var(--space-sm) 12px;
   flex-wrap: wrap;
 }
 .ai-bottom-dot {
@@ -412,6 +415,9 @@
   .ai-step-label { font-size: var(--text-sm); white-space: normal; text-align: center; }
   .ai-step { flex-direction: column; gap: 6px; min-width: 0; }
   .ai-step-sep { display: none; }
+  /* 小屏三步改三列网格，行尾 ？ 无处安放：整行居中保留入口（FieldHelp 点击可钉住，
+     气泡经 portal 展示，触屏 / 安卓 WebView 同样可达——旧取舍是直接 display:none） */
+  .ai-steps-help { grid-column: 1 / -1; justify-content: center; margin-left: 0; }
   .ai-provider-grid { grid-template-columns: 1fr; }
   .ai-stepper { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding-inline: 10px; }
 }

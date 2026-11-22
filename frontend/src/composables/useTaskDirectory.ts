@@ -40,6 +40,11 @@ const httpTasks = ref<TaskItem[]>([]);
  * 提示并抹掉用户的深链。故判据必须是"已拉取过"而不是"列表非空"。
  */
 const loaded = ref(false);
+/**
+ * 目录拉取是否在途。仅用于列表页区分「正在加载」与「确实为空」两种空态：
+ * 配合 `loaded` 消费（loading && !loaded 才算首拉中），刷新在途时列表照常展示旧数据。
+ */
+const loading = ref(false);
 const fetchGuard = createFetchGuard(5000);
 const firstFail = createFirstFailNotifier();
 const { toastOnly } = useToast();
@@ -58,6 +63,7 @@ let fetchEpoch = 0;
 async function fetchDirectory(force = false): Promise<void> {
   if (!fetchGuard.shouldFetch(force)) return;
   const mine = ++fetchEpoch;
+  loading.value = true;
   try {
     const data = await tasksApi.list();
     // 已有更新的拉取接管：这份是过期快照，丢弃（写进去会让列表倒退）
@@ -89,6 +95,9 @@ async function fetchDirectory(force = false): Promise<void> {
     if (firstFail.trackFailure()) {
       toastOnly(false, "加载任务/脚本列表失败");
     }
+  } finally {
+    // 过期拉取（已被新的一发接管）不动标志，由最新一发负责复位
+    if (mine === fetchEpoch) loading.value = false;
   }
 }
 
@@ -109,5 +118,5 @@ export function allTaskIds(): Set<string> {
 }
 
 export function useTaskDirectory() {
-  return { browserTasks, scripts, httpTasks, loaded, fetchDirectory, allTaskIds };
+  return { browserTasks, scripts, httpTasks, loaded, loading, fetchDirectory, allTaskIds };
 }

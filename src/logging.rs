@@ -9,6 +9,8 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use arc_swap::ArcSwap;
+
 use serde::Serialize;
 use tracing::Subscriber;
 use tracing_subscriber::Layer;
@@ -139,10 +141,12 @@ static LOG_TARGETS: OnceLock<SharedTargets> = OnceLock::new();
 ///
 /// `Targets` 是纯值类型：旧实现 `targets.clone().with_target(...)` 只修改被
 /// 丢弃的副本（且各 layer 持有独立 filter 副本），热更新从不生效。
-/// 此包装让三个 fmt layer 持有同一 `Arc<Mutex<Targets>>`，
+/// 此包装让三个 fmt layer 持有同一 `Arc<ArcSwap<Targets>>`，
 /// `reload_log_level` 整体替换内部值即可对所有层即时生效。
-#[derive(Clone, Default)]
-struct SharedTargets(Arc<Mutex<tracing_subscriber::filter::Targets>>);
+/// 用 `ArcSwap` 而非 `Mutex`（A22）：`enabled`/`max_level_hint` 在每条日志
+/// 事件上都会执行，`load()` 是无锁读，避免热路径上全局锁串行所有线程。
+#[derive(Clone)]
+struct SharedTargets(Arc<ArcSwap<tracing_subscriber::filter::Targets>>);
 
 /// 构建动态 filter 规则：第三方库保持 WARN，本项目 target 指定级别
 ///
@@ -167,12 +171,12 @@ impl SharedTargets {
     }
 
     fn new(targets: tracing_subscriber::filter::Targets) -> Self {
-        Self(Arc::new(Mutex::new(targets)))
+        Self(Arc::new(ArcSwap::from_pointee(targets)))
     }
 
     /// 热更新：整体替换内部 Targets（各层下次判定即读到新值）
     fn replace(&self, targets: tracing_subscriber::filter::Targets) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = targets;
+        self.0.store(Arc::new(targets));
     }
 }
 
@@ -182,9 +186,9 @@ impl<S> tracing_subscriber::layer::Filter<S> for SharedTargets {
         metadata: &tracing::Metadata<'_>,
         cx: &tracing_subscriber::layer::Context<'_, S>,
     ) -> bool {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        // UFCS 消歧：Targets 同时实现了 Layer 与 Filter 两个 trait
-        tracing_subscriber::layer::Filter::enabled(&*guard, metadata, cx)
+        // load() 返回的 Guard 在语句内存活，无锁读；UFCS 消歧：
+        // Targets 同时实现了 Layer 与 Filter 两个 trait
+        tracing_subscriber::layer::Filter::enabled(&**self.0.load(), metadata, cx)
     }
 
     fn callsite_enabled(
@@ -197,8 +201,7 @@ impl<S> tracing_subscriber::layer::Filter<S> for SharedTargets {
     }
 
     fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        tracing_subscriber::layer::Filter::<()>::max_level_hint(&*guard)
+        tracing_subscriber::layer::Filter::<()>::max_level_hint(&**self.0.load())
     }
 }
 
@@ -572,9 +575,45 @@ pub fn init_logging(
 
     file_appender.map(|(_, guard)| guard)
 }
+
+// ============================================================
+// WorkerGuard 全局托管
+// ============================================================
+
+/// WorkerGuard 唯一托管点：launcher 存入，正常退出路径与 exit watchdog 共用 flush。
+/// 用 `Mutex<Option<_>>` 而非 OnceLock——正常退出需要 take 出来 drop（flush），
+/// watchdog 在优雅关闭卡死时同样要 flush 后再 exit。
+static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
+
+/// 存入全局日志 guard（覆盖式；重复调用以前一次为准，仅供 launcher::run 使用）
+pub fn stash_log_guard(guard: Option<WorkerGuard>) {
+    *LOG_GUARD.lock().unwrap_or_else(|e| e.into_inner()) = guard;
+}
+
+/// 取出并 drop 全局日志 guard（触发 non-blocking writer flush 后关闭后台线程）
+pub fn flush_stashed_log_guard() {
+    if let Some(guard) = LOG_GUARD.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        drop(guard);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// guard 全局托管点 roundtrip：stash 后 flush 安全取出，空槽二次 flush 为
+    /// no-op 不 panic，None 覆盖式 stash 后 flush 依旧安全（exit watchdog 幂等）
+    #[test]
+    fn test_stash_and_flush_log_guard_roundtrip() {
+        let (_, guard) = build_file_log_writer(Vec::new());
+        stash_log_guard(Some(guard));
+        // 取出即 flush（触发 non-blocking writer 关闭），不得 panic
+        flush_stashed_log_guard();
+        // 空槽 flush 为 no-op（幂等），不得 panic
+        flush_stashed_log_guard();
+        // 覆盖式 stash：None 同样可存入，flush 依旧安全
+        stash_log_guard(None);
+        flush_stashed_log_guard();
+    }
 
     /// 慢写入时队列满不会阻塞业务，丢弃可计数，关闭仍刷新已接纳的日志。
     #[test]
@@ -709,6 +748,38 @@ mod tests {
         assert!(seen.contains(&"python_worker:INFO".to_string()));
         assert!(!seen.contains(&"hyper:INFO".to_string()));
         assert!(seen.contains(&"hyper:WARN".to_string()));
+    }
+
+    /// A22：SharedTargets 克隆共享同一 filter 状态，replace 热更新对所有克隆
+    /// 即时生效（若 ArcSwap 包装退化为快照克隆，热更新将只改副本、此处即失败）。
+    ///
+    /// 有意不派发真实事件断言 enabled：事件是否放行还受 tracing 进程级全局
+    /// max level 缓存影响，与并行测试互相踩踏会引入偶发失败；`max_level_hint`
+    /// 与 `enabled` 走同一 `load()` 路径，且可脱离 subscriber 上下文直接断言。
+    #[test]
+    fn test_shared_targets_clone_shares_and_hot_reloads() {
+        use tracing_subscriber::filter::LevelFilter;
+
+        // Filter 对任意 S 实现，直接方法调用无法推断 S，经 () 显式消歧
+        fn hint(targets: &SharedTargets) -> Option<tracing::metadata::LevelFilter> {
+            tracing_subscriber::layer::Filter::<()>::max_level_hint(targets)
+        }
+
+        let shared = SharedTargets::build(LevelFilter::ERROR);
+        // layer 等消费方持有的是克隆句柄——必须与原句柄指向同一份 filter
+        let clone = shared.clone();
+        let before = hint(&shared);
+        assert_eq!(hint(&clone), before);
+
+        // 经原句柄 replace：规则变化必须对克隆句柄即时可见
+        shared.replace(build_targets(LevelFilter::INFO));
+        let after = hint(&shared);
+        assert_ne!(after, before, "热更新应改变 max_level_hint");
+        assert_eq!(hint(&clone), after, "克隆出的 filter 必须共享同一份状态");
+
+        // 反向：经克隆句柄 replace，原句柄同样读到
+        clone.replace(build_targets(LevelFilter::WARN));
+        assert_eq!(hint(&shared), hint(&clone));
     }
 
     /// 级别解析：大小写不敏感，无效回退 INFO（配置笔误不静默关闭日志）

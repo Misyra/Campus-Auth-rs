@@ -36,14 +36,17 @@ function applyAppearance(): void {
   const body = document.body;
   const set = (key: string, value: string) => root.style.setProperty(key, value);
   const rgb = (color: string) => { const c = hexToRgb(color)!; return `${c.r}, ${c.g}, ${c.b}`; };
-  body.classList.toggle("has-custom-bg", !!appearance.background_url);
+  // 壁纸开关走 html 属性而非 body class：theme-init.js 在首帧前就能预置同一属性
+  // （彼时 body 尚未存在），大图用户刷新不再先闪一帧纯底色；变量也随属性挂 root
+  if (appearance.background_url) root.setAttribute("data-custom-bg", "");
+  else root.removeAttribute("data-custom-bg");
   body.classList.toggle("no-backdrop-filter", !appearance.backdrop_filter);
   if (appearance.background_url) {
-    body.style.setProperty("--bg-image", `url(${JSON.stringify(appearance.background_url)})`);
-    body.style.setProperty("--bg-blur", `blur(${appearance.background_blur}px)`);
-    body.style.setProperty("--bg-opacity", String(appearance.background_opacity));
+    root.style.setProperty("--bg-image", `url(${JSON.stringify(appearance.background_url)})`);
+    root.style.setProperty("--bg-blur", `blur(${appearance.background_blur}px)`);
+    root.style.setProperty("--bg-opacity", String(appearance.background_opacity));
   } else {
-    for (const key of ["--bg-image", "--bg-blur", "--bg-opacity"]) body.style.removeProperty(key);
+    for (const key of ["--bg-image", "--bg-blur", "--bg-opacity"]) root.style.removeProperty(key);
   }
 
   const isLight = appearance.theme === "auto" ? !colorScheme?.matches : appearance.theme === "light";

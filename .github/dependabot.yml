@@ -1,0 +1,18 @@
+# 依赖周检：npm（前端在 frontend/ 子目录）、cargo、github-actions 三生态。
+# 不配置 pip：Python 依赖由 uv 管理，dependabot 不支持 uv.lock。
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

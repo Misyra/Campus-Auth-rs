@@ -5,7 +5,8 @@ const router = useRouter();
 </script>
 
 <template>
-  <div class="not-found-page">
+  <!-- page-in：页面入场基元（motion.css），顶层页面根统一挂载 -->
+  <div class="not-found-page page-in">
     <div class="not-found-card">
       <div class="not-found-icon">404</div>
       <h1>页面未找到</h1>

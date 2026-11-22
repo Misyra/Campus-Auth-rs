@@ -9,6 +9,12 @@
 //!
 //! 脚本执行按任务 ID 经各自的 `tokio::sync::Mutex` 串行化：
 //! 同一任务串行执行，不同任务互不阻塞（避免一个长脚本阻塞所有脚本任务）。
+//!
+//! 任务终态事件：统一入口（[`TaskExecutor::execute`] /
+//! [`TaskExecutor::execute_with_timeout_override`]）在成功/失败收敛点发布
+//! `TaskFinished` / `TaskFailed` 到注入的 [`EventBus`]（手动执行与定时调度共用
+//! 两个入口，单点发布即覆盖两种触发）；登录脚本渠道直入 `execute_script_with_env`，
+//! 不经统一入口，不发布任务事件（登录终态由登录域自行发布）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,8 +29,11 @@ use tokio::sync::Mutex;
 use crate::bridge::{BridgeSupervisor, Outcome, StructuredResult};
 use crate::config::ConfigService;
 use crate::environment::EnvironmentManager;
+use crate::events::{AppEvent, EventBus, TaskSummary};
 use crate::status::{PartialSnapshot, StatusManager, WorkerStatus};
 use crate::tasks::TaskError;
+use crate::tasks::io_error;
+use crate::tasks::io_error_at;
 use crate::tasks::models::*;
 
 /// 任务执行统一结果
@@ -54,6 +63,8 @@ pub struct TaskExecutor {
     env: Arc<EnvironmentManager>,
     /// 配置服务（读取浏览器启动设置，随浏览器任务一并下发 Worker）
     config: Arc<ConfigService>,
+    /// 事件总线（任务终态发布；构造注入，测试兼容入口发往孤立总线）
+    events: Arc<EventBus>,
     /// 脚本执行的按任务 ID 锁注册表：同任务串行、不同任务并行
     ///
     /// registry 条目不清理：任务数量有限（数十量级），每个条目仅一个空 Mutex，
@@ -68,12 +79,37 @@ fn uses_project_python(ext: &str, binary_path: Option<&str>) -> bool {
 
 impl TaskExecutor {
     /// 构造执行器。`base_path` 即任务根目录（`tasks/`），脚本位于其 `scripts/` 子目录
+    ///
+    /// 事件发往**孤立总线**（无订阅者）：仅供既有测试装配等不关心事件发布的调用方
+    /// 使用；生产入口是 [`Self::new_with_events`]，由容器注入共享 [`EventBus`]。
     pub fn new(
         base_path: &Path,
         status: Arc<StatusManager>,
         bridge: Arc<BridgeSupervisor>,
         env: Arc<EnvironmentManager>,
         config: Arc<ConfigService>,
+    ) -> Arc<Self> {
+        Self::new_with_events(
+            base_path,
+            status,
+            bridge,
+            env,
+            config,
+            Arc::new(EventBus::new()),
+        )
+    }
+
+    /// 构造执行器并注入事件总线（容器生产入口）
+    ///
+    /// 任务终态（`TaskFinished` / `TaskFailed`）经两个统一入口发布，载荷为
+    /// 白名单摘要（task_id / task_kind / 失败原因短语），见 `Self::report_task_event`。
+    pub fn new_with_events(
+        base_path: &Path,
+        status: Arc<StatusManager>,
+        bridge: Arc<BridgeSupervisor>,
+        env: Arc<EnvironmentManager>,
+        config: Arc<ConfigService>,
+        events: Arc<EventBus>,
     ) -> Arc<Self> {
         let scripts_dir = crate::utils::paths::scripts_dir(base_path);
         Arc::new(Self {
@@ -82,6 +118,7 @@ impl TaskExecutor {
             bridge,
             env,
             config,
+            events,
             lock_registry: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -94,13 +131,15 @@ impl TaskExecutor {
     /// 「发送测试请求」。后续阶段把直连执行接入本方法后替换此臂，现阶段显式报错
     /// 而非静默回退，避免"任务能存能列出、执行却没反应"表现为假成功。
     pub async fn execute(&self, task: &TaskKind) -> Result<TaskResult, TaskError> {
-        match task {
+        let result = match task {
             TaskKind::Browser(cfg) => self.execute_browser(cfg).await,
             TaskKind::Script(cfg) => self.execute_script(cfg).await,
             TaskKind::Http(_) => Err(TaskError::ValidationFailed(vec![
                 "http 直连任务的执行接入属后续阶段，当前不可执行".to_string(),
             ])),
-        }
+        };
+        self.report_task_event(task, &result);
+        result
     }
 
     /// 统一执行入口（带超时覆写）：按任务类型分派，并用 `timeout_secs` 覆盖任务配置
@@ -115,7 +154,7 @@ impl TaskExecutor {
         timeout_secs: u64,
     ) -> Result<TaskResult, TaskError> {
         let timeout_secs = clamp_timeout(timeout_secs);
-        match task {
+        let result = match task {
             TaskKind::Browser(cfg) => {
                 let mut cfg = cfg.clone();
                 // 浏览器超时单位为毫秒：秒 → 毫秒（饱和乘法防溢出）
@@ -132,7 +171,9 @@ impl TaskExecutor {
             TaskKind::Http(_) => Err(TaskError::ValidationFailed(vec![
                 "http 直连任务的执行接入属后续阶段，当前不可执行".to_string(),
             ])),
-        }
+        };
+        self.report_task_event(task, &result);
+        result
     }
 
     /// 执行浏览器任务（通用语义：打卡/签到等日常自动化，经 Bridge 的 `execute_browser_task`）
@@ -327,6 +368,58 @@ impl TaskExecutor {
 
     // ---------------- 私有辅助 ----------------
 
+    /// 任务终态事件发布（渐进吸收：不改既有执行流程与日志，仅在其旁追加发布）
+    ///
+    /// 成功发 [`AppEvent::TaskFinished`]；失败（`success=false` 或 `Err`）发
+    /// [`AppEvent::TaskFailed`]，原因短语取既有错误信息的人话摘要，不携带原始
+    /// 输出全文（脱敏红线：脚本的 stderr 是任意输出，只报退出码）。仅两个统一
+    /// 入口调用本方法；登录脚本渠道直入 `execute_script_with_env`，不发任务事件。
+    fn report_task_event(&self, task: &TaskKind, result: &Result<TaskResult, TaskError>) {
+        let summary = TaskSummary {
+            task_id: task.common().task_id.clone(),
+            task_kind: Some(task.type_name().to_string()),
+            reason: None,
+        };
+        match result {
+            Ok(r) if r.success => {
+                self.events.publish(AppEvent::TaskFinished(summary));
+            }
+            Ok(r) => {
+                // 脚本的 TaskResult.error 是截断后的 stderr 原始输出，不进事件载荷，
+                // 只报退出码（与调度通知 `scheduled_result_message` 的口径一致）；
+                // 浏览器任务的 error/output 是 Worker 的人话短语，取首行摘要
+                let reason = match task {
+                    TaskKind::Script(_) => format!("脚本执行失败（退出码 {}）", r.exit_code),
+                    _ => {
+                        let raw = r
+                            .error
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| r.output.trim());
+                        let brief = brief_reason(raw, TASK_EVENT_REASON_MAX_CHARS);
+                        if brief.is_empty() {
+                            "浏览器任务执行失败（无错误详情）".to_string()
+                        } else {
+                            brief
+                        }
+                    }
+                };
+                self.events.publish(AppEvent::TaskFailed(TaskSummary {
+                    reason: Some(reason),
+                    ..summary
+                }));
+            }
+            Err(e) => {
+                let reason = brief_reason(&e.to_string(), TASK_EVENT_REASON_MAX_CHARS);
+                self.events.publish(AppEvent::TaskFailed(TaskSummary {
+                    reason: Some(reason),
+                    ..summary
+                }));
+            }
+        }
+    }
+
     /// 获取指定任务的执行锁（同任务串行、不同任务并行）
     ///
     /// 注册表本身用 `std::sync::Mutex` 保护，仅做 entry 查找/插入后立即释放，
@@ -363,10 +456,10 @@ impl TaskExecutor {
             let mut tmp = tempfile::Builder::new()
                 .suffix(&format!(".{ext}"))
                 .tempfile()
-                .map_err(TaskError::IoError)?;
+                .map_err(|e| TaskError::IoError(io_error("创建脚本临时文件", e)))?;
             use std::io::Write;
             tmp.write_all(content.as_bytes())
-                .map_err(TaskError::IoError)?;
+                .map_err(|e| TaskError::IoError(io_error_at("写入脚本临时文件", tmp.path(), e)))?;
             let path = tmp.path().to_path_buf();
             Ok((path, Some(tmp)))
         } else if let Some(sp) = &cfg.script_path {
@@ -443,7 +536,12 @@ impl TaskExecutor {
                     error = %e,
                     "任务进程启动失败"
                 );
-                return Err(TaskError::IoError(e));
+                // 原始报错只有 os error 码（如「系统找不到指定的文件」）不带程序名；
+                // 程序名与失败类别在这里补齐，原始文本仍保留在文案末尾
+                return Err(TaskError::IoError(io_error(
+                    &format!("启动任务程序（{program}）"),
+                    e,
+                )));
             }
         };
         // Windows 下用 KILL_ON_JOB_CLOSE 约束整棵任务进程树。守卫析构（Job 句柄
@@ -456,14 +554,12 @@ impl TaskExecutor {
         // Unix 取消路径的进程组回收（Windows 由上方 Job Handle 兜底）
         #[cfg(unix)]
         let mut process_group_guard = ProcessGroupGuard::new(pid);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| TaskError::IoError(std::io::Error::other("无法捕获子进程 stdout")))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| TaskError::IoError(std::io::Error::other("无法捕获子进程 stderr")))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            TaskError::IoError(std::io::Error::other("无法捕获任务进程的标准输出管道"))
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            TaskError::IoError(std::io::Error::other("无法捕获任务进程的错误输出管道"))
+        })?;
 
         let timeout_dur = Duration::from_secs(timeout);
         let waited = tokio::time::timeout(
@@ -504,7 +600,10 @@ impl TaskExecutor {
                     error,
                 })
             }
-            Ok(Err(e)) => Err(TaskError::IoError(e)),
+            Ok(Err(e)) => Err(TaskError::IoError(io_error(
+                "等待任务进程退出并读取输出",
+                e,
+            ))),
             Err(_) => {
                 // 极窄窗口：子进程可能在上方 500ms 排空宽限内已退出、但读未
                 // 收敛时外层超时先到期——此时强杀无意义且会抹掉真实退出码，
@@ -682,8 +781,10 @@ async fn wait_with_bounded_output(
     const DRAIN_GRACE: Duration = Duration::from_millis(500);
     let drain = async {
         let (out, err) = tokio::join!(out_task, err_task);
-        let out = out.map_err(|e| std::io::Error::other(format!("stdout 读取任务失败: {e}")))?;
-        let err = err.map_err(|e| std::io::Error::other(format!("stderr 读取任务失败: {e}")))?;
+        let out =
+            out.map_err(|e| std::io::Error::other(format!("读取标准输出的后台任务异常中断: {e}")))?;
+        let err =
+            err.map_err(|e| std::io::Error::other(format!("读取错误输出的后台任务异常中断: {e}")))?;
         Ok::<(std::process::ExitStatus, Vec<u8>, Vec<u8>), std::io::Error>((status, out?, err?))
     };
     match tokio::time::timeout(DRAIN_GRACE, drain).await {
@@ -785,6 +886,22 @@ fn binary_to_ext(binary: &str) -> &'static str {
 /// 钳制脚本超时到 `[MIN_SCRIPT_TIMEOUT, MAX_SCRIPT_TIMEOUT]`
 fn clamp_timeout(t: u64) -> u64 {
     t.clamp(MIN_SCRIPT_TIMEOUT, MAX_SCRIPT_TIMEOUT)
+}
+
+/// 任务终态事件失败原因短语的最大字符数（按字符截断，避免超长错误文本撑爆事件载荷）
+pub(crate) const TASK_EVENT_REASON_MAX_CHARS: usize = 160;
+
+/// 失败原因短语摘要：取首行、按字符截断并去首尾空白
+///
+/// 事件载荷只做人话摘要，不携带原始输出全文（脱敏红线）；调度域补发
+/// TaskFailed 时也复用本函数，保证两处口径一致。
+pub(crate) fn brief_reason(s: &str, max_chars: usize) -> String {
+    let first = s.lines().next().unwrap_or("").trim();
+    let mut out: String = first.chars().take(max_chars).collect();
+    if first.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 /// 截断字符串到最大长度（按字符）
@@ -1102,5 +1219,171 @@ mod python_runtime_tests {
         assert!(!uses_project_python("py", Some("C:/Python312/python.exe")));
         assert!(!uses_project_python("bat", None));
         assert!(!uses_project_python("exe", None));
+    }
+}
+
+#[cfg(test)]
+mod task_event_tests {
+    use super::*;
+
+    /// 跨平台测试用解释器：显式指定，避免依赖项目内 Python 环境
+    #[cfg(unix)]
+    fn shell_binary() -> &'static str {
+        "/bin/sh"
+    }
+    #[cfg(windows)]
+    fn shell_binary() -> &'static str {
+        "cmd.exe"
+    }
+
+    /// 最小成功脚本体
+    #[cfg(unix)]
+    fn script_body_ok() -> String {
+        "true".into()
+    }
+    #[cfg(windows)]
+    fn script_body_ok() -> String {
+        "@echo ok".into()
+    }
+
+    /// 失败脚本体：向 stderr 写标记后以非零码退出（验证原始输出不进事件载荷）
+    #[cfg(unix)]
+    fn script_body_fail() -> String {
+        "echo SECRET_STDERR_MARKER >&2\nexit 3".into()
+    }
+    #[cfg(windows)]
+    fn script_body_fail() -> String {
+        "@echo SECRET_STDERR_MARKER 1>&2\r\n@exit /b 3".into()
+    }
+
+    /// 构造带事件总线的执行器（各依赖均为内存级装配，不真起 Worker；
+    /// 环境管理器走旧构造的孤立总线即可——本组脚本测试显式指定解释器，不触发引导）
+    async fn make_event_executor() -> (Arc<TaskExecutor>, Arc<EventBus>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (reload_tx, _reload_rx) = tokio::sync::mpsc::channel(8);
+        let config = crate::config::ConfigService::new(tmp.path().to_path_buf(), reload_tx)
+            .await
+            .unwrap();
+        let status = Arc::new(crate::status::StatusManager::new());
+        let bridge = crate::bridge::BridgeSupervisor::new(
+            tmp.path().to_path_buf(),
+            config.clone(),
+            status.clone(),
+            None,
+        );
+        let env =
+            crate::environment::EnvironmentManager::new(tmp.path().to_path_buf(), status.clone());
+        let events = Arc::new(EventBus::new());
+        let executor =
+            TaskExecutor::new_with_events(tmp.path(), status, bridge, env, config, events.clone());
+        (executor, events, tmp)
+    }
+
+    /// 统一入口终态发布：脚本执行成功发布 TaskFinished（task_kind=script、无 reason），
+    /// 且每次执行只发布一条终态事件
+    #[tokio::test]
+    async fn test_execute_publishes_task_finished_for_script_success() {
+        let (executor, events, _tmp) = make_event_executor().await;
+        let mut rx = events.subscribe();
+        let mut cfg = ScriptTaskConfig::default();
+        cfg.common.task_id = "t-evt-ok".to_string();
+        cfg.content = Some(script_body_ok());
+        cfg.binary_path = Some(shell_binary().to_string());
+
+        let result = executor.execute(&TaskKind::Script(cfg)).await.unwrap();
+        assert!(
+            result.success,
+            "前置：测试脚本应执行成功: {}",
+            result.output
+        );
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.event.kind(), "task_finished");
+        match &envelope.event {
+            AppEvent::TaskFinished(s) => {
+                assert_eq!(s.task_id, "t-evt-ok");
+                assert_eq!(s.task_kind.as_deref(), Some("script"));
+                assert!(s.reason.is_none(), "成功事件不应携带 reason");
+            }
+            other => panic!("应为 TaskFinished，实际 {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "每次执行只应发布一条终态事件");
+    }
+
+    /// 统一入口终态发布：脚本失败（非零退出码）发布 TaskFailed，原因短语只含
+    /// 退出码——stderr 是原始输出，按脱敏红线不得进入事件载荷
+    #[tokio::test]
+    async fn test_execute_publishes_task_failed_with_exit_code_phrase_for_script_failure() {
+        let (executor, events, _tmp) = make_event_executor().await;
+        let mut rx = events.subscribe();
+        let mut cfg = ScriptTaskConfig::default();
+        cfg.common.task_id = "t-evt-fail".to_string();
+        cfg.content = Some(script_body_fail());
+        cfg.binary_path = Some(shell_binary().to_string());
+
+        let result = executor.execute(&TaskKind::Script(cfg)).await.unwrap();
+        assert!(!result.success, "前置：测试脚本应执行失败");
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.event.kind(), "task_failed");
+        match &envelope.event {
+            AppEvent::TaskFailed(s) => {
+                assert_eq!(s.task_id, "t-evt-fail");
+                assert_eq!(s.task_kind.as_deref(), Some("script"));
+                let reason = s.reason.as_deref().unwrap_or_default();
+                assert!(reason.contains("退出码 3"), "原因应为退出码短语: {reason}");
+                assert!(
+                    !reason.contains("SECRET_STDERR_MARKER"),
+                    "原始 stderr 输出不得进入事件载荷: {reason}"
+                );
+            }
+            other => panic!("应为 TaskFailed，实际 {other:?}"),
+        }
+    }
+
+    /// 统一入口（超时覆写）终态发布：执行被拒（http 占位拒绝，Err 路径）发布
+    /// TaskFailed，载荷含任务标识、类型与原因短语
+    #[tokio::test]
+    async fn test_execute_with_timeout_override_publishes_task_failed_on_rejection() {
+        let (executor, events, _tmp) = make_event_executor().await;
+        let mut rx = events.subscribe();
+        let mut kind = TaskKind::Http(Box::default());
+        kind.common_mut().task_id = "t-evt-http".to_string();
+
+        let err = executor
+            .execute_with_timeout_override(&kind, 30)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, TaskError::ValidationFailed(_)),
+            "前置：http 任务应被占位拒绝"
+        );
+
+        let envelope = rx.recv().await.unwrap();
+        assert_eq!(envelope.event.kind(), "task_failed");
+        match &envelope.event {
+            AppEvent::TaskFailed(s) => {
+                assert_eq!(s.task_id, "t-evt-http");
+                assert_eq!(s.task_kind.as_deref(), Some("http"));
+                let reason = s.reason.as_deref().unwrap_or_default();
+                assert!(
+                    reason.contains("http"),
+                    "原因短语应说明 http 不可执行: {reason}"
+                );
+            }
+            other => panic!("应为 TaskFailed，实际 {other:?}"),
+        }
+    }
+
+    /// 失败原因短语摘要：取首行、按字符截断（事件载荷不携带原始输出全文）
+    #[test]
+    fn test_brief_reason_takes_first_line_and_truncates() {
+        assert_eq!(brief_reason("第一行\n第二行", 160), "第一行");
+        assert_eq!(brief_reason("短文本", 160), "短文本");
+        let long = "字".repeat(200);
+        let brief = brief_reason(&long, 160);
+        assert_eq!(brief.chars().count(), 161, "160 字符 + 省略号");
+        assert!(brief.ends_with('…'));
+        assert_eq!(brief_reason("  带空白  ", 160), "带空白");
     }
 }

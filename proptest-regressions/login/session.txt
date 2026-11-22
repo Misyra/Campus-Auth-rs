@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d1da0c4b50e874377a8fc90302bb5487077fbf860d711ce86a6a153879061438 # shrinks to success = false, data = Null, error = Some("")
+cc aba00e9c7ed9c102a3212570a9200dcec84b49d1ed649e7a3d1c114cee4e6a8e # shrinks to seq = [], terminal = 0
+cc b46721aac4834c7793a9633593bf2ac10ef0c20deba7d9db87c5b1b636406f43 # shrinks to seq = [0, 0], budget_pick = 0
+cc 78473bab321303286b230cfbf36016e19174defc426b907980901a78367d0c14 # shrinks to outcome = Cancelled, error = Some("")

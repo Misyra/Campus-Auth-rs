@@ -1,9 +1,6 @@
 /* common.css — 设置页共享框架（连续表单 / 面板网格 / 卡片头 / 保存栏 / settings 域按钮覆盖） */
-.settings-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
+/* 页面外壳（flex 纵向）消费 layout.css 的 .page-content 契约；宽度居中 / gap:0 /
+   position:relative 等差异见 settings/list.css 的 .settings-page（后导入覆盖）。 */
 
 .settings-form {
   display: flex;
@@ -13,30 +10,13 @@
 }
 
 /* 数字输入框限宽：秒数/天数/次数等短值不需要通栏宽度 */
-.settings-form input[type="number"],
-.settings-panel-grid input[type="number"] {
+.settings-form input[type="number"] {
   max-width: 240px;
 }
 
-.settings-panel-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
-}
-
-.settings-panel-grid > .settings-panel { min-width: 0; }
-
-/* 双列（宽屏下减少纵向滚动；--wide 卡独占整行）。断点与 `.environment-page` 的同款
-   规则对齐到 --bp-wide（1100），此前两处写作 1080，与全局断点尺不同源。 */
-@media (min-width: 1100px) {
-  .settings-panel-grid--cols2 {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: stretch;
-  }
-  .settings-panel-grid--cols2 .settings-panel--wide {
-    grid-column: 1 / -1;
-  }
-}
+/* `.settings-panel-grid` 及其 --cols2 变体已于 2026-11-13 删除（死规则群，模板零引用，
+   见 docs/reports/refactor-optimization-review-2026-11-12.md P2-1）。设置分区的布局
+   由 settings-list-page（list.css）的行式布局承担。 */
 
 .settings-panel {
   height: 100%;
@@ -79,14 +59,9 @@
   flex: 1;
 }
 
-/* ---- 双列网格（settings/appearance/tasks 三处 gap 差异收敛：默认 gap-md，宽松版用 --airy） ---- */
-.settings-grid-2col,
-.appearance-grid-2col {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-md);
-  align-items: start;
-}
+/* `.settings-grid-2col` / `.appearance-grid-2col` 的网格定义已于 2026-11-13 删除：
+   两个类的全部使用点都在 settings-list-page 上下文内，被 list.css 无条件
+   display:block 中和（P2-1 死规则群），类名本身仍在模板中，行式布局由 list.css 承担 */
 
 /* ---- 间距工具类 ---- */
 .settings-toggle-spacer {
@@ -100,13 +75,6 @@
 /* 等宽多行输入统一走全局 `.textarea--mono`（components/misc.css）。
    旧的 `.settings-monospace-textarea` 已删除——此前本文件写着"退役"而模板仍在用它，
    是本仓"注释先行、代码没跟"的一处实例（2026-09-24 静态审计发现并收口）。 */
-
-@media (max-width: 768px) {
-  .settings-grid-2col,
-  .appearance-grid-2col {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
 
 .settings-page .btn-icon-only {
   padding: 6px;

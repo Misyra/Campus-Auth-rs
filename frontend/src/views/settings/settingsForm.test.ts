@@ -16,12 +16,15 @@ import { describe, expect, it } from "vitest";
  *
  * 为何「立即检查」等同样漏写 type 的按钮当时没暴雷：其 click 处理器**首行**同步置位
  * busy 标志 → Vue 微任务刷 DOM → 按钮变成 disabled → 浏览器在默认动作阶段发现
- * submitter 已禁用而取消提交。这是**偶然**保护：一旦置位挪到 await 之后（如新按钮
+ * submitter 已禁用而取消提交。这是**偶然**保护：一旦置位挪到 await 之后（如
  * 「选择安装包」首行是 `await pickFile(...)`）就立即失效。故不能依赖"先置 busy"，
  * 三类守卫缺一不可：
  *   1. 按钮显式 `type="button"`；
  *   2. 表单 `@submit.prevent`（漏写 type 时的兜底）；
  *   3. 本测试静态锁定前两者。
+ *
+ * 阶段 4③：面板内容拆为 views/settings/panels/ 槽位组件 + SchemaRow 渲染器，
+ * 扫描面随结构更新（渲染器产出的分段按钮也在锁定面内）。
  */
 
 const settingsView = readFileSync(
@@ -29,12 +32,31 @@ const settingsView = readFileSync(
   "utf8",
 );
 
-/** 设置页子组件（表单内容来源；按钮都写在 views/settings/ 下） */
-const settingsChildFiles = [
-  "MonitorSettings.vue",
-  "BrowserSettings.vue",
-  "TaskEnvironmentSettings.vue",
-  "SystemSettings.vue",
+/** 设置页面板内容来源：schema 槽位组件 + 渲染器（按钮都写在 panels/ 与 SchemaRow 里） */
+const settingsContentFiles = [
+  "SchemaRow.vue",
+  "panels/MonitorProbeRows.vue",
+  "panels/MonitorPauseRows.vue",
+  "panels/ProxyNote.vue",
+  "panels/BrowserSelectRows.vue",
+  "panels/BrowserStealthRows.vue",
+  "panels/BrowserSessionRows.vue",
+  "panels/BrowserAdvancedRows.vue",
+  "panels/EnvRuntimePanel.vue",
+  "panels/TaskOverviewRows.vue",
+  "panels/TaskRecorderRows.vue",
+  "panels/OcrRows.vue",
+  "panels/RunModePanel.vue",
+  "panels/SystemStartupRows.vue",
+  "panels/SystemAccessRows.vue",
+  "panels/SystemLogsExtraRows.vue",
+  "panels/UpdateTipBlock.vue",
+  "panels/UpdateProxyRows.vue",
+  "panels/UpdateActionsRows.vue",
+  "panels/SystemMaintenanceRows.vue",
+  "panels/NotificationEventsRows.vue",
+  "panels/NotificationQuietRows.vue",
+  "panels/NotificationChannelsPanel.vue",
 ];
 
 describe("设置页表单提交守卫", () => {
@@ -50,7 +72,7 @@ describe("设置页表单提交守卫", () => {
 
   it("设置页内所有 <button> 都显式声明 type", () => {
     const offenders: string[] = [];
-    for (const file of settingsChildFiles) {
+    for (const file of settingsContentFiles) {
       const src = readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
       // 逐个取出开标签，检查其中是否含 type= 属性
       // 属性中的箭头表达式包含 >，需完整跳过引号内容，避免把已有 type 截掉。
@@ -61,7 +83,7 @@ describe("设置页表单提交守卫", () => {
         }
       }
     }
-    // AppearanceView 在 views/ 而非 views/settings/，单独读
+    // AppearanceView 在 views/ 而非 views/settings/（外观分区整体平移），单独读
     const appearance = readFileSync(new URL("../AppearanceView.vue", import.meta.url), "utf8");
     for (const tag of appearance.match(/<button\b(?:[^"'<>]|"[^"]*"|'[^']*')*>/g) ?? []) {
       if (!/\btype\s*=/.test(tag)) {
@@ -73,5 +95,32 @@ describe("设置页表单提交守卫", () => {
       "以下按钮未写 type（HTML 默认 type=submit，位于设置页表单内时会提交并重载页面）：\n" +
         offenders.join("\n"),
     ).toEqual([]);
+  });
+});
+
+describe("管理凭据设置项（远程访问引导密码）", () => {
+  /**
+   * 「访问与安全」分区的管理凭据输入框：免鉴权 GET /api/auth/token 移除后，
+   * 远程（非回环）访问的界面引导依赖它。此处静态锁定三要素——绑定字段、
+   * 密文展示与显隐切换（切换按钮缺 type 会被上面的通用守卫拦下，这里锁语义）。
+   */
+  it("密码输入框绑定 app_settings.management_password 且带显隐切换", () => {
+    const src = readFileSync(new URL("./panels/SystemAccessRows.vue", import.meta.url), "utf8");
+    expect(src).toContain('id="settings-management-password"');
+    // 绑定必须落在 app_settings 段内（后端 global.app.management_password）：
+    // 顶层字段绑定是 5.2.0 战役修复的断链缺陷（输入从不落盘）
+    expect(src).toContain('v-model="config.config.app_settings.management_password"');
+    // 密文展示：type 由显隐状态驱动，默认 password
+    expect(src).toContain(":type=\"showManagementPassword ? 'text' : 'password'\"");
+    const toggle = src.match(/<button[^>]*@click="showManagementPassword = !showManagementPassword"[^>]*>/);
+    expect(toggle, "缺少显隐切换按钮").not.toBeNull();
+    expect(toggle![0]).toContain('type="button"');
+    expect(toggle![0]).toContain(":aria-pressed=");
+  });
+
+  it("说明文案交代使用边界与环境变量注入路径", () => {
+    const src = readFileSync(new URL("./panels/SystemAccessRows.vue", import.meta.url), "utf8");
+    expect(src).toContain("仅远程（非回环）访问时作为界面引导凭据");
+    expect(src).toContain("CAMPUS_AUTH_MANAGEMENT_PASSWORD");
   });
 });

@@ -119,7 +119,7 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 
 刻意**不含 `strict_login_mode`**：它决定"何时触发登录"，属功能行为而非可观测性；把它放进调试模式会在证据不足时也尝试登录，可能在没预期的时机拉起浏览器。
 
-鉴权：启动时生成随机 token 持久化于 `config/.auth_token`（`0600`），前端经 `/api/auth/token` 懒取并在 `X-Auth-Token` / `Bearer` / `?token=` 中携带；`GET /api/health`、`GET /api/auth/token` 等少数端点豁免，其余 `/api/*` 与 `/ws/*` 强制校验（`src/web/auth.rs`）。
+鉴权：启动时**成对**生成随机 token 与 bootstrap 握手秘钥，分别持久化于 `config/.auth_token` 与 `config/.auth_bootstrap`（创建即 `0600`，任一损坏重建时两者一并轮换）。**回环访问**下 `GET /api/auth/local-token` 直接下发 token，界面打开即用；托盘链接仍以 `#auth=<bootstrap>` fragment 携带握手秘钥作为等价入口（fragment 不会发往服务器、不进服务器日志；托盘另有「复制界面链接」菜单项），前端经 `POST /api/auth/exchange` 换取后在 `X-Auth-Token` / `Bearer` / `?token=` 中携带。本地免引导是 2026-11-13 的明确取舍：同机其他用户/进程可直接取 token 并调用脚本接口（与能读配置/执行脚本的同用户权限等价），单人机与单一共享账号场景接受该风险。**非回环绑定**默认不开放该端点：fragment 无法送达远程用户，须配置**管理密码**（设置页 `management_password` 或启动参数 `--management-password`，后者优先）在界面输入换取 token；未配置时程序启动即拒绝（`--allow-unauthenticated-bind` 显式豁免，该豁免同时放开 local-token——默认 Docker compose 即此形态：容器内绑 `0.0.0.0`、宿主只发布 `127.0.0.1`），详见 `docker/README.md` 安全模型。
 
 ## 3. 多网络方案（Profiles）
 
@@ -131,6 +131,10 @@ Windows release 为 GUI 子系统：双击 `campus-auth.exe` 不弹控制台，�
 - 这些字段**只在「方案」页编辑**；`GET /api/config` 顶层仍会扁平回传活跃方案的凭据（兼容既有客户端），但界面已不再从那里读写。
 - 浏览器登录网址**填写即直接使用，留空即跟随重定向**。留空时默认访问 `http://www.msftconnecttest.com/connecttest.txt`，可在“重定向高级设置”用 `trigger_url` 覆盖；触发地址必须为明文 `http`。Worker 首导航到触发地址并跟随门户跳转，`{{LOGIN_URL}}` 同步为触发地址；若常规公网探测全失败但本地网卡已连接，会谨慎启动一次浏览器触发门户，而不是一直显示“没网”（`docs/guides/task-writing-guide.md` 重定向登录）。
 - 匹配：按 `gateway_ip` 优先、其次 `wifi_ssid`（`src/config/profiles.rs`），约束数越多优先级越高（无用户可配的 `priority` 字段）；`auto_switch` 开启时 Engine 按 `monitor.profile_check_interval` 周期检测并自动切换（默认 **180 秒**，可配范围 60–600），切换后重置登录失败去重状态。**`auto_switch` 默认关闭**（2026-09-16 起，新配置生效）；关闭时方案页卡片可直接点击切换，开启时改由自动匹配决定（卡片不可手点）。
+- **持久会话（浏览器记住密码）**（仅浏览器渠道）：在方案编辑器勾选「启用持久会话」后，自动登录不再执行任务步骤，而是打开按方案落盘的持久浏览器上下文（`browser_profiles/<方案id>/`），由门户自己的「记住密码」回填账号密码并回放录制的登录点击。两种打开方式：
+  - **「打开浏览器配置 / 重新录制」**：拉起持久浏览器并开启点击录制——在里面登录门户并勾选门户的「记住密码」，完成后点「完成配置」把录制落盘（或「放弃」仅关闭）；这是首次启用或想更新录制动作时的入口。
+  - **「打开浏览器」**：已启用持久会话（保存后）可随时单独拉起同一个持久浏览器自由使用，**不录制**——手动输入密码登录、勾选门户的「记住密码」，用完直接关闭浏览器窗口即可；登录态与记住的密码留在持久目录里，之后的自动登录即可直接复用。只想补存凭据、不想重新录制时用这个。
+  - 配置会话全局一次只能有一个：会话进行中再点另一个打开入口会提示「配置会话进行中，请先关闭」；浏览器窗口被手动关掉即会话结束。持久目录里的 cookie/localStorage 永不清理（那是「记住密码」的全部载体）。
 - `default` 为保底 Profile，不可删除。
 
 ## 4. 任务系统

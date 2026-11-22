@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
+use super::BridgeError;
 use crate::utils::recover_lock;
 
 /// pending 取消请求的保留时长
@@ -210,9 +211,125 @@ impl Drop for SessionGuard {
     }
 }
 
+/// 不占用登录/调试单会话槽的轻量命令。
+pub(super) fn is_lightweight_method(method: &str) -> bool {
+    matches!(method, "ocr_recognize" | "feedback_capture")
+}
+
+/// 活跃配置会话的归属记录（session_id ↔ 方案 id）
+///
+/// 「同一时刻仅一个配置会话」的占用互斥以 Worker 侧占用注册表为权威
+/// （`profile_session_start` 重复启动由 Worker 回结构化错误）；本记录只补
+/// Rust 侧需要而 Worker 不感知的一件事——**会话属于哪个方案**：stop 端点据
+/// 此把录制写回发起会话的方案，并把「会话属于别的方案」的 stop 拒之门外
+/// （否则 A 方案的录制会被写进 B 方案）。归属信息只存在于本进程内存，
+/// Rust 重启即失；Worker 侧重启 / 回收由 [`ConfigSessionRegistry`] 的惰性
+/// 自愈兜底。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSessionOwner {
+    /// Worker 返回的配置会话 id（`profile_session_start` 响应载荷 `session_id`）
+    pub session_id: String,
+    /// 发起配置会话的方案 id
+    pub profile_id: String,
+    /// 会话是否开启录制（start 请求的 `record` 口径）：stop 端点据此拦截
+    /// 「未录制会话的非 discard 结算」——那会以空数组覆盖方案既有录制
+    /// （自由浏览模式打开的会话没有录制内容可落盘）
+    pub record: bool,
+}
+
+/// 配置会话归属注册表（单活跃会话，`Mutex` 保护）
+///
+/// 与 Worker 侧会话生命周期的对齐口径：`force_recycle`（强杀 Worker）时同步
+/// 清空；Worker 优雅关闭 / 崩溃等未覆盖路径由 stop 的「无活跃会话」结构化
+/// 错误回包惰性自愈（清表 + 409）。设计上不存在「残留表项放行误写」的路径：
+/// 误写只会发生在表项指向**别的方案**时，而该分支被归属校验拦截；表项指向
+/// 本方案但 Worker 侧已无会话时，stop 派发会被 Worker 拒绝并回 409。
+#[derive(Default)]
+pub struct ConfigSessionRegistry(Mutex<Option<ConfigSessionOwner>>);
+
+impl ConfigSessionRegistry {
+    /// 记录活跃配置会话归属（覆盖旧记录：Worker 单会话语义下新 start 即旧会话终结）
+    pub fn set(&self, owner: ConfigSessionOwner) {
+        *self.0.lock().unwrap_or_else(recover_lock) = Some(owner);
+    }
+
+    /// 读取当前归属（不取走）
+    pub fn peek(&self) -> Option<ConfigSessionOwner> {
+        self.0.lock().unwrap_or_else(recover_lock).clone()
+    }
+
+    /// 取走当前归属（stop 结算后清空；此后 stop 一律按「无活跃配置会话」拒绝）
+    pub fn take(&self) -> Option<ConfigSessionOwner> {
+        self.0.lock().unwrap_or_else(recover_lock).take()
+    }
+}
+
+/// 会话互斥矩阵：判断新请求 `method` 与当前活跃会话 `current` 是否兼容。
+///
+/// 兼容（允许继续）：
+/// - 无活跃会话：任意方法
+/// - InLogin + (execute_login_attempt/execute_browser_task/debug_start)：FIFO 排队
+/// - InDebug + (debug_step/debug_stop/debug_run_all)：FIFO 排队
+/// - OCR / 反馈捕获等轻量命令可与任意会话并发
+///
+/// 不兼容（快速失败 [`BridgeError::WorkerBusy`]）：
+/// - InLogin + (debug_step/debug_stop/test_redirect)
+/// - InLogin + profile_auto_login：持久自动登录**不与另一登录并发**——双方
+///   都会做「登录后网络验证」兜底（探测与门户流量互相污染判定），排队
+///   进 Worker 也会与前序登录的验证阶段真正并发；快速失败后由登录会话
+///   转 NetworkError 退避重试，等对方完全收尾再进
+/// - InLogin + (profile_session_start/profile_session_stop)：配置会话与登录
+///   互斥（同 profile_auto_login 口径）——start 会打开 headed 浏览器并等待
+///   用户手动登录，与在途登录的网络验证兜底互相污染判定；stop 在登录收尾
+///   前一并拒绝，保持「持久类命令」与登录互斥的单一心智模型
+/// - InDebug + (execute_login_attempt/execute_browser_task/profile_auto_login/
+///   profile_session_*)：登录类请求快速失败
+/// - InDebug + debug_start：已有调试会话
+/// - RedirectTest 与所有非轻量会话互斥：可见临时窗口不得被登录/调试关闭
+///
+/// `ocr_recognize` / `feedback_capture` 为轻量命令，允许与任意会话并发。
+pub(super) fn check_session_compat(
+    current: Option<SessionType>,
+    method: &str,
+) -> Result<(), BridgeError> {
+    if method == "ocr_recognize" || method == "feedback_capture" {
+        return Ok(());
+    }
+    match current {
+        None => Ok(()),
+        Some(SessionType::Login) => match method {
+            "debug_step" | "debug_stop" | "test_redirect" => Err(BridgeError::WorkerBusy),
+            // 持久自动登录拥有独立持久上下文，但不与另一登录并发（见函数头）；
+            // 归类先例同 debug_start：自有运行时，不走 OCR 式轻量旁路
+            "profile_auto_login" => Err(BridgeError::WorkerBusy),
+            // 配置会话启停同属持久类命令：与在途登录互斥（见函数头）
+            "profile_session_start" | "profile_session_stop" => Err(BridgeError::WorkerBusy),
+            // execute_login_attempt / execute_browser_task / debug_start：FIFO 排队
+            _ => Ok(()),
+        },
+        Some(SessionType::RedirectTest) => Err(BridgeError::WorkerBusy),
+        Some(SessionType::Debug) => {
+            if method.starts_with("debug_") {
+                match method {
+                    // debug_status / feedback_capture 为无副作用查询，允许在会话存续期随时调用
+                    "debug_step" | "debug_stop" | "debug_run_all" | "debug_status"
+                    | "feedback_capture" => Ok(()),
+                    _ => Err(BridgeError::WorkerBusy),
+                }
+            } else {
+                // 登录类命令（execute_login_attempt / execute_browser_task /
+                // profile_auto_login / profile_session_*）在调试会话存续期一律
+                // 拒绝：与登录口径一致
+                Err(BridgeError::WorkerBusy)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::test_support::{assert_busy, assert_ok};
 
     /// cancel 先于 register 到达（pending 命中）→ 注册时立即取消
     #[test]
@@ -297,5 +414,171 @@ mod tests {
         reg.clear();
         assert!(!reg.contains("session-9"));
         assert!(!reg.contains("ocr-9"));
+    }
+
+    // ============ 会话互斥矩阵 ============
+
+    #[test]
+    fn 无会话_任意方法均兼容() {
+        for m in [
+            "execute_login_attempt",
+            "execute_browser_task",
+            "test_redirect",
+            "debug_start",
+            "debug_step",
+            "debug_stop",
+            "profile_auto_login",
+            "ocr_recognize",
+            "feedback_capture",
+        ] {
+            assert_ok(None, m);
+        }
+    }
+
+    #[test]
+    fn 登录会话_允许登录与浏览器任务() {
+        assert_ok(Some(SessionType::Login), "execute_login_attempt");
+        assert_ok(Some(SessionType::Login), "execute_browser_task");
+        assert_busy(Some(SessionType::Login), "test_redirect");
+    }
+
+    #[test]
+    fn 登录会话_允许启动调试会话() {
+        // 计划矩阵：InLogin + debug_start 走 FIFO 排队
+        assert_ok(Some(SessionType::Login), "debug_start");
+    }
+
+    #[test]
+    fn 登录会话_调试步进与停止应忙碌() {
+        assert_busy(Some(SessionType::Login), "debug_step");
+        assert_busy(Some(SessionType::Login), "debug_stop");
+    }
+
+    /// 持久自动登录的互斥归类：在途登录期间快速失败（不与另一登录并发，
+    /// 双方的网络验证兜底会互相干扰），无会话时可进入
+    #[test]
+    fn 持久自动登录_在途登录期间应忙碌() {
+        assert_busy(Some(SessionType::Login), "profile_auto_login");
+        assert_ok(None, "profile_auto_login");
+    }
+
+    /// 持久自动登录与调试会话 / 可见重定向窗口互斥（登录类命令口径）
+    #[test]
+    fn 持久自动登录_调试与重定向会话期间应忙碌() {
+        assert_busy(Some(SessionType::Debug), "profile_auto_login");
+        assert_busy(Some(SessionType::RedirectTest), "profile_auto_login");
+    }
+
+    #[test]
+    fn 调试会话_允许步进与停止() {
+        assert_ok(Some(SessionType::Debug), "debug_step");
+        assert_ok(Some(SessionType::Debug), "debug_stop");
+        assert_ok(Some(SessionType::Debug), "debug_run_all");
+    }
+
+    #[test]
+    fn 调试会话_再次启动调试应忙碌() {
+        assert_busy(Some(SessionType::Debug), "debug_start");
+    }
+
+    #[test]
+    fn 调试会话_登录与浏览器任务应忙碌() {
+        assert_busy(Some(SessionType::Debug), "execute_login_attempt");
+        assert_busy(Some(SessionType::Debug), "execute_browser_task");
+        assert_busy(Some(SessionType::Debug), "test_redirect");
+    }
+
+    #[test]
+    fn 重定向检测_独占浏览器会话() {
+        for method in [
+            "execute_login_attempt",
+            "execute_browser_task",
+            "test_redirect",
+            "debug_start",
+            "debug_step",
+            "debug_stop",
+        ] {
+            assert_busy(Some(SessionType::RedirectTest), method);
+        }
+    }
+
+    #[test]
+    fn ocr识别_与任意会话并发兼容() {
+        assert_ok(None, "ocr_recognize");
+        assert_ok(Some(SessionType::Login), "ocr_recognize");
+        assert_ok(Some(SessionType::RedirectTest), "ocr_recognize");
+        assert_ok(Some(SessionType::Debug), "ocr_recognize");
+    }
+
+    #[test]
+    fn 反馈捕获_走轻量路径且与任意会话兼容() {
+        assert!(is_lightweight_method("feedback_capture"));
+        assert_ok(None, "feedback_capture");
+        assert_ok(Some(SessionType::Login), "feedback_capture");
+        assert_ok(Some(SessionType::RedirectTest), "feedback_capture");
+        assert_ok(Some(SessionType::Debug), "feedback_capture");
+    }
+
+    // ============ 配置会话（profile_session_*）互斥归类 ============
+
+    /// 配置会话启停属持久类命令：无会话时可进入（与其他命令无差别）
+    #[test]
+    fn 配置会话启停_无会话可进入() {
+        assert_ok(None, "profile_session_start");
+        assert_ok(None, "profile_session_stop");
+    }
+
+    /// 配置会话启停在在途登录期间快速失败：start 与登录的网络验证兜底互相
+    /// 污染判定，stop 保持「持久类命令与登录互斥」的单一口径
+    #[test]
+    fn 配置会话启停_在途登录期间应忙碌() {
+        assert_busy(Some(SessionType::Login), "profile_session_start");
+        assert_busy(Some(SessionType::Login), "profile_session_stop");
+    }
+
+    /// 配置会话启停在调试会话 / 可见重定向窗口期间一律拒绝（登录类命令口径）
+    #[test]
+    fn 配置会话启停_调试与重定向会话期间应忙碌() {
+        assert_busy(Some(SessionType::Debug), "profile_session_start");
+        assert_busy(Some(SessionType::Debug), "profile_session_stop");
+        assert_busy(Some(SessionType::RedirectTest), "profile_session_start");
+        assert_busy(Some(SessionType::RedirectTest), "profile_session_stop");
+    }
+
+    // ============ 配置会话归属注册表 ============
+
+    /// set → peek → take 的基本语义：peek 不取走，take 幂等清空
+    #[test]
+    fn 配置会话归属_set_peek_take语义() {
+        let reg = ConfigSessionRegistry::default();
+        assert_eq!(reg.peek(), None, "空表 peek 应为 None");
+        assert_eq!(reg.take(), None, "空表 take 应为 None");
+        let owner = ConfigSessionOwner {
+            session_id: "abc".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        };
+        reg.set(owner.clone());
+        assert_eq!(reg.peek(), Some(owner.clone()), "peek 不应取走记录");
+        assert_eq!(reg.take(), Some(owner), "take 应取走记录");
+        assert_eq!(reg.peek(), None, "取走后应回到空表");
+    }
+
+    /// 新 start 覆盖旧归属：Worker 单会话语义下新会话开始即旧会话终结
+    #[test]
+    fn 配置会话归属_新start覆盖旧归属() {
+        let reg = ConfigSessionRegistry::default();
+        reg.set(ConfigSessionOwner {
+            session_id: "old".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let newer = ConfigSessionOwner {
+            session_id: "new".into(),
+            profile_id: "lab".into(),
+            record: false,
+        };
+        reg.set(newer.clone());
+        assert_eq!(reg.peek(), Some(newer), "set 应覆盖旧记录");
     }
 }

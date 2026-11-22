@@ -1,12 +1,28 @@
 /* card.css — 卡片容器（card / card-header / card-body / card-footer） */
 .card {
   background: var(--bg-card);
+  /* Catmail 卡片质感（设计地基批）：1px subtle 边 + 双层柔和阴影（--panel-elevation，
+     1px 贴地锐层 + 大 blur 低强度漫射）；--radius-xl 即 12px，与 Catmail 卡片圆角同值。
+     深浅主题的阴影强度由 token 分支承担，此处不写死 rgba。 */
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   -webkit-backdrop-filter: var(--card-blur, var(--blur-md));
   backdrop-filter: var(--card-blur, var(--blur-md));
-  box-shadow: var(--shadow);
+  box-shadow: var(--panel-elevation);
   transition: border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
+}
+
+/* 禁用毛玻璃效果（外观设置开关）。
+   位置必须在 ：has 抬升块之前且用 :where() 压平具体度：全文件 `.card` 结尾的规则
+   须按具体度升序（.card → 本块 → :has 抬升），否则 no-descending-specificity 拦截；
+   :where() 不参与具体度计算，覆盖力由声明上的 !important 承担（全仓唯一一条 .card
+   背景 !important，语义与原 (0,2,1) 写法等价）。 */
+body.no-backdrop-filter * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.no-backdrop-filter :where(.card) {
+  background: var(--bg-card) !important;
 }
 
 /* 卡片内弹出的 `?` 气泡要能压住**同页后续卡片**。
@@ -14,10 +30,11 @@
    卡片那一层里：DOM 靠后的卡片（如任务编辑器主列里的「测试区」）会盖住前一张卡片
    中弹出的长说明的下半截——实测呈现为气泡底部一条横向亮度分界带。
    悬停 / 钉住期间把所在卡片抬到本层更靠上的位置即可，不必把气泡 teleport 到 body。
-   `:has()` 不被支持时整条规则被忽略（回到旧行为），与全站 `:has()` 用法同口径。 */
+   `:has()` 不被支持时整条规则被忽略（回到旧行为），与全站 `:has()` 用法同口径。
+   选择器按具体度升序排列；同一声明列表内次序不影响级联。 */
+.card:has(.field-help--pinned),
 .card:has(.field-help:hover),
-.card:has(.field-help:focus-visible),
-.card:has(.field-help--pinned) {
+.card:has(.field-help:focus-visible) {
   position: relative;
   z-index: var(--z-overlay);
 }
@@ -73,7 +90,8 @@
 .card-footer {
   display: flex;
   justify-content: flex-end;
-  gap: 12px;
+  /* 12px = --space-md-sm（阶段 1c 实测逃逸档位，等值回填） */
+  gap: var(--space-md-sm);
   padding: var(--space-md) 20px;
   border-top: 1px solid var(--border);
   align-items: center;
@@ -91,11 +109,3 @@
   color: var(--text-secondary);
 }
 
-/* 禁用毛玻璃效果（外观设置开关） */
-body.no-backdrop-filter * {
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
-}
-body.no-backdrop-filter .card {
-  background: var(--bg-card) !important;
-}

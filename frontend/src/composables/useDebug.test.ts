@@ -1,11 +1,13 @@
 /**
  * 调试会话状态管理 composable 的单元测试。
- * 覆盖刷新恢复的骨架退化与详情退避补全（refillSessionDetails）、停止时取消补全。
+ * 覆盖刷新恢复的骨架退化与详情退避补全（refillSessionDetails）、停止时取消补全、
+ * WS debug_session_closed（Worker 崩溃强杀）的面板清理（P3-26）。
  *
  * useDebug 是模块级单例：同一文件内的用例共享状态，用例按声明顺序执行。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { DebugSession } from "../api/types";
+import { useToast } from "./useToast";
 
 // debugApi 全部打桩：status 的返回序列由各用例自行设置
 const statusMock = vi.fn();
@@ -137,5 +139,39 @@ describe("实时截图归属步骤", () => {
     debug.handleScreenshot({ url: "data:image/png;base64,DDD", step_index: 4 });
     await debug.startDebug("t1");
     expect(debug.screenshotStep.value).toBe(null);
+  });
+});
+
+describe("WS debug_session_closed（P3-26）", () => {
+  it("进行中的调试会话被服务端强杀：清空面板退出进行中态并 toast 提示", async () => {
+    useToast().toast.message = "";
+    // 制造进行中态（恢复骨架）
+    statusMock.mockResolvedValueOnce({ active: true, screenshot_url: null });
+    await debug.restoreIfActive();
+    expect(debug.visible.value).toBe(true);
+
+    // Worker 崩溃强杀：面板清空收起、会话状态归零、toast 给出可读原因
+    debug.handleDebugSessionClosed({ reason: "worker_crashed" });
+    expect(debug.visible.value).toBe(false);
+    expect(debug.session.running).toBe(false);
+    expect(debug.session.steps).toEqual([]);
+    expect(debug.screenshotStep.value).toBe(null);
+    expect(useToast().toast.message).toContain("Worker 已崩溃");
+  });
+
+  it("面板未展示调试会话时事件忽略（不弹提示）", () => {
+    useToast().toast.message = "";
+    // 上一用例已收起面板：visible=false 且 running=false → 事件无实质消费
+    debug.handleDebugSessionClosed({ reason: "worker_crashed" });
+    expect(useToast().toast.message).toBe("");
+  });
+
+  it("未知 reason 走通用文案", async () => {
+    useToast().toast.message = "";
+    statusMock.mockResolvedValueOnce({ active: true, screenshot_url: null });
+    await debug.restoreIfActive();
+    debug.handleDebugSessionClosed({});
+    expect(useToast().toast.message).toContain("调试会话已被强制结束");
+    expect(debug.visible.value).toBe(false);
   });
 });

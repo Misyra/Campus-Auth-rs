@@ -27,12 +27,15 @@ const props = withDefaults(
     ariaLabel?: string;
     compact?: boolean;
     disabled?: boolean;
+    /** 触发按钮 id：供外部 <label :for> 编程关联（label 包不住组件时用） */
+    triggerId?: string;
   }>(),
   {
     placeholder: "请选择...",
     ariaLabel: "",
     compact: false,
     disabled: false,
+    triggerId: undefined,
   },
 );
 const emit = defineEmits<{
@@ -120,8 +123,8 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     case "Escape":
       e.preventDefault();
-      // 只关下拉不关弹窗：keydown 会冒泡到 Modal overlay 的 onKeydown，
-      // 不阻断会让外层弹窗跟着一起关闭（表单内嵌下拉的场景）
+      // 只关下拉不关弹窗：keydown 会冒泡到 reka Dialog 的 window 级 Esc 监听，
+      // stopPropagation 阻断冒泡后监听收不到，外层弹窗不跟随关闭（表单内嵌下拉场景）
       e.stopPropagation();
       open.value = false;
       document.removeEventListener("mousedown", onDocClick);
@@ -149,8 +152,10 @@ onBeforeUnmount(() => {
       type="button"
       class="custom-select-trigger"
       role="combobox"
+      :id="triggerId"
       :aria-label="ariaLabel || selectedLabel || placeholder"
       :aria-expanded="open"
+      :aria-controls="selectUid + '-listbox'"
       :disabled="disabled"
       aria-haspopup="listbox"
       :aria-activedescendant="open && activeIndex >= 0 ? selectUid + '-opt-' + activeIndex : undefined"
@@ -161,18 +166,22 @@ onBeforeUnmount(() => {
       <span v-else class="custom-select-value" :title="selectedLabel">{{ selectedLabel }}</span>
       <IconApp name="chevron-down" class="custom-select-arrow" stroke-linecap="round" stroke-linejoin="round" />
     </button>
-    <div v-if="open" class="custom-select-dropdown" role="listbox">
+    <!-- aria-controls 在收起态指向尚不渲染的 listbox：ARIA 1.2 允许引用不在
+         DOM 的元素，组合框模式的标准做法（打开时 id 恰好对上） -->
+    <div v-if="open" :id="selectUid + '-listbox'" class="custom-select-dropdown" role="listbox">
       <div
         v-for="(opt, i) in options"
         :id="selectUid + '-opt-' + i"
         :key="opt.value"
         class="custom-select-option"
         role="option"
+        tabindex="-1"
         :aria-selected="opt.value === modelValue"
         :aria-disabled="opt.disabled || undefined"
         :class="{ selected: opt.value === modelValue, active: i === activeIndex && !opt.disabled, disabled: opt.disabled }"
         @mousedown.prevent="select(opt)"
         @mouseenter="!opt.disabled && (activeIndex = i)"
+        @focusin="!opt.disabled && (activeIndex = i)"
       >
         {{ opt.label }}
       </div>

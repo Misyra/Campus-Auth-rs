@@ -69,18 +69,18 @@
   --text-secondary: var(--content-text-secondary);
   --text-muted: var(--content-text-muted);
   color: var(--text-primary);
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
+  /* E6 起面板由 AppPopover portal 到 body、floating-ui 按铃铛定位
+     （自身不再绝对定位，旧 top/right/margin-top 已删；与触发器的间距由库的
+     side-offset 提供），面板只负责自己的尺寸与外观。 */
   width: 320px;
   max-height: 400px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
   z-index: var(--z-overlay);
-  margin-top: var(--space-sm);
   animation: dropdownEnter var(--dur-base) var(--ease-out);
 }
 

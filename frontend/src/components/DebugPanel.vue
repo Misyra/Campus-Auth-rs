@@ -13,6 +13,7 @@ import { downloadBlob } from "@/utils/file";
 import { extractApiError } from "@/api/client";
 import { useToast } from "@/composables/useToast";
 import Modal from "./common/Modal.vue";
+import EmptyState from "./common/EmptyState.vue";
 
 const { session, loading, visible, screenshotStep, nextStep, runAll, stopDebug, stopping, getStepStatus, getStepResult, clearScreenshot } =
   useDebug();
@@ -170,10 +171,10 @@ async function handleFeedback(): Promise<void> {
             </div>
           </div>
 
-          <div v-if="!session.steps.length" class="empty-state empty-state--dashed">
+          <EmptyState v-if="!session.steps.length" dashed>
             <span class="debug-empty-icon">◻</span>
             <span>{{ loading ? "正在获取会话数据..." : session.running ? "会话详情恢复中，当前执行结束后自动补全" : "该任务没有可执行的步骤" }}</span>
-          </div>
+          </EmptyState>
         </div>
 
         <!-- 右侧：截图预览 -->

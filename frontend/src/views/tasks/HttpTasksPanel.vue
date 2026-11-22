@@ -2,7 +2,7 @@
 /** HTTP 登录任务面板：**列表页 + 二级编辑页**（方案 G 终稿，自动保存模式）。
  *
  * 与浏览器任务面板同构：列表态整页任务表格，编辑态独占全宽、面包屑返回，
- * 深链 `?task=<id>` 直达编辑器（方案编辑器的「配置HTTP 登录任务」入口沿用）。
+ * 深链 `?task=<id>` 直达编辑器（方案编辑器的「配置 HTTP 登录任务」入口沿用）。
  * 字段编辑由 `HttpFlowFields` 展示有序请求步骤与独立结果判断，变更 debounce
  * 静默 PUT；请求地址等缺口未补齐前自动保存不发请求（发了必 400），
  * 此时状态字改口「有 N 处待补全」并在编辑页顶部列出缺什么。
@@ -10,14 +10,18 @@
  * 编辑器里没有「调试」——HTTP 登录任务不经 Python Worker，无法单步执行，
  * 验证路径是试运行整个 HTTP 流程（凭据由宿主传入，见 useHttpTaskTest）。
  *
- * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
+ * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（浏览器 / HTTP / 脚本 / 定时四个列表面板同一份）。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
+import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import HttpFlowFields from "@/components/common/HttpFlowFields.vue";
 import HttpTestResult from "@/components/common/HttpTestResult.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useHttpTaskTest } from "@/composables/useHttpTaskTest";
 import { useCarrierField } from "@/composables/useCarrierField";
@@ -26,6 +30,7 @@ import { useRepoImport } from "@/composables/useRepoImport";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useToast } from "@/composables/useToast";
 import { autosaveLabel } from "@/utils/autosave";
 import { useDragSort } from "@/utils/drag";
@@ -63,16 +68,9 @@ const { tasks: browserTasks } = useTasks();
 const { scripts } = useScripts();
 const drag = useDragSort(httpTasks, { tasks: browserTasks, scripts, http: httpTasks });
 
-/**
- * 行下标 → 拖拽用的**全量**下标。
- *
- * 模板里 `v-for` 走的是搜索过滤后的 `visibleRows`，而 `useDragSort` 按传入列表
- * （全量 `httpTasks`）的 id 做 splice 与持久化：把过滤后的下标直接喂给它，搜索状态
- * 下拖一行会挪动另一条任务（另两个面板踩过同一个坑）。
- */
-function dragIndex(taskId: string): number {
-  return httpTasks.value.findIndex((t) => t.id === taskId);
-}
+// 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无 HTTP 登录任务」）
+const directory = useTaskDirectory();
+const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
 
 /**
  * 测试凭据：任务里不含账号密码（凭据属于方案），而任务页没有方案上下文，
@@ -139,44 +137,8 @@ const rows = computed(() => buildHttpTaskRows(httpTasks.value, bindingIndex.valu
 
 const visibleRows = computed(() => filterHttpTaskRows(rows.value, searchQuery.value));
 
-// ===== 行尾 ⋯ 菜单 =====
-const openMenuId = ref("");
-
-function toggleRowMenu(taskId: string): void {
-  openMenuId.value = openMenuId.value === taskId ? "" : taskId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-});
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
 // ===== 编辑态 =====
 
@@ -221,7 +183,6 @@ const NOTICE_HELP =
   "HTTP 登录要生效，需在侧边栏「方案」里把登录方式设为「HTTP 登录」并选中一个任务。\n\n" +
   "本页只负责编辑与测试：任务本身不含账号密码，凭据与匹配规则留在方案里。";
 
-/** 自动保存状态字（缺口优先：缺口态说的是「有 N 处待补全，改动暂未保存」） */
 /** 自动保存状态字（缺口优先；新建未落盘时也不能说"改动自动保存"） */
 const autosaveText = computed(() =>
   autosaveLabel(autosaveState.value, draftGapsNow.value, isNewDraft.value),
@@ -247,9 +208,10 @@ onMounted(async () => {
         class="tsk-search"
         type="text"
         placeholder="搜索名称 / ID / 描述 / 请求地址"
-        aria-label="搜索HTTP 登录任务"
+        aria-label="搜索 HTTP 登录任务"
       />
-      <button type="button" class="btn btn-sm" title="从文件导入HTTP 登录任务" @click="importHttpTask">
+      <CommunityTasksEntry />
+      <button type="button" class="btn btn-sm" title="从文件导入 HTTP 登录任务" @click="importHttpTask">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
       </button>
@@ -260,19 +222,19 @@ onMounted(async () => {
         target="_blank"
         rel="noopener"
         class="btn btn-sm"
-        title="把你的HTTP 登录任务分享到任务仓库，供他人一键导入"
+        title="把你的 HTTP 登录任务分享到任务仓库，供他人一键导入"
       >
         <IconApp name="share-2" class="icon-sm" />
         分享适配
       </a>
       <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
         <IconApp name="plus" class="icon-sm" />
-        新建HTTP 登录任务
+        新建 HTTP 登录任务
       </button>
     </div>
 
     <div class="card tsk-table-card">
-      <table class="tsk-table">
+      <table class="tsk-table http-tasks-table">
         <colgroup>
           <col class="tsk-col-drag" />
           <col class="tsk-col-name" />
@@ -284,56 +246,80 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th class="tsk-drag-cell"></th>
-            <th>名称</th>
-            <th class="tsk-cell-id">任务 ID</th>
-            <th class="tsk-cell-flex">请求</th>
-            <th class="tsk-cell-bind">绑定方案</th>
-            <th class="tsk-cell-mtime">最近修改</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col" class="tsk-drag-cell"></th>
+            <th scope="col">名称</th>
+            <th scope="col" class="tsk-cell-id">任务 ID</th>
+            <th scope="col" class="tsk-cell-flex">请求</th>
+            <th scope="col" class="tsk-cell-bind">绑定方案</th>
+            <th scope="col" class="tsk-cell-mtime">最近修改</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!httpTasks.length">
+          <tr v-if="listLoading">
             <td colspan="7">
-              <div class="empty-state">
-                <IconApp name="globe" :stroke-width="1.5" />
-                <span>暂无HTTP 登录任务</span>
-                <span class="empty-desc">HTTP 登录任务直接向网关发登录请求，不开浏览器、不需要 Python 与 Playwright</span>
-                <div class="empty-actions">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载 HTTP 登录任务…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!httpTasks.length">
+            <td colspan="7">
+              <EmptyState icon="globe" :stroke-width="1.5" title="暂无 HTTP 登录任务" description="HTTP 登录任务直接向网关发登录请求，不开浏览器、不需要 Python 与 Playwright">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
-                    <IconApp name="plus" />新建HTTP 登录任务
+                    <IconApp name="plus" />新建 HTTP 登录任务
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr v-else-if="!visibleRows.length">
             <td colspan="7">
-              <div class="empty-state">
-                <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的HTTP 登录任务</span>
-              </div>
+              <EmptyState icon="search" :stroke-width="1.5" :title="`没有匹配「${searchQuery}」的 HTTP 登录任务`" />
             </td>
           </tr>
           <tr
             v-for="row in visibleRows"
             :key="row.id"
             data-draggable-list
-            @dragstart="drag.handleDragStart($event, dragIndex(row.id))"
-            @dragover="drag.onDragOver($event, dragIndex(row.id))"
-            @drop="drag.onDrop($event, dragIndex(row.id))"
+            @dragstart="drag.handleDragStart($event, drag.indexOf(row.id))"
+            @dragover="drag.onDragOver($event, drag.indexOf(row.id))"
+            @drop="drag.onDrop($event, drag.indexOf(row.id))"
             @dragend="drag.onDragEnd($event)"
             @click="openEditor(row.id)"
           >
             <td class="tsk-drag-cell" @click.stop>
-              <div
-                class="task-drag-handle"
-                title="拖拽排序"
-                @mousedown="drag.onHandleMouseDown($event)"
-                @mouseup="drag.onHandleMouseUp($event)"
-              >
-                <IconApp name="list" class="icon-sm" />
+              <div class="tsk-order-group">
+                <!-- 拖拽把手是指针专用装饰：键盘排序走旁边「上移 / 下移」按钮，
+                     屏读器不播报避免与按钮重复（no-static 由此豁免） -->
+                <div
+                  class="task-drag-handle"
+                  title="拖拽排序"
+                  aria-hidden="true"
+                  @mousedown="drag.onHandleMouseDown($event)"
+                  @mouseup="drag.onHandleMouseUp($event)"
+                >
+                  <IconApp name="list" class="icon-sm" />
+                </div>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`上移：${row.name || row.id}`"
+                  :aria-label="`上移：${row.name || row.id}`"
+                  :disabled="drag.indexOf(row.id) === 0"
+                  @click="drag.moveBy(row.id, -1)"
+                >
+                  <IconApp name="chevron-up" class="icon-sm" />
+                </button>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`下移：${row.name || row.id}`"
+                  :aria-label="`下移：${row.name || row.id}`"
+                  :disabled="drag.indexOf(row.id) === httpTasks.length - 1"
+                  @click="drag.moveBy(row.id, 1)"
+                >
+                  <IconApp name="chevron-down" class="icon-sm" />
+                </button>
               </div>
             </td>
             <td>
@@ -354,32 +340,26 @@ onMounted(async () => {
                   v-for="name in row.boundProfiles"
                   :key="name"
                   class="badge badge--sm badge--success"
-                  :title="`方案「${name}」的HTTP 登录指向本任务`"
+                  :title="`方案「${name}」的 HTTP 登录指向本任务`"
                 >{{ name }}</span>
               </template>
               <span v-else class="tsk-muted">未绑定</span>
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(row.modifiedAt) }}</span></td>
             <td class="tsk-actions" @click.stop>
-              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${row.name || row.id}`" @click="openEditor(row.id)">
+              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${row.name || row.id}`" :aria-label="`编辑：${row.name || row.id}`" @click="openEditor(row.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${row.name || row.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === row.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(row.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === row.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button type="button" role="menuitem" :disabled="duplicatingIds.has(row.id)" @click="runRowAction(() => duplicateHttpTask(row.id))">复制为新任务</button>
-                <button type="button" role="menuitem" :disabled="exportingIds.has(row.id)" @click="runRowAction(() => exportHttpTask(row.id))">导出 JSON</button>
-                <button type="button" role="menuitem" class="tsk-menu-danger" @click="runRowAction(() => deleteHttpTask(row.id))">删除</button>
-              </div>
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${row.name || row.id}`" :aria-label="`更多操作：${row.name || row.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="duplicatingIds.has(row.id)" @select="duplicateHttpTask(row.id)">复制为新任务</AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="exportingIds.has(row.id)" @select="exportHttpTask(row.id)">导出 JSON</AppDropdownMenuItem>
+                <AppDropdownMenuItem class="tsk-menu-danger" @select="deleteHttpTask(row.id)">删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>
@@ -388,7 +368,7 @@ onMounted(async () => {
         <span>共 {{ httpTasks.length }} 个任务</span>
         <span v-if="searchQuery.trim()">· {{ visibleRows.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
@@ -405,7 +385,7 @@ onMounted(async () => {
     </div>
 
     <div class="tsk-editor-head">
-      <h2 class="tsk-editor-title">{{ httpTaskDraft.name || '未命名HTTP 登录任务' }}</h2>
+      <h2 class="tsk-editor-title">{{ httpTaskDraft.name || '未命名 HTTP 登录任务' }}</h2>
       <span :class="autosaveText.cls">{{ autosaveText.text }}</span>
       <span class="tsk-spacer"></span>
       <button type="button" class="btn btn-sm" title="导出任务 JSON" @click="exportHttpTask(httpTaskDraft.id)">
@@ -448,7 +428,7 @@ onMounted(async () => {
               <div class="form-group">
                 <label :for="`${uid}-id`">任务 ID</label>
                 <input :id="`${uid}-id`" :value="httpTaskDraft.id" type="text" disabled />
-                <span class="hint">自动生成，用来绑定方案；如需另一份任务，请复制。</span>
+                <span class="hint">自动生成，用于绑定方案</span>
               </div>
             </details>
           </div>
@@ -490,15 +470,14 @@ onMounted(async () => {
             </div>
             <div class="form-row">
               <div class="form-group">
-                <label>测试运营商</label>
-                <CustomSelect v-model="carrierSelection" :options="CARRIER_OPTIONS" aria-label="测试运营商" />
+                <label :for="`${uid}-test-carrier`">测试运营商</label>
+                <CustomSelect v-model="carrierSelection" :options="CARRIER_OPTIONS" :trigger-id="`${uid}-test-carrier`" />
               </div>
               <div v-if="showCustomCarrier" class="form-group">
                 <label :for="`${uid}-test-carrier-custom`">自定义运营商</label>
                 <input :id="`${uid}-test-carrier-custom`" v-model.trim="customCarrierValue" type="text" placeholder="校园专网" />
               </div>
             </div>
-            <p class="hint">按顺序执行当前填写的全部步骤。测试凭据不会保存到任务；任务配置补齐后自动保存。</p>
             <HttpTestResult v-if="testResult" :result="testResult" />
           </div>
         </div>
@@ -542,10 +521,11 @@ onMounted(async () => {
 /* 面板专属样式：共享版式（列表页 / 表格 / 菜单 / 二级页 / 状态字 / 缺口条）在
    styles/pages/tasks.css 的 `tsk-*` 组里，这里只留本面板独有的两处。 */
 
-/* 名称列略宽于共享值：本表的名称格是两行（名称 + 描述副行），20% 会把描述挤成半句；
-   剩余宽度仍由「请求」列（`tsk-col-flex` = auto）吃。 */
-.tsk-table col.tsk-col-name {
-  width: 24%;
+/* 名称列略宽于共享默认值：本表的名称格是两行（名称 + 描述副行），20% 会把描述挤成
+   半句；剩余宽度仍由「请求」列（`tsk-col-flex` = auto）吃。共享列宽已改走
+   `--tsk-col-name-w` 变量（见 styles/pages/tasks.css），这里只声明变量，不改写共享值。 */
+.http-tasks-table {
+  --tsk-col-name-w: 24%;
 }
 
 .http-start-list { display: flex; flex-direction: column; gap: 14px; margin: 0; padding: 0; list-style: none; }
@@ -554,18 +534,20 @@ onMounted(async () => {
 .http-start-list p { margin: 2px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .http-repo-link { display: inline-flex; align-items: center; gap: 5px; width: fit-content; margin-top: 8px; padding: 5px 0; border: 0; background: none; color: var(--text-primary); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
 .http-repo-link:hover { color: var(--accent); text-decoration: underline; }
-.http-repo-link:focus-visible, .http-ref-functions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.http-repo-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .http-optional-info > summary, .http-writing-help > summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
 .http-optional-info > summary { padding: 3px 0 12px; }
 .http-optional-info > summary span { margin-left: 8px; font-size: 12px; }
 .http-writing-help > summary { padding: 16px 20px; }
-.http-writing-help > .card-body { padding-top: 0; }
-.http-optional-info summary:focus-visible, .http-writing-help summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* 折叠卡展开后首段贴住 summary：只声明 --card-body-pt（消费点在
+   styles/pages/tasks.css 的 .tasks-page .card-body），不改写共享类的 padding 值 */
+.http-writing-help > .card-body { --card-body-pt: 0; }
 .http-ref-functions { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .http-ref-functions summary { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12px; font-weight: 650; list-style: none; }
 .http-ref-functions summary::-webkit-details-marker { display: none; }
 .http-ref-functions summary span { margin-left: auto; color: var(--text-secondary); font-weight: 400; }
 .http-ref-functions[open] summary svg { transform: rotate(180deg); }
-.http-ref-functions .chip-row { margin-top: 12px; }
+.http-ref-functions .chip-row { --chip-row-mt: 12px; }
+.http-optional-info summary:focus-visible, .http-writing-help summary:focus-visible, .http-ref-functions summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 </style>

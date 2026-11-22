@@ -130,6 +130,8 @@ wait_for_selector
 
 因此任务自定义变量不能覆盖当前 Profile 的真实登录凭据；运行时结果可以在后续步骤中覆盖同名模板值。
 
+系统变量的值原样注入、不做链式展开：凭据本身若恰好含 `{{X}}` 字面量（例如密码中包含该序列），不会被二次替换成其他变量值；需要引用系统变量的链式写法请定义任务自定义变量（如 `"user": "{{USERNAME}}"`）。
+
 模板解析覆盖 `selector`、`value`、`frame`、`option_selector`、`target_selector`、`path`、`pattern`、脚本内容，以及扩展字段中的嵌套字符串，例如：
 
 ```json

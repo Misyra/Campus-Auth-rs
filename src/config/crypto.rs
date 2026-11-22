@@ -25,6 +25,7 @@ use zeroize::{Zeroize, Zeroizing};
 use fs4::FileExt;
 
 use crate::config::ConfigError;
+use crate::utils::io_human::io_error_at;
 
 /// 加密密文前缀
 pub const ENC_PREFIX: &str = "ENC:";
@@ -39,11 +40,50 @@ const NONCE_LEN: usize = 12;
 /// 允许两个版本在同一用户目录下共存。`.enc_key.rs` 不存在时会优先继承
 /// Python 旧版的 `.enc_key`（见 `PasswordCrypto::read_or_create_key`），
 /// 保证新旧版本共用同一密钥、密码互通（历史遗留：两版密钥各自生成导致冲突）。
+///
+/// 安卓例外（前置①，真机必败点收敛）：Android 应用进程通常无 HOME
+/// （`dirs::home_dir` 在 android target 只读 HOME 环境变量、无 getpwuid 回退），
+/// 静默回退 CWD 会落到 `/` → `/.campus_network_auth` 创建 EACCES → 首次保存/
+/// 解密带密码凭据必败。android 下密钥目录挂 `CAMPUS_AUTH_BASE_DIR`（JNI 启动层
+/// `ffi_android::nativeInit` 先于容器构造注入的应用私有目录），目录名沿用桌面的
+/// `.campus_network_auth` 保持布局一致；解析语义与 `utils::paths::resolve_base_dir`
+/// 同源（非空生效、trim 容忍）。桌面/OpenWrt 构建不读该变量（paths.rs 侧文档
+/// 承诺不设置）：密钥身份载体是 OS 用户主目录，即便用户手动设置 base 目录变量
+/// 也不迁移密钥——避免既有 ENC: 密文静默换钥后全部无法解密。
 pub fn default_key_path() -> PathBuf {
-    let mut dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    if cfg!(target_os = "android")
+        && let Some(dir) =
+            android_key_dir_from_env(std::env::var("CAMPUS_AUTH_BASE_DIR").ok().as_deref())
+    {
+        return dir.join(".enc_key.rs");
+    }
+    let mut dir = dirs::home_dir().unwrap_or_else(|| {
+        // 静默回退 CWD 会让不同工作目录下启动的实例各生成各的密钥：ENC: 密文
+        // 在 A 目录加密后到 B 目录启动就互解失败（症状为全部密码"损坏"），
+        // 必须显式告警让排查能看到根因而非只看到解密失败
+        tracing::warn!(
+            "无法确定用户主目录（HOME 环境变量缺失等），加密密钥路径回退到当前\
+             工作目录；在不同工作目录启动会各生成各的密钥，此前加密的 ENC: 密文\
+             将互相无法解密"
+        );
+        PathBuf::from(".")
+    });
     dir.push(".campus_network_auth");
     dir.push(".enc_key.rs");
     dir
+}
+
+/// 安卓密钥目录解析（纯函数，便于单测）：注入的 base 目录非空时挂其下 `.campus_network_auth`
+///
+/// 语义与 `utils::paths::resolve_base_dir` 同源：空串/纯空白视同未设置。
+/// 独立成函数是为了不触碰进程环境变量就能钉住解析行为——lib 测试与
+/// `utils::paths` 的环境变量用例共用同一进程，测试内 `set_var` 会引入并行竞态。
+fn android_key_dir_from_env(raw: Option<&str>) -> Option<PathBuf> {
+    let base = raw?.trim();
+    if base.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(base).join(".campus_network_auth"))
 }
 
 /// 密码加解密器，密钥延迟加载
@@ -310,7 +350,9 @@ impl PasswordCrypto {
     /// 锁保护下的密钥读取/生成核心逻辑
     fn read_or_create_key_inner(key_path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>, ConfigError> {
         if key_path.exists() {
-            let bytes = std::fs::read(key_path)?;
+            // 密钥错误文案只带路径与失败类别，绝不携带密钥内容等敏感信息
+            let bytes = std::fs::read(key_path)
+                .map_err(|e| io_error_at("读取加密密钥文件", key_path, e))?;
             if bytes.len() != KEY_LEN {
                 // 密钥长度异常：备份旧文件并生成新密钥。
                 // 换钥意味着旧密钥加密的全部密码将无法解密（用户需重新输入），
@@ -343,6 +385,10 @@ impl PasswordCrypto {
             }
             let mut arr = [0u8; KEY_LEN];
             arr.copy_from_slice(&bytes);
+            // P3-17：读取路径长度校验通过后 best-effort 收紧权限——手动把密钥
+            // 拷贝到新机器等场景会以 0644 等宽权限落盘长期可读；失败仅 warn
+            // 不阻断读取（与生成 / Python 继承两条写入路径同一口径）
+            Self::set_key_permissions(key_path);
             return Ok(Zeroizing::new(arr));
         }
         // `.enc_key.rs` 不存在：优先继承 Python 旧版密钥，避免两版各持一密钥导致
@@ -391,6 +437,9 @@ impl PasswordCrypto {
         if let Some(parent) = key_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // atomic_write_bytes（tempfile 默认 0600 创建 + rename）使密钥文件自诞生
+        // 即 0600，不存在「先 0644 落盘再 chmod」窗口；set_key_permissions 是
+        // 对该保证的显式兜底（兼覆盖旧版本遗留的宽权限文件）
         match crate::utils::io::atomic_write_bytes(key_path, arr.as_ref()) {
             Ok(()) => Self::set_key_permissions(key_path),
             Err(e) => tracing::warn!("写入继承密钥到 {} 失败: {e}", key_path.display()),
@@ -416,11 +465,16 @@ impl PasswordCrypto {
         let key = Zeroizing::new(arr);
 
         if let Some(parent) = key_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| io_error_at("创建加密密钥目录", parent, e))?;
         }
         // 原子写（tmp + fsync + rename）：就地 std::fs::write 半写损坏的密钥
-        // 会让全部 ENC: 密文永久不可解（下次启动按长度校验失败换新钥）
-        crate::utils::io::atomic_write_bytes(key_path, key.as_ref())?;
+        // 会让全部 ENC: 密文永久不可解（下次启动按长度校验失败换新钥）。
+        // tempfile 在 Unix 默认以 0600 创建临时文件（mode(0o600)，umask 只能收紧
+        // 无 group/other 位），rename 后密钥文件自诞生即 0600，不存在
+        // 「先 0644 落盘再 chmod」的权限竞态窗口
+        crate::utils::io::atomic_write_bytes(key_path, key.as_ref())
+            .map_err(|e| io_error_at("写入加密密钥文件", key_path, e))?;
         // 首次生成新密钥属关键安全事件：旧密文（若有）此后均不可解，必须留痕
         tracing::info!(
             path = %key_path.display(),
@@ -432,35 +486,58 @@ impl PasswordCrypto {
         Ok(key)
     }
 
-    /// 收紧密钥文件权限（尽力而为，失败静默：密钥已写入，仅权限未收紧）
+    /// 收紧密钥文件权限（尽力而为，失败 warn 留痕：密钥已写入/已可读，仅权限未收紧）
     ///
     /// Unix 0600；Windows 借 icacls 移除继承权限并授予当前用户完全控制
     /// （仅授 (R) 会导致后续轮转密钥时写入被拒，需授 (F)）。
-    /// 生成与 Python 继承两条写入路径共用，避免继承路径遗漏权限收紧。
+    /// 生成与 Python 继承两条写入路径、以及既有合法密钥的读取路径（P3-17：
+    /// 手动拷贝到新机器会以宽权限落盘）共用，避免任一路径遗漏权限收紧。
+    /// icacls 调用的成败必须检查：域账号解析失败等环境问题会让 ACL 收紧
+    /// 静默失效，warn 留痕（含退出码）便于排查。
     fn set_key_permissions(key_path: &Path) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(key_path, perms);
+            if let Err(e) = std::fs::set_permissions(key_path, perms) {
+                tracing::warn!(
+                    path = %key_path.display(),
+                    error = %e,
+                    "收紧加密密钥文件权限为 0600 失败"
+                );
+            }
         }
         #[cfg(windows)]
         {
             let username = std::env::var("USERNAME").unwrap_or_default();
+            if username.is_empty() {
+                tracing::warn!(
+                    path = %key_path.display(),
+                    "无法确定当前用户名（USERNAME 为空），跳过 Windows ACL 收紧"
+                );
+                return;
+            }
             let domain = std::env::var("USERDOMAIN").unwrap_or_default();
-            if !username.is_empty() {
-                let account = if domain.is_empty() {
-                    username
-                } else {
-                    format!("{domain}\\{username}")
-                };
-                // stderr 重定向到 null，避免环境无域账号解析时刷屏
-                let _ = std::process::Command::new("icacls")
-                    .arg(key_path)
-                    .arg("/inheritance:r")
-                    .arg(format!("/grant:r \"{account}\":(F)"))
-                    .stderr(std::process::Stdio::null())
-                    .status();
+            let account = if domain.is_empty() {
+                username
+            } else {
+                format!("{domain}\\{username}")
+            };
+            // stderr 重定向到 null，避免环境无域账号解析时刷屏；成败必须检查
+            match std::process::Command::new("icacls")
+                .arg(key_path)
+                .arg("/inheritance:r")
+                .arg(format!("/grant:r \"{account}\":(F)"))
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!(
+                    path = %key_path.display(),
+                    code = ?status.code(),
+                    "icacls 收紧加密密钥文件 ACL 失败"
+                ),
+                Err(e) => tracing::warn!(path = %key_path.display(), error = %e, "icacls 调用失败"),
             }
         }
         #[cfg(not(any(unix, windows)))]
@@ -480,6 +557,33 @@ mod tests {
         let key_path = tmp.path().join(".enc_key");
         let crypto = PasswordCrypto::new(key_path);
         (tmp, crypto)
+    }
+
+    // ============ 密钥路径解析（前置①：安卓挂 CAMPUS_AUTH_BASE_DIR） ============
+
+    /// 前置①：安卓密钥目录挂 `CAMPUS_AUTH_BASE_DIR`（与 resolve_base_dir 同源语义）
+    ///
+    /// 真机必败点收敛：android 进程无 HOME，不挂 base 目录会落到 `/` 创建
+    /// `/.campus_network_auth` 必然 EACCES，首次保存带密码凭据即失败
+    #[test]
+    fn test_android_key_dir_from_env() {
+        // 有效注入：密钥目录挂 base 下的 `.campus_network_auth`（与桌面
+        // `~/.campus_network_auth` 同名，保持两平台布局一致）
+        assert_eq!(
+            android_key_dir_from_env(Some("/data/user/0/rs.campusauth.app/files")),
+            Some(PathBuf::from(
+                "/data/user/0/rs.campusauth.app/files/.campus_network_auth"
+            ))
+        );
+        // 首尾空白容忍（与 resolve_base_dir 的 trim 口径一致）
+        assert_eq!(
+            android_key_dir_from_env(Some("  /base  ")),
+            Some(PathBuf::from("/base/.campus_network_auth"))
+        );
+        // 空串 / 纯空白 / 未设置：视同未设置，回退桌面 home 解析
+        assert_eq!(android_key_dir_from_env(Some("")), None);
+        assert_eq!(android_key_dir_from_env(Some("   ")), None);
+        assert_eq!(android_key_dir_from_env(None), None);
     }
 
     // ============ AES-256-GCM 加解密往返 ============
@@ -690,6 +794,32 @@ mod tests {
     }
 
     // ============ 密钥文件损坏处理 ============
+
+    /// P3-17：已存在的合法密钥文件读取路径应收紧权限
+    ///
+    /// 手动拷贝密钥到新机器等场景会以 0644 宽权限落盘长期可读；读取路径
+    /// （不生成、不换钥）校验通过后 best-effort 收紧为 0600（模式照搬
+    /// web::auth 秘钥文件「覆写宽权限文件后必须收紧」的测试口径）
+    #[cfg(unix)]
+    #[test]
+    fn test_existing_key_read_path_tightens_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let key_path = tmp.path().join(".enc_key.rs");
+        // 模拟外部拷贝：直接以 0644 落盘一份长度合法的密钥
+        std::fs::write(&key_path, [7u8; KEY_LEN]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let crypto = PasswordCrypto::new(key_path.clone());
+        // 首次加解密走密钥读取路径（文件已存在且合法，不触发生成/换钥）
+        let encrypted = crypto.encrypt("secret").unwrap();
+        assert_eq!(
+            &*crypto.decrypt_to_zeroizing("p", &encrypted).unwrap(),
+            "secret"
+        );
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "读取既有合法密钥后应收紧为 0600");
+    }
 
     #[test]
     fn test_corrupt_key_file_generates_new_key() {

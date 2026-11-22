@@ -5,6 +5,7 @@
 //! 保证运行期修改即时生效。
 
 pub mod decision;
+pub mod diagnostics;
 pub mod model;
 pub mod portal;
 pub mod probes;
@@ -43,8 +44,8 @@ const INTERFACE_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// 监测相关错误
 #[derive(Debug, thiserror::Error)]
 pub enum MonitorError {
-    /// reqwest 客户端构建失败
-    #[error("reqwest 客户端构建失败: {0}")]
+    /// 网络监测客户端构建失败（含出口准备失败时的错误透传）
+    #[error("网络监测客户端构建失败：{0}")]
     ClientBuild(String),
 }
 
@@ -118,9 +119,36 @@ enum CheckPurpose {
     PostLoginVerification,
 }
 
+/// 监测客户端缓存键：出口模式、静态代理身份或证书策略任一变化即重建客户端
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MonitorClientKey {
+    /// 出口模式（Direct 与 System 代理身份同为空串，但 System 不强制 no_proxy，须区分）
+    mode: crate::network::settings::NetworkMode,
+    /// [`PreparedEgress::cacheable_identity`] 的身份串（静态代理 URL 或空串）
+    proxy_identity: Option<String>,
+    /// 是否忽略无效证书（证书策略变化必须重建）
+    ignore_https_errors: bool,
+}
+
+/// 按出口租约与证书策略构建监测客户端（重定向固定 none，连接池空闲 90s）
+fn build_monitor_client(
+    egress: &crate::network::egress::PreparedEgress,
+    ignore_https_errors: bool,
+) -> Result<reqwest::Client, MonitorError> {
+    egress
+        .client_builder()
+        .map_err(|e| MonitorError::ClientBuild(e.to_string()))?
+        .redirect(Policy::none())
+        .danger_accept_invalid_certs(ignore_https_errors)
+        .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
+        .build()
+        .map_err(|e| MonitorError::ClientBuild(e.to_string()))
+}
+
 /// 网络监测服务
 ///
 /// 持有配置与原子计数器；每轮检测持有独立出口租约，避免旧网卡连接继续复用。
+/// 出口恒定（Direct/System/静态 Proxy）时跨轮复用缓存的 reqwest 客户端连接池。
 pub struct MonitorService {
     /// 配置服务（用于热读取 RuntimeConfig）
     config_service: Arc<ConfigService>,
@@ -132,6 +160,11 @@ pub struct MonitorService {
     check_count: AtomicU64,
     /// “所有探测类型均已禁用”告警是否已降级（首次 warn，后续 debug）
     all_disabled_warned: AtomicBool,
+    /// 监测客户端缓存：键任一变化即重建（并发 miss 各建一个、后者覆盖，无害）
+    client_cache: std::sync::Mutex<Option<(MonitorClientKey, reqwest::Client)>>,
+    /// 缓存命中次数（仅测试，验证跨轮复用）
+    #[cfg(test)]
+    client_cache_hits: AtomicU64,
 }
 
 impl MonitorService {
@@ -149,6 +182,9 @@ impl MonitorService {
             metrics,
             check_count: AtomicU64::new(0),
             all_disabled_warned: AtomicBool::new(false),
+            client_cache: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            client_cache_hits: AtomicU64::new(0),
         })
     }
 
@@ -241,14 +277,33 @@ impl MonitorService {
             crate::network::egress::PreparedEgress::prepare(network.unwrap_or(&rt.network))
                 .await
                 .map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
-        let client = egress
-            .client_builder()
-            .map_err(|e| MonitorError::ClientBuild(e.to_string()))?
-            .redirect(Policy::none())
-            .danger_accept_invalid_certs(rt.browser.ignore_https_errors)
-            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
-            .build()
-            .map_err(|e| MonitorError::ClientBuild(e.to_string()))?;
+        // Interface 出口每轮必变（本地回环代理端口随机），不得缓存客户端；出口恒定
+        // （Direct/System/静态 Proxy）时按缓存键复用，避免连接池每轮作废重做
+        // TCP+TLS 握手（A17）。键含出口模式与证书策略，任一变化即重建。
+        let ignore_https_errors = rt.browser.ignore_https_errors;
+        let client = match egress.cacheable_identity() {
+            None => build_monitor_client(&egress, ignore_https_errors)?,
+            Some(identity) => {
+                let key = MonitorClientKey {
+                    mode: egress.settings.mode,
+                    proxy_identity: Some(identity),
+                    ignore_https_errors,
+                };
+                let mut cached = self.client_cache.lock().unwrap_or_else(|e| e.into_inner());
+                match cached.as_ref() {
+                    Some((cached_key, client)) if *cached_key == key => {
+                        #[cfg(test)]
+                        self.client_cache_hits.fetch_add(1, Ordering::Relaxed);
+                        client.clone()
+                    }
+                    _ => {
+                        let client = build_monitor_client(&egress, ignore_https_errors)?;
+                        *cached = Some((key, client.clone()));
+                        client
+                    }
+                }
+            }
+        };
         let start = Instant::now();
 
         let mut tasks: Vec<BoxFuture<(ProbeKind, ProbeOutcome, Vec<PerProbeDetail>)>> = Vec::new();
@@ -555,6 +610,12 @@ impl MonitorService {
             m.probe_total.load(Ordering::Relaxed),
             m.login_total.load(Ordering::Relaxed),
         ))
+    }
+
+    /// 客户端缓存命中次数（仅测试用，验证 Direct/System 模式跨轮复用连接池）
+    #[cfg(test)]
+    fn client_cache_hit_count(&self) -> u64 {
+        self.client_cache_hits.load(Ordering::Relaxed)
     }
 
     /// 组装 ProbeReport 并递增计数/指标
@@ -965,6 +1026,79 @@ mod tests {
         assert_eq!(
             report.assessment.recovery_advice,
             RecoveryAdvice::WaitForNetwork
+        );
+    }
+
+    /// Direct 模式下同一 service 连续两轮诊断：首轮建缓存，第二轮必须命中
+    /// 复用连接池，不得每轮重建 reqwest Client（回归 A17）。
+    #[tokio::test]
+    async fn test_client_cache_hits_in_direct_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = spawn_always_204().await;
+        let monitor =
+            monitor_with_http_target(&tmp, Arc::new(WiredDetect::new()), true, &target, false)
+                .await;
+
+        let report = monitor.diagnose_once().await.unwrap();
+        assert_eq!(report.assessment.status, NetworkStatus::Online);
+        assert_eq!(
+            monitor.client_cache_hit_count(),
+            0,
+            "首轮缓存为空，必须新建客户端"
+        );
+
+        let report = monitor.diagnose_once().await.unwrap();
+        assert_eq!(report.assessment.status, NetworkStatus::Online);
+        assert!(
+            monitor.client_cache_hit_count() >= 1,
+            "Direct 模式第二轮必须命中缓存客户端"
+        );
+    }
+
+    /// 出口模式变更后必须换缓存键重建客户端：切到指向已关闭端口的静态 Proxy 时，
+    /// 若误复用旧直连客户端（no_proxy）会绕过失效代理误判在线（回归 A17）。
+    #[tokio::test]
+    async fn test_client_cache_miss_when_mode_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = spawn_always_204().await;
+        let monitor =
+            monitor_with_http_target(&tmp, Arc::new(WiredDetect::new()), true, &target, false)
+                .await;
+
+        // Direct 模式前两轮：建缓存并命中
+        let report = monitor.diagnose_once().await.unwrap();
+        assert_eq!(report.assessment.status, NetworkStatus::Online);
+        let report = monitor.diagnose_once().await.unwrap();
+        assert_eq!(report.assessment.status, NetworkStatus::Online);
+        assert!(
+            monitor.client_cache_hit_count() >= 1,
+            "前置条件：同模式第二轮命中缓存"
+        );
+
+        // 占用后立即释放端口，得到确定已关闭的本地代理地址
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_addr = closed.local_addr().unwrap();
+        drop(closed);
+
+        let config = monitor.config_service.clone();
+        let profiles = crate::config::ProfileService::new(config.clone());
+        let mut profile = profiles.get_profile("default").unwrap();
+        profile.network = Some(crate::network::settings::NetworkSettings {
+            mode: crate::network::settings::NetworkMode::Proxy,
+            proxy_url: format!("http://{closed_addr}"),
+            ..Default::default()
+        });
+        profiles
+            .update_profile("default", profile, false)
+            .await
+            .unwrap();
+        config.reload().await.unwrap();
+
+        let report = monitor.diagnose_once().await.unwrap();
+        assert_ne!(
+            report.assessment.status,
+            NetworkStatus::Online,
+            "代理失效时不得复用旧直连客户端误判在线（缓存键须随 mode 变化重建）"
         );
     }
 }

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 应用名 -->
+    <string name="app_name">认证喵</string>
+
+    <!-- 前台服务通知渠道（id="auth_guard"，IMPORTANCE_LOW 静默常驻） -->
+    <string name="channel_name">认证守护</string>
+    <string name="channel_description">常驻展示校园网认证状态，掉线时自动重新认证</string>
+    <string name="notif_title">认证喵守护运行中</string>
+    <string name="notif_text_waiting">核心初始化中，请打开应用完成启动…</string>
+    <string name="notif_text_core_error">核心状态读取失败</string>
+
+    <!-- 主界面 -->
+    <string name="core_init_failed">认证核心启动失败，请重启应用；若反复出现请收集日志反馈</string>
+
+    <!-- WebView 下载（P2-10：blob/http 下载交系统处理） -->
+    <string name="download_queued">已加入系统下载</string>
+    <string name="download_saved">导出已保存：%1$s</string>
+    <string name="download_failed">导出失败，请重试或收集日志反馈</string>
+
+    <!-- TODO(P2) 设置 UI：保活指引文案占位（Doze 白名单 / 国产 ROM 自启动引导） -->
+    <string name="keepalive_hint">为保证掉线自动重连，建议在系统设置中关闭本应用的电池优化，并在自启动管理中允许「认证喵」开机自启</string>
+</resources>

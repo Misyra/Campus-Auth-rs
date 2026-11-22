@@ -12,13 +12,16 @@ import { IS_OPENWRT } from "@/utils/platform";
  *
  * 版式走 `styles/pages/tasks.css` 的 `tsk-*` 共享组，本页只写自己的列宽与单元格结构。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
 import ToggleSwitch from "@/components/common/ToggleSwitch.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import Modal from "@/components/common/Modal.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, watch } from "vue";
 import { useScheduledTasks } from "@/composables/useScheduledTasks";
 import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
@@ -176,47 +179,11 @@ function lastRunBadge(task: ScheduledTask): { cls: string; text: string } {
     : { cls: "badge badge--sm badge--warn", text: "失败" };
 }
 
-// ===== 行尾 ⋯ 菜单（与任务页三个面板同口径：同一时刻只开一个） =====
-const openMenuId = ref("");
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
-function toggleRowMenu(taskId: string): void {
-  openMenuId.value = openMenuId.value === taskId ? "" : taskId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
-// 必须在 onBeforeUnmount 里直接摘掉 document 监听
 onBeforeUnmount(() => {
   st.stopScheduledRunPolling();
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-  closeRowMenu();
 });
 
 const NOTICE_HELP =
@@ -258,29 +225,31 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th>名称</th>
-            <th class="sch-cell-type">类型</th>
-            <th class="sch-cell-trigger">触发</th>
-            <th class="sch-cell-target">目标</th>
-            <th class="sch-cell-timeout">超时</th>
-            <th class="sch-cell-result">最近结果</th>
-            <th class="sch-cell-enabled">启用</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col">名称</th>
+            <th scope="col" class="sch-cell-type">类型</th>
+            <th scope="col" class="sch-cell-trigger">触发</th>
+            <th scope="col" class="sch-cell-target">目标</th>
+            <th scope="col" class="sch-cell-timeout">超时</th>
+            <th scope="col" class="sch-cell-result">最近结果</th>
+            <th scope="col" class="sch-cell-enabled">启用</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!st.scheduledTasks.value.length">
+          <tr v-if="st.scheduledLoading.value && !st.scheduledLoaded.value">
             <td colspan="8">
-              <div class="empty-state">
-                <IconApp name="calendar" :stroke-width="1.5" />
-                <span>暂无定时任务</span>
-                <span class="empty-desc">让「浏览器任务」或「脚本」在每天固定时间、或程序启动后自动跑一次</span>
-                <div class="empty-actions">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载定时任务…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!st.scheduledTasks.value.length">
+            <td colspan="8">
+              <EmptyState icon="calendar" :stroke-width="1.5" title="暂无定时任务" description="让「浏览器任务」或「脚本」在每天固定时间、或程序启动后自动跑一次">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewScheduledTask">
                     <IconApp name="plus" />新建定时任务
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr
@@ -320,6 +289,7 @@ onMounted(async () => {
               <ToggleSwitch
                 :model-value="task.enabled !== false"
                 :disabled="st.togglingIds.has(task.id)"
+                :aria-label="`启用或停用定时任务 ${task.name || task.id}`"
                 @update:model-value="st.toggleScheduledTask(task.id)"
               />
             </td>
@@ -328,6 +298,7 @@ onMounted(async () => {
                 type="button"
                 class="btn btn-sm btn-icon-only"
                 :title="st.runningIds.has(task.id) ? '运行中…' : `立即运行：${task.name || task.id}`"
+                :aria-label="st.runningIds.has(task.id) ? '运行中…' : `立即运行：${task.name || task.id}`"
                 :disabled="st.runningIds.has(task.id)"
                 @click="st.runScheduledTask(task.id)"
               >
@@ -337,29 +308,24 @@ onMounted(async () => {
                 type="button"
                 class="btn btn-sm btn-icon-only"
                 :title="`编辑：${task.name || task.id}`"
+                :aria-label="`编辑：${task.name || task.id}`"
                 @click="openEditor(task.id)"
               >
                 <IconApp name="pencil" class="icon-sm" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${task.name || task.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === task.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(task.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === task.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button type="button" role="menuitem" :disabled="st.runningIds.has(task.id)" @click="runRowAction(() => st.runScheduledTask(task.id))">
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" :aria-label="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="st.runningIds.has(task.id)" @select="st.runScheduledTask(task.id)">
                   {{ st.runningIds.has(task.id) ? '运行中…' : '立即运行' }}
-                </button>
-                <button type="button" role="menuitem" @click="runRowAction(() => st.loadScheduledTaskHistory(task.id))">查看历史</button>
-                <button type="button" role="menuitem" @click="runRowAction(() => openEditor(task.id))">编辑</button>
-                <button type="button" role="menuitem" class="tsk-menu-danger" @click="runRowAction(() => st.deleteScheduledTask(task.id))">删除</button>
-              </div>
+                </AppDropdownMenuItem>
+                <AppDropdownMenuItem @select="st.loadScheduledTaskHistory(task.id)">查看历史</AppDropdownMenuItem>
+                <AppDropdownMenuItem @select="openEditor(task.id)">编辑</AppDropdownMenuItem>
+                <AppDropdownMenuItem class="tsk-menu-danger" @select="st.deleteScheduledTask(task.id)">删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>
@@ -367,7 +333,7 @@ onMounted(async () => {
       <div v-if="st.scheduledTasks.value.length" class="tsk-foot">
         <span>共 {{ st.scheduledTasks.value.length }} 个定时任务</span>
         <span class="tsk-spacer"></span>
-        <span>点行进入编辑 · 改动自动保存 · 开关控制启用</span>
+        <span>点行进入编辑 · 开关控制启用</span>
       </div>
     </div>
   </div>
@@ -452,7 +418,7 @@ onMounted(async () => {
                 <label for="scheduled-task-target">{{ draft.task_type === 'script' ? '选择脚本' : '选择浏览器任务' }}</label>
                 <CustomSelect v-if="draft.task_type === 'script'" v-model="draft.target_id" :options="scriptTargetOptions" />
                 <CustomSelect v-else v-model="draft.target_id" :options="browserTargetOptions" />
-                <span class="hint">{{ draft.task_type === 'script' ? '在「任务 → 脚本」页创建和管理脚本' : '浏览器任务会自动打开网页并执行登录等自动化操作' }}</span>
+                <span v-if="draft.task_type === 'script'" class="hint">在「任务 → 脚本」页创建和管理脚本</span>
               </div>
             </div>
           </div>
@@ -465,10 +431,11 @@ onMounted(async () => {
                  启动后执行没有它（三个并列短字段另起一行）。 -->
             <div class="form-row form-row--flex">
               <div class="form-group flex-1">
-                <label>触发方式</label>
+                <label for="scheduled-task-trigger">触发方式</label>
                 <CustomSelect
                   :model-value="draft.trigger"
                   :options="triggerOptions"
+                  trigger-id="scheduled-task-trigger"
                   @update:model-value="onTriggerChange"
                 />
               </div>
@@ -478,7 +445,6 @@ onMounted(async () => {
                 <input id="scheduled-task-time" class="sch-time-input" type="time"
                   :value="formatScheduleTime(draft.schedule)"
                   @input="onTimeChange($event as InputEvent)" />
-                <span class="hint">每天到这个时间执行一次</span>
                 <!-- 非每日表达式（*/5 之类）在表单里表达不了：说清保存会改写调度语义 -->
                 <span v-if="draft._originalCronInvalid" class="hint text-danger">
                   原表达式「{{ draft._originalCron }}」不是每日时间格式。不动上面的时间就保持原样；
@@ -545,9 +511,6 @@ onMounted(async () => {
         <div class="card">
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
-            <p class="tsk-side-hint">定时任务只调度<strong>「浏览器任务」或「脚本」</strong>，它本身不含登录参数。</p>
-            <p class="tsk-side-hint">HTTP 登录任务不在这里调度——它的验证入口是任务编辑器里的「发送测试请求」。</p>
-            <p class="tsk-side-hint">改动自动保存；名称与目标没补齐前不会落盘，新建任务因此不会在磁盘上留下半成品。</p>
             <p class="tsk-side-hint">立即运行只是「排入执行」，成败与耗时见「执行历史」。</p>
           </div>
         </div>
@@ -561,9 +524,7 @@ onMounted(async () => {
     <div v-if="st.scheduledTaskHistoryLoading.value" class="loading-state">
       <div class="spinner"></div><p>加载中...</p>
     </div>
-    <div v-else-if="!st.scheduledTaskHistory.value.length" class="empty-state">
-      <p>暂无执行记录</p>
-    </div>
+    <EmptyState v-else-if="!st.scheduledTaskHistory.value.length" title="暂无执行记录" />
     <div v-else class="history-list">
       <div
         v-for="(record, index) in st.scheduledTaskHistory.value"

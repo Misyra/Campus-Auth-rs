@@ -32,7 +32,7 @@ pub type ProfileMergeFn = Box<dyn FnOnce(ProfileData) -> ProfileMergeFuture + Se
 pub type SettingsMergeFn = Box<dyn FnOnce(SettingsData) -> Result<SettingsData, String> + Send>;
 /// 损坏文件备份前缀
 pub const CORRUPT_PREFIX: &str = "settings.corrupt.";
-/// 原子写入临时文件前缀（`utils::io::atomic_write_bytes` 生成的 `.tmp_XXXX.json`）
+/// 原子写入临时文件前缀（`utils::io::atomic_write_bytes` 生成的 `.tmp_XXXX.<目标扩展名>`）
 pub const TMP_PREFIX: &str = ".tmp_";
 /// 迁移备份目录前缀
 pub const BACKUP_PREFIX: &str = ".backup.v5.";
@@ -45,8 +45,9 @@ pub use profiles::{ProfileApi, ProfileSummary};
 pub use runtime::{ConfigReloadSignal, ProfileSnapshot, RuntimeConfig, build_runtime_config};
 pub use schema::{
     AppSettings, BrowserSettings, GlobalConfig, LoggingSettings, LoginChannel, MonitorSettings,
-    PauseSettings, ProfileData, RetrySettings, SettingsData, StartupAction, UpdateChannel,
-    UpdaterSettings, WorkerSettings,
+    NOTIFICATION_EVENT_TYPES, NotificationChannel, NotificationChannelKind, NotificationHeader,
+    NotificationSettings, PauseSettings, ProfileData, RetrySettings, SettingsData, StartupAction,
+    UpdateChannel, UpdaterSettings, WorkerSettings,
 };
 pub use service::ConfigError;
 pub use service::ConfigService;

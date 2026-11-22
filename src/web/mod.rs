@@ -7,11 +7,13 @@
 pub mod auth;
 pub mod error;
 pub mod host;
+pub mod openapi;
 mod operations;
 mod routes;
 mod ssrf;
 pub mod state;
 mod static_files;
+mod validate;
 mod ws;
 
 use axum::Router;
@@ -61,10 +63,37 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/monitor/test-redirect", || {
             post(routes::monitor::test_redirect)
         }),
+        // ---- 推送通知（notification）----
+        // 测试发送：用请求体里的通道配置（草稿）或已保存通道 id 真发一条测试消息；
+        // 不受推送总开关限制，响应逐通道回执且不回显凭据
+        ("POST", "/api/notification/test", || {
+            post(routes::notification::test_notification)
+        }),
+        // ---- 一键网络诊断（diagnostics）----
+        // 诊断失败是数据不是请求错误：端点恒 200 + 结构化逐项结果（见
+        // monitor::diagnostics 模块说明），结果已脱敏
+        ("POST", "/api/diagnostics/run", || {
+            post(routes::diagnostics::run_diagnostics)
+        }),
+        // ---- 事件流（events）----
+        // Dashboard 活动概览数据源：读 `<base>/events` 近 N 天 JSONL。
+        // 事件载荷在事件类型层已白名单式脱敏（crate::events 设计红线），
+        // 端点不做二次过滤；days 钳制 1..=30、单文件行数上限兜底响应体积
+        ("GET", "/api/events", || get(routes::events::get_events)),
+        // 诊断包导出：zip 附件下载（manifest + 脱敏配置快照 + 事件流 + 日志 +
+        // 环境观测），白名单式收集且深度脱敏，走标准鉴权
+        ("GET", "/api/diagnostics/bundle", || {
+            get(routes::diagnostics::export_bundle)
+        }),
         // ---- 配置（config）----
         ("GET", "/api/config", || get(routes::config::get_settings)),
         ("PATCH", "/api/config", || {
             patch(routes::config::patch_settings)
+        }),
+        // 单设置段局部更新（前端自动保存按 dirty 段增量提交）：请求体即该段
+        // 自身对象，后端包一层复用全量 PATCH 的原子链；未知段 404
+        ("PATCH", "/api/config/{section}", || {
+            patch(routes::config::patch_settings_section)
         }),
         ("POST", "/api/config/reload", || {
             post(routes::config::reload_settings)
@@ -115,6 +144,13 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         }),
         ("POST", "/api/profiles/auto-switch", || {
             post(routes::profiles::auto_switch)
+        }),
+        // 配置会话（持久浏览器 + 交互录制）：start/stop 编排录制的取回与写盘
+        ("POST", "/api/profiles/{id}/config-session/start", || {
+            post(routes::profiles::start_config_session)
+        }),
+        ("POST", "/api/profiles/{id}/config-session/stop", || {
+            post(routes::profiles::stop_config_session)
         }),
         // ---- 任务（tasks）----
         ("GET", "/api/tasks", || get(routes::tasks::list_tasks)),
@@ -255,6 +291,12 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
         ("POST", "/api/environment/bootstrap", || {
             post(routes::system::bootstrap_environment)
         }),
+        ("POST", "/api/environment/mirror-probe", || {
+            post(routes::system::probe_environment_mirrors)
+        }),
+        ("PUT", "/api/environment/mirror-preference", || {
+            put(routes::system::set_mirror_preference)
+        }),
         // ---- 卸载（uninstall）----
         ("GET", "/api/uninstall/detect", || {
             get(routes::uninstall::detect_uninstall)
@@ -359,9 +401,17 @@ fn route_table() -> Vec<(&'static str, &'static str, RouteBuilder)> {
             get(routes::tools::task_recorder)
         }),
         // ---- 鉴权（auth）----
-        // token 发放端点：响应读取受 CORS 保护（仅 localhost Origin 可读），
-        // 跨域恶意网页无法获取 token，中间件对此路径豁免
-        ("GET", "/api/auth/token", || get(auth::token_handler)),
+        // bootstrap/管理密码换取端点：请求方必须已持有不经网络发放的凭据
+        // （界面 fragment 携带的 bootstrap，或非回环绑定下的管理密码），
+        // 不构成免鉴权绕过，中间件对此路径豁免（见 web::auth 模块说明）
+        ("POST", "/api/auth/exchange", || {
+            post(auth::exchange_handler)
+        }),
+        // 回环监听下的本地免引导入口：直接下发 token（2026-11-13 本地信任模型，
+        // 非回环绑定 404；取舍与残留风险见 web::auth 模块文档）
+        ("GET", "/api/auth/local-token", || {
+            get(auth::local_token_handler)
+        }),
     ]
 }
 
@@ -527,6 +577,48 @@ mod tests {
         );
     }
 
+    /// 生成 spec ⊇ 路由表（T5-0 契约管线）
+    ///
+    /// [`openapi::merged_openapi_json`] 是生成侧权威文档（utoipa 注解域 ⊕ 手写
+    /// baseline），合并结果必须完整覆盖路由表——后续批次把更多域改为生成源时，
+    /// 本测试保证"注解 → 生成 spec"链路不丢路由；committed 文件的方法+路径
+    /// 一致性仍由上方 `openapi_json_matches_route_table` 兜底。
+    #[test]
+    fn generated_openapi_covers_route_table() {
+        let spec = crate::web::openapi::merged_openapi_json();
+        const METHODS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
+
+        let mut spec_set = std::collections::BTreeSet::new();
+        for (path, ops) in spec
+            .get("paths")
+            .and_then(|p| p.as_object())
+            .expect("合并 spec 应含 paths 对象")
+        {
+            if !path.starts_with("/api/") && path != "/api" {
+                continue;
+            }
+            for method in ops
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.keys())
+                .filter(|k| METHODS.contains(&k.as_str()))
+            {
+                spec_set.insert(format!(
+                    "{} {}",
+                    method.to_uppercase(),
+                    normalize_path(path)
+                ));
+            }
+        }
+
+        for (method, path, _) in route_table() {
+            assert!(
+                spec_set.contains(&format!("{method} {}", normalize_path(path))),
+                "路由表条目 {method} {path} 未被生成 spec 覆盖"
+            );
+        }
+    }
+
     /// CSP 必须同时放行远端字体所需的两个来源
     ///
     /// 远端 CSS 以外链样式表加载走 `style-src`，其内部 `@font-face` 的字体文件走
@@ -555,5 +647,49 @@ mod tests {
             script, "script-src 'self'",
             "script-src 只应限 'self'，不得引入外部脚本源"
         );
+    }
+
+    /// 组合级 rebinding 探针：鉴权豁免端点仍被 Host 校验包裹
+    ///
+    /// 钉住 `web::host` 模块声明的主要防护对象——rebinding 请求打到
+    /// `GET /api/auth/local-token`（auth 层豁免）必须被 host 层拦成 403，
+    /// 而非 401 / 200。auth / host 各自的单测互不感知挂载顺序，本测试把
+    /// 「auth 外层 → host 内层」的组合行为整体锁定：调换挂载顺序、把
+    /// local-token 移出豁免表或 host 层被绕过时直接失败。
+    #[tokio::test]
+    async fn rebinding_request_to_local_token_is_rejected_by_host_layer() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode, header};
+        use axum::routing::get;
+        use tower::ServiceExt;
+
+        // 与 build_router 同序：host 先挂（内层）、auth 后挂（外层）
+        let app = Router::new()
+            .route("/api/auth/local-token", get(|| async { "token" }))
+            .layer(middleware::from_fn(move |req, next| {
+                super::host::validate_host(super::host::HostPolicy::LoopbackOnly, req, next)
+            }))
+            .layer(middleware::from_fn_with_state(
+                std::sync::Arc::from("test-token"),
+                super::auth::auth_middleware,
+            ));
+
+        // rebinding 形态：Host 为攻击者域名 → host 层 403（非 401，更非 200）
+        let rebinding = Request::builder()
+            .uri("/api/auth/local-token")
+            .header(header::HOST, "attacker.example.com:50721")
+            .body(Body::empty())
+            .expect("构造请求");
+        let resp = app.clone().oneshot(rebinding).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 对照组：回环 Host 正常穿过豁免路径拿到 token
+        let legit = Request::builder()
+            .uri("/api/auth/local-token")
+            .header(header::HOST, "127.0.0.1:50721")
+            .body(Body::empty())
+            .expect("构造请求");
+        let resp = app.oneshot(legit).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

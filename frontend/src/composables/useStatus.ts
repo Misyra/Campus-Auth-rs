@@ -298,8 +298,12 @@ async function fetchStatus(): Promise<boolean> {
     return true;
   } catch (error) {
     frontendLogger.warn("status", "获取状态失败", error);
+    // P2-7：401 是凭据未就绪/失效（request() 内部已自动重取 token 重试过一次），
+    // 不是「后端没起」——静默等待鉴权恢复即可，「请检查后端是否已启动」的提示
+    // 只用于真传输失败，避免引导窗口期弹误导性网络故障 toast
+    if (error instanceof ApiError && error.status === 401) return false;
     if (fetchStatusFail.trackFailure()) {
-      notify(false, "无法连接到服务器，请检查后端是否已关闭", "network");
+      notify(false, "无法连接到服务器，请检查后端是否已启动", "network");
     }
     return false;
   }

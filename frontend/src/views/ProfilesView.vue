@@ -1,6 +1,8 @@
 <script setup lang="ts">
 /** 认证方案页：方案列表与编辑器、重定向检测及活动方案切换 */
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
+import FieldHelp from "@/components/common/FieldHelp.vue";
 import LoginChannelField from "@/components/common/LoginChannelField.vue";
 import ProxyBypassHelp from "@/components/common/ProxyBypassHelp.vue";
 import NetworkEgressFields from "@/components/common/NetworkEgressFields.vue";
@@ -22,6 +24,7 @@ import Modal from "@/components/common/Modal.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
 import type { ProfileSharePayload } from "@/api/types";
+import PersistentSessionSection from "@/views/profiles/PersistentSessionSection.vue";
 import { useToast } from "@/composables/useToast";
 import { frontendLogger } from "@/utils/logger";
 
@@ -271,7 +274,8 @@ async function confirmImport(): Promise<void> {
 </script>
 
 <template>
-  <div class="page-content">
+  <!-- profiles-page：页面差异类（gap:0，见 profiles.css 文件头）；page-in 为页面入场基元 -->
+  <div class="page-content profiles-page page-in">
     <!-- ===== 编辑器模式 ===== -->
     <template v-if="showEditor && p.editingProfile.value">
       <div class="profiles-topbar profile-editor-topbar">
@@ -331,7 +335,9 @@ async function confirmImport(): Promise<void> {
               @keydown.space.prevent="matchExpanded = !matchExpanded"
             >
               网络匹配
-              <span class="field-help" tabindex="0" role="note" data-tip="设置匹配规则后，自动切换时会根据当前网络环境选择对应方案。两项都留空则仅手动切换。">?</span>
+              <!-- 这里曾是裸拷贝的 .field-help span（靠伪元素气泡）；收编进组件，
+                   点击 ? 钉住说明不再误触发折叠头的展开/收起（组件内部 click.stop） -->
+              <FieldHelp text="设置匹配规则后，自动切换时会根据当前网络环境选择对应方案。两项都留空则仅手动切换。" />
               <!-- 折叠时把已配置的值透出来，避免"看不见就以为没配" -->
               <span v-if="!matchExpanded && matchSummary" class="editor-collapse-summary">{{ matchSummary }}</span>
               <IconApp name="chevron-down" class="editor-collapse-chevron" />
@@ -473,6 +479,15 @@ async function confirmImport(): Promise<void> {
               @open-guide="openHttpTaskConfig"
             />
           </div>
+
+          <!-- 持久会话（浏览器记住密码）：仅浏览器渠道有意义（后端登录编排按渠道
+               门控）；新建草稿传入 undefined profile-id，分区只给开关与指引 -->
+          <PersistentSessionSection
+            v-if="p.editingProfile.value.login_channel === 'browser'"
+            v-model="p.editingProfile.value"
+            :profile-id="p.editingProfile.value._isNew ? undefined : p.editingProfile.value.id"
+            @session-stopped="p.fetchProfiles(true)"
+          />
         </div>
         <div class="card-footer">
           <button class="btn btn-secondary" @click="closeEditor">取消</button>
@@ -532,7 +547,7 @@ async function confirmImport(): Promise<void> {
             <span v-if="p.detectResult.value.ssid">SSID "{{ p.detectResult.value.ssid }}"</span>
           </span>
         </div>
-        <button class="btn btn-icon-only btn-sm" @click="p.detectResult.value = null" title="关闭">
+        <button class="btn btn-icon-only btn-sm" @click="p.detectResult.value = null" title="关闭" aria-label="关闭">
           <IconApp name="close" class="icon-sm" />
         </button>
       </div>
@@ -551,20 +566,39 @@ async function confirmImport(): Promise<void> {
         </div>
       </div>
 
-      <!-- 空状态：复用全局 .empty-state（misc.css），标题/描述走通用工具类 -->
-      <div v-if="!Object.keys(p.profiles.value).length" class="card">
-        <div class="empty-state">
-          <IconApp name="wifi" :stroke-width="1.5" />
-          <strong class="empty-title">暂无配置方案</strong>
-          <span class="empty-desc">为不同网络环境创建独立的认证配置</span>
+      <!-- 首拉加载态：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无配置方案」） -->
+      <div v-if="p.profilesLoading.value && !Object.keys(p.profiles.value).length" class="card">
+        <div class="loading-state"><div class="spinner"></div><p>正在加载方案…</p></div>
+      </div>
+
+      <!-- 空状态：EmptyState base 组件（样式仍出自全局 .empty-state，misc.css） -->
+      <div v-else-if="!Object.keys(p.profiles.value).length" class="card">
+        <EmptyState
+          icon="wifi"
+          :stroke-width="1.5"
+          title="暂无配置方案"
+          description="为不同网络环境创建独立的认证配置"
+        >
           <button class="btn btn-sm btn-primary" @click="openEditor(null)">创建第一个方案</button>
-        </div>
+        </EmptyState>
       </div>
 
       <!-- 方案列表 -->
       <div v-else class="profiles-list">
         <div v-for="(info, pid) in p.profiles.value" :key="pid" class="profile-card" :class="{ active: p.activeProfileId.value === pid }">
-          <div class="profile-card-main" @click="!p.autoSwitch.value && p.setActiveProfile(pid)" :class="{ disabled: p.autoSwitch.value && p.activeProfileId.value !== pid }">
+          <!-- role=button + 键盘激活：卡片主体内部只有展示性 span（操作按钮在
+               卡片底部独立容器），可安全承载交互语义；autoSwitch 关闭时置
+               aria-disabled 与既有视觉禁用态对齐 -->
+          <div
+            class="profile-card-main"
+            role="button"
+            tabindex="0"
+            :aria-disabled="p.autoSwitch.value"
+            @click="!p.autoSwitch.value && p.setActiveProfile(pid)"
+            @keydown.enter.prevent="!p.autoSwitch.value && p.setActiveProfile(pid)"
+            @keydown.space.prevent="!p.autoSwitch.value && p.setActiveProfile(pid)"
+            :class="{ disabled: p.autoSwitch.value && p.activeProfileId.value !== pid }"
+          >
             <div class="profile-card-header">
               <div class="profile-card-title">
                 <span class="profile-card-name">{{ info.name || pid }}</span>

@@ -1,20 +1,69 @@
-//! 安装包版本号提取：解析 Windows PE 的 VERSIONINFO 资源
+//! 安装包版本号提取：解析 Windows PE 的 VERSIONINFO 资源 / 非 Windows 读版本 marker
 //!
 //! 手动「选择安装包」路径的版本闸门需要**包内真实版本**：远程清单在离线 /
 //! 未发版时不可用（且不应成为上传路径的依赖），压缩包文件名中的版本号可被任意
-//! 改写，都不构成可信来源。本模块手写最小 PE 解析器（DOS header → PE header →
-//! optional header → 资源目录 → `RT_VERSION` → `VS_VERSIONINFO`），不引入新依赖。
+//! 改写，都不构成可信来源。Windows 走本模块手写的最小 PE 解析器（DOS header →
+//! PE header → optional header → 资源目录 → `RT_VERSION` → `VS_VERSIONINFO`），
+//! 不引入新依赖。
 //!
-//! 平台差异：仅 Windows 产物（PE）携带 VERSIONINFO 资源；非 Windows 平台恒返回
-//! `None`，上传路径据此以 `VersionUnrecognized` 明确拒绝（fail-closed），不降级。
+//! 平台差异：Windows 产物（PE）携带 VERSIONINFO 资源；macOS / Linux 产物
+//! （Mach-O / ELF）没有等价机制，版本来源改为发布包组装产物——**版本 marker
+//! 文件 `campus-auth.version`**（与 exe 同目录，内容为一行 Cargo.toml 版本号，
+//! 由 release.yml / build.ps1 组装便携包时写入，见 `read_version_marker`）。
+//! marker 缺失（源码 `cargo run`、手工目录、无 marker 的自制包）或损坏（非
+//! semver 内容）时返回 `None`，回退链与"无版本资源"完全一致：上传路径据此以
+//! `VersionUnrecognized` 明确拒绝（fail-closed），不降级。
+//!
+//! # marker 格式与扩展余地（T6-4 签名设计预留）
+//!
+//! 当前格式锁定为**单行纯版本号**（严格 semver，UTF-8，结尾换行可选；读取端
+//! trim 后整行解析，兼容 LF / CRLF）。将来 ed25519 签名清单可按以下任一路径
+//! 扩展，本批格式不锁死后续选择：
+//! - **同目录伴随文件**（如 `campus-auth.version.sig`）：marker 内容不变，
+//!   签名与被签内容（marker 字节）分离，读取端按需叠加验签；
+//! - **键值结构**（如首行起 `version=...`、`signature=...`）：读取端可按首行
+//!   是否含 `=` 分流——无 `=` 视为旧版纯版本号，平滑兼容已组装的旧包。
 
 use std::path::Path;
+
+/// 非 Windows 平台的版本 marker 文件名（与 exe 同目录，发布包组装产物）
+///
+/// 命名与便携标记 `campus-auth.portable` 同族；写入方为 release.yml /
+/// build.ps1 的便携包组装段，本模块只负责读取。
+#[cfg(not(windows))]
+const VERSION_MARKER_FILE: &str = "campus-auth.version";
+
+/// 非 Windows 版本探测：读取 exe 同目录的版本 marker 文件
+///
+/// marker 是发布包组装产物（release.yml / build.ps1 组装便携包时写入，内容为
+/// 一行 Cargo.toml 版本号）；源码 `cargo run` / 手工目录没有 marker。更新器
+/// 实际调用时探测的是**解压到 staging 的包内 exe**（见 `mod.rs` 上传路径），
+/// marker 随压缩包全量解压天然与包内 exe 同源同步——不存在"装好后 marker
+/// 过期"的问题；安装目录里的 marker 在应用内更新后不会被 helper 同步（步骤
+/// 5.5 只 overlay resources/docs/python_worker），仅具参考价值，不得作为已
+/// 安装版本的权威来源。
+///
+/// 有效性口径：取首个非空行 trim 后必须通过严格 semver 解析（`semver` 已是
+/// 更新器依赖，marker 由机器从 Cargo.toml 写入，无需宽松归一化）。缺失、空
+/// 文件、非 semver 内容一律返回 `None`，与"无版本资源"同回退链——不给下游
+/// 宽松归一化"救回"畸形数据的机会（fail-closed）。
+#[cfg(not(windows))]
+fn read_version_marker(exe_path: &Path) -> Option<String> {
+    let marker = exe_path.parent()?.join(VERSION_MARKER_FILE);
+    let content = std::fs::read_to_string(&marker).ok()?;
+    // 单行纯版本号；trim 兼容 LF / CRLF / 无结尾换行三种组装写入形态
+    let line = content.lines().map(str::trim).find(|l| !l.is_empty())?;
+    semver::Version::parse(line).ok()?;
+    Some(line.to_owned())
+}
 
 /// 从可执行文件中提取版本号字符串
 ///
 /// Windows 上解析 PE 的 VERSIONINFO 资源（优先 `StringFileInfo` 中的
 /// `ProductVersion` / `FileVersion` 字符串，缺失时回退 `VS_FIXEDFILEINFO` 的
-/// 数字 FileVersion）；非 Windows、非 PE、缺资源或解析失败一律返回 `None`。
+/// 数字 FileVersion）；非 Windows 上读取 exe 同目录的版本 marker 文件
+/// （发布包组装产物，见 `read_version_marker`）。非 PE、缺资源、解析失败、
+/// marker 缺失或损坏一律返回 `None`。
 pub fn extract_exe_version(path: &Path) -> Option<String> {
     #[cfg(windows)]
     {
@@ -24,8 +73,7 @@ pub fn extract_exe_version(path: &Path) -> Option<String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = path;
-        None
+        read_version_marker(path)
     }
 }
 
@@ -534,5 +582,76 @@ mod tests {
         std::fs::write(&exe, b"plain text file").unwrap();
         assert_eq!(extract_exe_version(&exe), None);
         assert_eq!(extract_exe_version(&dir.path().join("missing")), None);
+    }
+
+    /// 非 Windows：marker 存在且内容合法 semver → 返回版本串
+    ///
+    /// 覆盖正式版与预发布号（Cargo.toml 版本可为 `x.y.z-prerelease`），以及
+    /// CRLF 结尾（Windows 组装段的 Set-Content 在 Windows 上写 CRLF，跨平台
+    /// 解压后由读取端 trim 兜住）。
+    #[cfg(not(windows))]
+    #[test]
+    fn extract_exe_version_reads_version_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("campus-auth");
+        std::fs::write(&exe, b"fake mach-o bytes").unwrap();
+
+        for (content, expected) in [
+            ("5.1.3\n", "5.1.3"),
+            ("5.2.0-beta.1\n", "5.2.0-beta.1"),
+            ("5.1.3\r\n", "5.1.3"),
+            ("5.1.3", "5.1.3"),
+        ] {
+            std::fs::write(dir.path().join(VERSION_MARKER_FILE), content).unwrap();
+            assert_eq!(
+                extract_exe_version(&exe).as_deref(),
+                Some(expected),
+                "marker 内容 {content:?} 应提取出 {expected}"
+            );
+        }
+    }
+
+    /// 非 Windows：marker 缺失（源码运行时语义）或损坏 → None，回退链不变
+    ///
+    /// 损坏样例覆盖：空文件、便携标记误放、JSON 串、带尾注的版本行——读取端
+    /// 严格 semver 校验全部拒绝，上传路径据此 `VersionUnrecognized` fail-closed。
+    #[cfg(not(windows))]
+    #[test]
+    fn extract_exe_version_marker_missing_or_corrupt_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("campus-auth");
+        std::fs::write(&exe, b"fake mach-o bytes").unwrap();
+
+        // 缺失：目录里没有 marker（源码 cargo run / 无 marker 自制包）
+        assert_eq!(extract_exe_version(&exe), None);
+
+        for garbage in [
+            "",
+            "\n",
+            "campus-auth-portable-v1\n",
+            "{\"version\": \"5.1.3\"}\n",
+            "5.1.3 extra\n",
+            "v5.1.3\n",
+            "not a version\n",
+        ] {
+            std::fs::write(dir.path().join(VERSION_MARKER_FILE), garbage).unwrap();
+            assert_eq!(
+                extract_exe_version(&exe),
+                None,
+                "损坏 marker {garbage:?} 应返回 None"
+            );
+        }
+    }
+
+    /// 非 Windows：marker 与包内 exe 无关的目录越界不 panic（exe 无父目录形态）
+    ///
+    /// 传裸文件名时 marker 在当前工作目录解析（`parent()` 为空路径），不会 panic
+    /// 或误读；仅验证提取路径健壮性，语义上属"缺失 → None"。
+    #[cfg(not(windows))]
+    #[test]
+    fn extract_exe_version_marker_read_never_panics_on_odd_paths() {
+        // exe 路径指向不存在的中间目录
+        let missing = std::path::Path::new("/nonexistent-dir-xyz/campus-auth");
+        assert_eq!(extract_exe_version(missing), None);
     }
 }

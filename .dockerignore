@@ -1,4 +1,10 @@
 target
+# 镜像构建上下文只需源码与 Worker，以下仓库目录全部排除（gitignored 本地产物
+# 不进构建上下文）：fuzz 自带独立 target（cargo-fuzz 产物，本地可达数 GB）、
+# android 的 jniLibs 为构建产物、tests 为 Rust 集成测试与 mock 门户
+fuzz
+android
+tests
 frontend/node_modules
 frontend/dist
 python_worker/.venv

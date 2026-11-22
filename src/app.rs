@@ -78,26 +78,74 @@ pub fn build_router(
     log_tx: broadcast::Sender<LogEntry>,
     shutdown_tx: tokio::sync::watch::Sender<()>,
     host_policy: HostPolicy,
+    management_password_override: Option<String>,
+    allow_unauthenticated_bind: bool,
 ) -> anyhow::Result<axum::Router> {
     // 通用 WebSocket 事件通道（screenshot / step_progress 等），供 Bridge 推送
     let (ws_tx, _) = broadcast::channel::<String>(WS_EVENT_CAPACITY);
     // 将事件通道注入 Bridge，由其转发 Worker 事件
     container.bridge.set_event_tx(ws_tx.clone());
-    // 本地 API 鉴权 token：加载或生成并持久化到 config/.auth_token
-    let auth_token = crate::web::auth::load_or_create_token(&container.config.base_path())?;
+    // 本地 API 鉴权凭据：token 与 bootstrap 握手秘钥成对加载/生成，
+    // 持久化到 config/.auth_token 与 config/.auth_bootstrap（见 web::auth）
+    let credentials = crate::web::auth::load_or_create_auth(&container.config.base_path())?;
     let state = AppState::new(
         container,
         log_tx,
         ws_tx,
         shutdown_tx,
-        auth_token.into(),
+        credentials.token.into(),
+        credentials.bootstrap.into(),
+        management_password_override.map(Arc::from),
         host_policy,
+        allow_unauthenticated_bind,
     );
 
     // CORS 与 gzip 均由内层 `web::build_router` 统一处理（历史遗留 #16）：
     // 此处不再叠加 CompressionLayer，避免双层 gzip 判定（外层因 `Content-Encoding`
     // 已存在而退化为 Identity，但仍多一次 `should_compress` 开销）。
     Ok(crate::web::build_router(state))
+}
+
+/// 监听凭据门禁参数（启动期确定；T0a-2 fail-closed）
+///
+/// 非回环绑定（Docker / LAN 显式暴露）下，token 无法经界面 fragment 送达
+/// 远程用户，远程管理员只能凭管理密码经 `POST /api/auth/exchange` 换取
+/// token；无凭据的非回环绑定属配置错误，由 [`check_bind_credential_gate`]
+/// 在绑定前拒绝启动。
+#[derive(Clone, Debug)]
+pub struct BindCredentialGate {
+    /// 生效管理密码（CLI/env 覆盖优先于配置值，见
+    /// `web::auth::effective_management_password`；空串 = 未配置）
+    pub effective_password: String,
+    /// 显式豁免：接受无管理凭据的非回环绑定（`--allow-unauthenticated-bind`）
+    pub allow_unauthenticated_bind: bool,
+}
+
+/// 非回环绑定的凭据门禁（纯函数，便于单测；T0a-2 fail-closed）
+///
+/// 绑定非回环 && 无生效管理密码 && 未显式豁免 → `Err`（启动失败），错误信息
+/// 给出三条出路：`--management-password` / 配置 `management_password` /
+/// `--allow-unauthenticated-bind`。
+pub fn check_bind_credential_gate(
+    bind_ip: IpAddr,
+    gate: &BindCredentialGate,
+) -> Result<(), String> {
+    // 回环绑定不受门禁约束：fragment 握手即可信任
+    if bind_ip.is_loopback() {
+        return Ok(());
+    }
+    if gate.allow_unauthenticated_bind {
+        return Ok(());
+    }
+    if !gate.effective_password.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Web 服务绑定到非回环地址 {bind_ip}，但未配置管理凭据：局域网/容器内任何可达设备都能触碰全部 API。\
+         请任选其一后重新启动：1) 启动参数 --management-password <密码>（或环境变量 \
+         CAMPUS_AUTH_MANAGEMENT_PASSWORD）；2) 在设置中配置 management_password（settings.json 的 \
+         app.management_password）；3) 以 --allow-unauthenticated-bind 显式接受无凭据暴露（强烈不推荐）"
+    ))
 }
 
 /// 判断绑定错误是否可通过改用其他端口恢复
@@ -116,9 +164,13 @@ fn is_recoverable_port_error(error: &std::io::Error) -> bool {
 /// 不做“先探测再绑定”，避免探测与使用之间被其他进程抢占的 TOCTOU 竞态。
 /// 非回环地址（如 Docker/LAN 的 `0.0.0.0`）保持固定端口语义，失败时明确报错，
 /// 避免容器端口映射或外部客户端在不知情时失配。
+/// `credential_gate`：非回环绑定的管理凭据门禁（T0a-2 fail-closed，绑定前检查，
+/// 见 [`check_bind_credential_gate`]）；完整模式在服务容器初始化前调用，
+/// 门禁参数由 launcher 依据 CLI 覆盖与 settings.json 启动期读值构造。
 pub async fn prepare_axum_listener(
     port: u16,
     host: Option<&str>,
+    credential_gate: &BindCredentialGate,
 ) -> anyhow::Result<PreparedAxumListener> {
     let bind_ip = match host {
         Some(h) if !h.is_empty() => parse_bind_addr(h),
@@ -130,6 +182,11 @@ pub async fn prepare_axum_listener(
             }
         }
     };
+    // T0a-2 fail-closed：非回环绑定必须携带管理凭据或显式豁免。
+    // 先于绑定检查，避免「先占住端口再失败」留下中间态。
+    if let Err(message) = check_bind_credential_gate(bind_ip, credential_gate) {
+        anyhow::bail!(message);
+    }
     info!(%bind_ip, requested_port = port, "准备 Axum 监听端口");
 
     let requested_addr = SocketAddr::new(bind_ip, port);
@@ -171,6 +228,8 @@ pub fn start_axum_with_listener(
     container: Arc<ServiceContainer>,
     log_tx: broadcast::Sender<LogEntry>,
     prepared: PreparedAxumListener,
+    management_password_override: Option<String>,
+    allow_unauthenticated_bind: bool,
 ) -> anyhow::Result<AxumServeHandle> {
     let PreparedAxumListener {
         listener,
@@ -181,7 +240,14 @@ pub fn start_axum_with_listener(
     // Host 校验策略随绑定地址推导：回环绑定强制校验（阻断 DNS rebinding），
     // Docker/LAN 显式暴露跳过（见 web::host）
     let host_policy = HostPolicy::from_bind_ip(bind_ip);
-    let router = build_router(container.clone(), log_tx, shutdown_tx, host_policy)?;
+    let router = build_router(
+        container.clone(),
+        log_tx,
+        shutdown_tx,
+        host_policy,
+        management_password_override,
+        allow_unauthenticated_bind,
+    )?;
 
     // Router 构建成功后才发布运行端口，避免 auth token 等初始化失败时留下
     // “已有 Web 服务”的陈旧端口记录。
@@ -216,14 +282,25 @@ pub fn start_axum_with_listener(
 /// `host` 为绑定地址字符串（如 `127.0.0.1` / `0.0.0.0`），为空则根据环境自动选择。
 /// 完整模式优先拆用 [`prepare_axum_listener`] / [`start_axum_with_listener`]，以便在
 /// 初始化后台服务前确定端口；轻量模式按需启动可直接调用本函数。
+/// `credential_gate` / `management_password_override` 语义见
+/// [`prepare_axum_listener`] 与 [`start_axum_with_listener`]。
 pub async fn start_axum(
     container: Arc<ServiceContainer>,
     log_tx: broadcast::Sender<LogEntry>,
     port: u16,
     host: Option<&str>,
+    credential_gate: &BindCredentialGate,
+    management_password_override: Option<String>,
+    allow_unauthenticated_bind: bool,
 ) -> anyhow::Result<AxumServeHandle> {
-    let prepared = prepare_axum_listener(port, host).await?;
-    start_axum_with_listener(container, log_tx, prepared)
+    let prepared = prepare_axum_listener(port, host, credential_gate).await?;
+    start_axum_with_listener(
+        container,
+        log_tx,
+        prepared,
+        management_password_override,
+        allow_unauthenticated_bind,
+    )
 }
 
 /// 优雅关闭 Axum 服务器
@@ -271,12 +348,75 @@ mod tests {
             .expect("占用测试端口");
         let requested = occupied.local_addr().expect("读取测试端口").port();
 
-        let prepared = prepare_axum_listener(requested, Some("127.0.0.1"))
+        // 回环绑定不受门禁约束：空门禁即可
+        let gate = BindCredentialGate {
+            effective_password: String::new(),
+            allow_unauthenticated_bind: false,
+        };
+        let prepared = prepare_axum_listener(requested, Some("127.0.0.1"), &gate)
             .await
             .expect("应回退到系统分配端口");
 
         assert_ne!(prepared.port, requested);
         assert!(prepared.port > 0);
+    }
+
+    /// 凭据门禁（纯函数）：非回环 + 无凭据 → Err；有凭据 / 显式豁免 / 回环 → Ok
+    #[test]
+    fn test_check_bind_credential_gate() {
+        let lan_ip = IpAddr::from([192, 168, 1, 5]);
+        let no_gate = BindCredentialGate {
+            effective_password: String::new(),
+            allow_unauthenticated_bind: false,
+        };
+        // 非回环 + 无凭据 + 无豁免 → 拒绝，错误信息给出三条出路
+        let err = check_bind_credential_gate(lan_ip, &no_gate).unwrap_err();
+        assert!(err.contains("--management-password"));
+        assert!(err.contains("management_password"));
+        assert!(err.contains("--allow-unauthenticated-bind"));
+
+        // 有生效凭据 → 放行
+        let with_password = BindCredentialGate {
+            effective_password: "secret".to_string(),
+            allow_unauthenticated_bind: false,
+        };
+        assert!(check_bind_credential_gate(lan_ip, &with_password).is_ok());
+
+        // 显式豁免 → 放行（0.0.0.0 同样视为非回环暴露面）
+        let with_exempt = BindCredentialGate {
+            effective_password: String::new(),
+            allow_unauthenticated_bind: true,
+        };
+        assert!(check_bind_credential_gate(IpAddr::from([0, 0, 0, 0]), &with_exempt).is_ok());
+        assert!(check_bind_credential_gate(lan_ip, &with_exempt).is_ok());
+
+        // 回环绑定 → 无论凭据状态一律放行
+        let loopback = IpAddr::from([127, 0, 0, 1]);
+        assert!(check_bind_credential_gate(loopback, &no_gate).is_ok());
+        assert!(check_bind_credential_gate("::1".parse::<IpAddr>().unwrap(), &no_gate).is_ok());
+    }
+
+    /// 准备监听器时门禁生效：非回环绑定 + 无凭据 + 无豁免 → 启动失败（先于绑定）；
+    /// 同样无凭据的回环绑定不受门禁影响（对照，证明拒绝来自门禁而非网络环境）
+    #[tokio::test]
+    async fn test_prepare_listener_fails_closed_without_credentials() {
+        let gate = BindCredentialGate {
+            effective_password: String::new(),
+            allow_unauthenticated_bind: false,
+        };
+        // PreparedAxumListener 未实现 Debug，用 match 取错误而非 expect_err。
+        // 非回环地址不必真实存在于本机：门禁在绑定之前即拒绝
+        let message = match prepare_axum_listener(0, Some("192.168.1.5"), &gate).await {
+            Ok(_) => panic!("非回环无凭据绑定应被拒绝"),
+            Err(err) => err.to_string(),
+        };
+        assert!(message.contains("--management-password"));
+
+        // 对照组：同样无凭据的回环绑定正常成功
+        let prepared = prepare_axum_listener(0, Some("127.0.0.1"), &gate)
+            .await
+            .expect("回环绑定不受门禁约束");
+        assert!(prepared.bind_ip.is_loopback());
     }
 
     /// Windows WinNAT / Hyper-V 保留端口错误属于可恢复绑定错误

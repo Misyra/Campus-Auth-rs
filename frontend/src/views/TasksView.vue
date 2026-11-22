@@ -19,12 +19,9 @@ import IconApp from "@/components/common/IconApp.vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { activeChildId, TASK_NAV_CHILDREN } from "@/utils/navTree";
-import { useRepoImport } from "@/composables/useRepoImport";
 
 const route = useRoute();
 const router = useRouter();
-const repo = useRepoImport();
-const showReadyTasks = computed(() => ["tasks-browser", "tasks-http", "tasks-scripts"].includes(String(route.name)));
 
 /** 当前子项：供窄屏 pill 行点亮（宽屏由侧栏点亮） */
 const activeChild = computed(() => activeChildId(TASK_NAV_CHILDREN, String(route.name)));
@@ -35,7 +32,9 @@ function setTab(name: string): void {
 </script>
 
 <template>
-  <div class="page-content tasks-page">
+  <!-- page-in：消费 motion.css 的页面入场基元（外壳契约化后 pageEnter 已退役，
+       顶层页面根统一挂本类，见 layout.css 的 .page-content 契约注释） -->
+  <div class="page-content tasks-page page-in">
     <!-- 窄屏兜底导航：≤768px 时主侧栏只剩 64px 图标，子项文字放不下，侧栏里的二级
          导航整块隐藏（见 responsive.css），这里退化为横向可换行的 pill 行——否则窄屏
          只能靠手输地址到达其余四个面板。>768px 整块 display:none，不占位。
@@ -56,22 +55,9 @@ function setTab(name: string): void {
       </button>
     </nav>
 
-    <div v-if="showReadyTasks" class="ready-tasks-banner">
-      <div>
-        <strong>使用现成登录任务</strong>
-        <p>搜索学校，选择社区已做好的登录流程。浏览器、HTTP 直连和脚本任务统一浏览，导入后自动归类。</p>
-      </div>
-      <button type="button" class="btn btn-primary" @click="repo.showRepoImport()"><IconApp name="globe-grid" class="icon-sm" />选择现成任务</button>
-    </div>
+    <!-- 「使用现成登录任务」横幅已删除：常驻大卡片强推一个低频入口，喧宾夺主。
+         入口改为各面板工具栏里的「社区任务」按钮（CommunityTasksEntry，含首次
+         引导气泡），说明文案收进任务库弹窗自身。 -->
     <router-view />
   </div>
 </template>
-
-<style scoped>
-.ready-tasks-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; margin-bottom: 20px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius-md); background: var(--bg-card); }
-.ready-tasks-banner > div { min-width: 0; }
-.ready-tasks-banner strong { font-size: var(--text-lg); font-weight: 600; }
-.ready-tasks-banner p { margin: 5px 0 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.6; }
-.ready-tasks-banner button { flex: none; }
-@media (max-width: 768px) { .ready-tasks-banner { align-items: stretch; flex-direction: column; gap: 12px; padding: 14px; } .ready-tasks-banner button { align-self: flex-start; } }
-</style>

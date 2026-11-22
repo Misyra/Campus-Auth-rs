@@ -136,7 +136,22 @@ fn run_recovery(block_sync: bool, same_version: bool) {
     if same_version {
         command.env("CAMPUS_AUTH_RECOVERY_SAME_VERSION", "1");
     }
-    let output = command.output().unwrap();
+    // GitHub 托管 runner（ubuntu）偶发 ETXTBSY：本组三个用例并行、各自复制后
+    // 立即 exec 同一测试二进制，平台侧对刚落盘可执行文件的短暂写句柄（apparmor
+    // exec 转换一类）会与相邻 exec 重叠（PR #33 round 6 ubuntu 首现，此前五轮
+    // 恒绿、改动不涉该路径）。有界重试覆盖瞬态窗口；非该类错误原样失败
+    let output = 'spawn: {
+        for attempt in 0..3 {
+            match command.output() {
+                Ok(output) => break 'spawn output,
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 2 => {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                Err(e) => panic!("启动隔离恢复进程失败: {e}"),
+            }
+        }
+        unreachable!("重试循环的每个出口都有值或发散")
+    };
     assert!(
         output.status.success(),
         "{}\n{}",

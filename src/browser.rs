@@ -12,6 +12,68 @@ use std::path::Path;
 pub const NO_BROWSER_MESSAGE: &str =
     "当前无可用浏览器，请下载 Chromium（设置 · 浏览器页可一键安装）";
 
+/// 解析 App Paths 注册表默认值（REG_SZ/REG_EXPAND_SZ 展开后的宽字符）：
+/// 剥首尾 NUL、空白与包裹引号后要求非空路径。
+///
+/// cfg 含 test 使纯逻辑可在任意平台的测试构建单测（生产仅 Windows 编译）
+#[cfg(any(windows, test))]
+fn clean_app_paths_value(raw: &[u16]) -> Option<String> {
+    let text = String::from_utf16_lossy(raw.strip_suffix(&[0]).unwrap_or(raw));
+    let cleaned = text.trim().trim_matches('"');
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+/// 读取 App Paths 注册表默认值并校验目标存在（P3-39）
+///
+/// HKLM/HKCU 的 `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<exe>`
+/// 默认值登记可执行文件完整路径：自定义盘符/自定义目录安装的 Chrome/Edge
+/// 不在文件系统候选路径（Program Files/LocalAppData）内，仅能经此查到
+///（Chromium 下载兜底不受影响）。经 windows-sys 原生 `RegGetValueW`——与
+/// `utils::platform_windows` 的注册表读取同手段，无需新依赖；空值名读默认值，
+/// REG_EXPAND_SZ 一并接受由系统展开（部分安装器用 %ProgramFiles% 变量登记）；
+/// 登记残留指向已卸载路径时不误报（要求文件存在才返回）
+#[cfg(target_os = "windows")]
+fn app_paths_executable(exe_name: &str) -> Option<std::path::PathBuf> {
+    // HKEY 根键常量与取值 API 同在 Registry 模块（platform_windows 同源）
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
+    };
+
+    // 路径值远小于 4K 字符；不足时 RegGetValueW 返回错误而非截断误报。
+    // 缓冲按宽字符分配（REG_SZ 值为 UTF-16），pcbdata 按字节计数：len / 2 即字符数
+    let mut buf = vec![0u16; 4096];
+    let subkey = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{exe_name}");
+    let subkey_wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+    // 空值名（仅 NUL 结尾）读取键的默认值——App Paths 的登记形态
+    let default_value_name = [0u16];
+    for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        let mut len = (buf.len() * 2) as u32;
+        let code = unsafe {
+            RegGetValueW(
+                root,
+                subkey_wide.as_ptr(),
+                default_value_name.as_ptr(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        if code != 0 {
+            // 未登记（ERROR_FILE_NOT_FOUND 等）或读取失败：换下一个根键
+            continue;
+        }
+        let chars = (len as usize / 2).min(buf.len());
+        if let Some(path) = clean_app_paths_value(&buf[..chars]) {
+            let path = std::path::PathBuf::from(path);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 /// 检测系统是否安装了 Google Chrome
 #[cfg(target_os = "windows")]
 pub fn is_chrome_installed() -> bool {
@@ -32,7 +94,7 @@ pub fn is_chrome_installed() -> bool {
             .join("Application")
             .join("chrome.exe"),
     ];
-    candidates.iter().any(|p| p.exists())
+    candidates.iter().any(|p| p.exists()) || app_paths_executable("chrome.exe").is_some()
 }
 
 /// 检测系统是否安装了 Google Chrome（macOS）
@@ -55,6 +117,9 @@ pub fn is_chrome_installed() -> bool {
 }
 
 /// 检测系统是否安装了 Google Chrome（Linux）
+///
+/// 内部经 `which` 子进程探测（阻塞）；async 调用方不得直接调用，须经
+/// [`is_channel_available_async`] / [`first_available_channel_async`] 间接执行。
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn is_chrome_installed() -> bool {
     for bin in ["google-chrome", "google-chrome-stable"] {
@@ -90,7 +155,7 @@ pub fn is_edge_installed() -> bool {
             .join("Application")
             .join("msedge.exe"),
     ];
-    candidates.iter().any(|p| p.exists())
+    candidates.iter().any(|p| p.exists()) || app_paths_executable("msedge.exe").is_some()
 }
 
 /// 检测系统是否安装了 Microsoft Edge（macOS）
@@ -112,6 +177,9 @@ pub fn is_edge_installed() -> bool {
 }
 
 /// 检测系统是否安装了 Microsoft Edge（Linux）
+///
+/// 内部经 `which` 子进程探测（阻塞）；async 调用方不得直接调用，须经
+/// [`is_channel_available_async`] / [`first_available_channel_async`] 间接执行。
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn is_edge_installed() -> bool {
     for bin in ["microsoft-edge", "microsoft-edge-stable"] {
@@ -177,6 +245,27 @@ fn is_channel_available_with(
     }
 }
 
+/// [`is_channel_available`] 的异步变体：探测整体移入阻塞线程池
+///
+/// 同步版在 Linux 上需 spawn `which` 子进程（Edge/Chrome 同口径），托管渠道
+/// 判定含 `ms-playwright` 缓存目录扫描，均为阻塞 IO；Web 路由等同步调用方
+/// 继续用同步版，async 调用方（登录渠道预检/终验，经 login 模块 60s TTL
+/// 缓存）改走本变体，TTL 未命中时不再阻塞 tokio worker。`EnvironmentApi`
+/// 已要求 Send + Sync，`Arc<dyn>` 可整体移入阻塞闭包独占持有。
+pub async fn is_channel_available_async(
+    env: std::sync::Arc<dyn crate::environment::EnvironmentApi>,
+    channel: &str,
+    custom_path: &str,
+) -> bool {
+    let channel = channel.to_string();
+    let custom_path = custom_path.to_string();
+    tokio::task::spawn_blocking(move || is_channel_available(env.as_ref(), &channel, &custom_path))
+        .await
+        // JoinError 仅探测任务 panic 可达（阻塞任务不会被动取消）：探测为纯
+        // 查询，保守取「不可用」，让登录侧走渠道切换/失败兜底而非假阳性放行
+        .unwrap_or(false)
+}
+
 /// 首个可用的浏览器渠道（优先级：Edge → Chrome → Chromium → Firefox → WebKit）
 ///
 /// 系统浏览器优先：免下载、启动快（Windows 出厂即带 Edge，因此绝大多数用户
@@ -191,6 +280,19 @@ pub fn first_available_channel(
 /// 首个可用渠道的核心判定；`managed` 注入以便单测脱离真实环境
 fn first_available_channel_with(managed: impl Fn(&str) -> bool) -> Option<&'static str> {
     first_available_from(system_browser_channel(), managed)
+}
+
+/// [`first_available_channel`] 的异步变体：同 [`is_channel_available_async`]
+/// 口径，系统浏览器探测（Linux 为 `which` 子进程）与托管引擎缓存扫描一并
+/// 移入阻塞线程池，供 async 调用方使用
+pub async fn first_available_channel_async(
+    env: std::sync::Arc<dyn crate::environment::EnvironmentApi>,
+) -> Option<&'static str> {
+    tokio::task::spawn_blocking(move || first_available_channel(env.as_ref()))
+        .await
+        // JoinError 仅探测任务 panic 可达：保守取「全无可用」，与探测本身
+        // 返回 None 的语义一致（调用方据此走 Chromium 下载兜底或失败留痕）
+        .unwrap_or(None)
 }
 
 /// 当前系统浏览器渠道（Edge 优先，其次 Chrome；均无返回 `None`）
@@ -297,5 +399,24 @@ mod tests {
     fn test_no_browser_message_mentions_chromium() {
         assert!(NO_BROWSER_MESSAGE.contains("无可用浏览器"));
         assert!(NO_BROWSER_MESSAGE.contains("Chromium"));
+    }
+
+    /// P3-39：App Paths 默认值解析——剥 NUL/空白/包裹引号，空值拒绝
+    ///（注册表读取本体仅 Windows 编译，解析纯逻辑全平台可单测）
+    #[test]
+    fn test_clean_app_paths_value() {
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        assert_eq!(
+            clean_app_paths_value(&wide(r"C:\Apps\Chrome\chrome.exe")),
+            Some(r"C:\Apps\Chrome\chrome.exe".to_string())
+        );
+        // 部分安装器登记带引号的路径
+        assert_eq!(
+            clean_app_paths_value(&wide(r#""D:\My Apps\Edge\msedge.exe""#)),
+            Some(r"D:\My Apps\Edge\msedge.exe".to_string())
+        );
+        // 值缺失（仅 NUL）或全空白：视为未登记
+        assert_eq!(clean_app_paths_value(&[0]), None);
+        assert_eq!(clean_app_paths_value(&wide("   ")), None);
     }
 }

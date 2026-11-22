@@ -145,6 +145,40 @@ export interface NetworkTestResult {
   duration_ms: number;
 }
 
+// ==================== 一键网络诊断（POST /api/diagnostics/run） ====================
+
+/** 诊断单项结论（诊断失败是数据不是请求错误：端点恒 200 + 逐项状态） */
+export type DiagnosticStatus = "ok" | "warn" | "fail" | "skip";
+
+/** 诊断总结论：fail 优先于 warn，skip 不降级 */
+export type DiagnosticVerdict = "healthy" | "degraded" | "faulty";
+
+/** 诊断单项结果（details 结构随 key 变化，已由后端脱敏） */
+export interface DiagnosticCheck {
+  /** 检查项标识：interfaces / gateway / dns / portal / history */
+  key: string;
+  /** 检查项中文名 */
+  name: string;
+  status: DiagnosticStatus;
+  /** 耗时（毫秒） */
+  elapsed_ms: number;
+  /** 一句话摘要 */
+  summary: string;
+  /** 结构化细节（脱敏后：不含凭据 / token / 带查询串的 URL） */
+  details: unknown;
+}
+
+/** 一键网络诊断报告 */
+export interface DiagnosticReport {
+  /** 逐项结果（顺序固定：interfaces → gateway → dns → portal → history） */
+  checks: DiagnosticCheck[];
+  verdict: DiagnosticVerdict;
+  /** 总结论一句话 */
+  conclusion: string;
+  /** 整体耗时（毫秒） */
+  total_ms: number;
+}
+
 /** 开机自启动状态 */
 export interface AutostartStatus {
   platform: string;
@@ -167,6 +201,17 @@ export interface AutostartStatus {
   startup_approved?: string | null;
   cached_enabled?: boolean;
   error?: string;
+}
+
+/**
+ * 开关自启动的业务结果（POST /api/autostart/enable|disable）。
+ *
+ * 后端先改系统注册再落盘配置缓存：Windows 端缓存写失败时系统已生效，
+ * `warning` 携带落盘失败原因（JSON null 或字符串）；其余平台仅返回 `message`。
+ */
+export interface AutostartToggleResult {
+  message?: string;
+  warning?: string | null;
 }
 
 /** 卸载检测项（GET /api/uninstall/detect） */
@@ -409,6 +454,12 @@ export interface AppSettings {
   show_tray: boolean;
   /** 定时自重启间隔（小时，0 = 不启用） */
   auto_restart_hours: number;
+  /**
+   * 管理密码（远程访问引导凭据）：GET /api/config 经 app_settings 段下发，
+   * PATCH /api/config/app_settings 落盘 `global.app.management_password`。
+   * 空串 = 未配置；明文存储，暴露面由 token 鉴权兜底
+   */
+  management_password: string;
 }
 
 /** 更新通道（正式版 / 测试版 / 全通道最新版） */
@@ -444,6 +495,120 @@ export interface UpdateState {
 }
 
 /**
+ * 推送通知事件类型（与后端 `AppEvent::kind()` 同值的 snake_case 字面量）。
+ * 空集合 = 不推送任何事件。
+ */
+export type NotificationEventType =
+  | "login_succeeded"
+  | "login_failed"
+  | "network_down"
+  | "network_up"
+  | "task_finished"
+  | "task_failed"
+  | "update_available"
+  | "environment_ready"
+  | "profile_switched";
+
+/** webhook 自定义请求头（value 可为密钥，与后端明文存储口径一致） */
+export interface NotificationHeader {
+  name: string;
+  value: string;
+}
+
+/** 通道判别字段（serde tagged `type`，与后端 NotificationChannelKind 同值） */
+export type NotificationChannelType = "webhook" | "bark" | "serverchan" | "telegram" | "os";
+
+/** 通道公共字段（各判别变体都带） */
+interface NotificationChannelBase {
+  /** 通道唯一 id（同一配置内去重） */
+  id: string;
+  /** 显示名（空时展示回退类型名） */
+  name: string;
+  enabled: boolean;
+  /** 单次请求超时（秒，1-60） */
+  timeout_seconds: number;
+}
+
+/** 自定义 Webhook 通道：POST 渲染后的 JSON 模板 */
+export interface WebhookChannelConfig extends NotificationChannelBase {
+  type: "webhook";
+  url: string;
+  headers: NotificationHeader[];
+  /** JSON 模板，占位符 {{event_type}}/{{summary}}/{{profile}}/{{time}}/{{detail}}；空 = 内建默认 */
+  body_template: string;
+}
+
+/** Bark 通道 */
+export interface BarkChannelConfig extends NotificationChannelBase {
+  type: "bark";
+  /** 自建服务器（空 = 官方 https://api.day.app） */
+  server: string;
+  device_key: string;
+}
+
+/** Server酱通道 */
+export interface ServerchanChannelConfig extends NotificationChannelBase {
+  type: "serverchan";
+  send_key: string;
+}
+
+/** Telegram Bot 通道 */
+export interface TelegramChannelConfig extends NotificationChannelBase {
+  type: "telegram";
+  bot_token: string;
+  chat_id: string;
+}
+
+/** 系统通知通道：本机桌面通知中心，无凭据字段（走本机桌面会话） */
+export interface OsChannelConfig extends Omit<NotificationChannelBase, "timeout_seconds"> {
+  type: "os";
+  /** 阻塞发送调用的放弃上限（秒；后端 serde default 缺省 10，可省略） */
+  timeout_seconds?: number;
+}
+
+/** 推送通道（可辨识联合：切 type 即切对应字段表单） */
+export type NotificationChannelConfig =
+  | WebhookChannelConfig
+  | BarkChannelConfig
+  | ServerchanChannelConfig
+  | TelegramChannelConfig
+  | OsChannelConfig;
+
+/** 推送通知设置（GET/PATCH /api/config 的 notification 段） */
+export interface NotificationConfig {
+  /** 总开关（关闭后不推送任何通知；测试发送不受此开关限制） */
+  enabled: boolean;
+  channels: NotificationChannelConfig[];
+  /** 触发通知的事件类型集合 */
+  events: NotificationEventType[];
+  /** 免打扰时段（支持跨零点；时段内只记日志不发送） */
+  quiet_enabled: boolean;
+  quiet_start_hour: number;
+  quiet_start_minute: number;
+  quiet_end_hour: number;
+  quiet_end_minute: number;
+  /** 发送失败重试次数（不含首次，指数退避；0 = 只发一次） */
+  retry_max_attempts: number;
+  /** 首次重试前等待的基准秒数，之后逐次翻倍 */
+  retry_base_interval_seconds: number;
+}
+
+/** 单通道测试发送回执（POST /api/notification/test） */
+export interface NotificationTestChannelResult {
+  id: string;
+  name: string;
+  type: NotificationChannelType;
+  success: boolean;
+  /** 失败原因（已脱敏：URL 去 query/userinfo，不回显凭据） */
+  error?: string;
+}
+
+/** POST /api/notification/test 响应 */
+export interface NotificationTestResult {
+  results: NotificationTestChannelResult[];
+}
+
+/**
  * 完整全局配置（前端内部表示）。
  *
  * 只含 `GlobalConfig` 域字段：账号与登录方式属于 Profile，由「配置方案」页
@@ -458,6 +623,7 @@ export interface Config {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
+  notification: NotificationConfig;
 }
 
 /** GET /api/config 返回结构（凭据平铺在顶层） */
@@ -470,6 +636,8 @@ export interface ConfigResponse {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater?: UpdaterConfig;
+  /** 推送通知设置：旧后端不下发，按可选处理（useConfig 以默认值合并） */
+  notification?: NotificationConfig;
   active_task: string;
   has_password: boolean;
   username: string;
@@ -500,6 +668,12 @@ export interface SaveConfigPayload {
   retry: RetryConfig;
   app_settings: AppSettings;
   updater: UpdaterConfig;
+  /**
+   * 推送通知设置：可选——PATCH 为局部合并语义，缺省 = 保持不变。全局设置
+   * 保存（useConfig.saveConfig）显式携带；引导向导/运行模式预设等其他
+   * SaveConfigPayload 构造点不携带（它们不编辑推送配置）。
+   */
+  notification?: NotificationConfig;
 }
 
 /** 登录渠道与HTTP 登录方法 */
@@ -534,7 +708,7 @@ export interface NetworkSettings {
   dns_servers: string[];
 }
 
-/** 可绑定的物理网卡及当前地址。 */
+/** 可绑定的网卡及当前地址。 */
 export interface EgressAdapter {
   id: string;
   name: string;
@@ -542,6 +716,80 @@ export interface EgressAdapter {
   ipv4: string;
   dns_servers: string[];
 }
+
+/** 各类录制动作共有的字段 */
+export interface RecordedActionBase {
+  /** 事件时间戳（毫秒；按此升序） */
+  ts: number;
+  /**
+   * 动作发生时所在的 iframe CSS 选择器链（自顶向下逐层；顶层 frame 内的动作缺省）。
+   *
+   * 防御性可选字段：仅**非顶层 frame** 内捕获的动作携带（后端 `RecordedAction.frame`，
+   * 供 iframe 内录制回放的 frame 定位，与 Rust 侧 schema 契约一致）；旧后端与顶层
+   * 动作无此字段，前端转换与展示一律按缺省顶层处理，不因缺失报错。
+   */
+  frame?: string;
+}
+
+/** `click`：按钮 / 提交类点击 */
+export interface RecordedClickAction extends RecordedActionBase {
+  type: "click";
+  /** 目标元素选择器（Worker 按启发式优先级取首个命中） */
+  selector: string;
+  /** 选择器采用的启发式级别（与 selector 配对） */
+  strategy: string;
+}
+
+/**
+ * `fill`：键盘输入（任务录制新增）。
+ *
+ * 凭据框的值是 `{{USERNAME}}` / `{{PASSWORD}}` 占位符（运行时由变量解析管线注入），
+ * 其余字段为字面量——前端只透传，不展开、不改写。
+ */
+export interface RecordedFillAction extends RecordedActionBase {
+  type: "fill";
+  selector: string;
+  strategy: string;
+  /** 输入文本（占位符留给运行时解析） */
+  value: string;
+}
+
+/** `change`：`<select>` 选择 */
+export interface RecordedChangeAction extends RecordedActionBase {
+  type: "change";
+  selector: string;
+  strategy: string;
+  /** 选中值 */
+  value: string;
+}
+
+/**
+ * `navigate`：页面跳转标记（任务录制新增）。
+ *
+ * 跳转没有目标元素，Worker 可能不带选择器字段；跳转目标 URL 在 `value`（缺省时
+ * 只表示"发生过一次跳转"的标记）。
+ */
+export interface RecordedNavigateAction extends RecordedActionBase {
+  type: "navigate";
+  /** 跳转目标 URL；纯标记动作可缺省 */
+  value?: string;
+  selector?: string;
+  strategy?: string;
+}
+
+/**
+ * 持久会话 / 任务录制动作（配置会话 `profile_session_stop` 取回的单个动作）。
+ *
+ * 与后端 `RecordedAction`（src/config/schema.rs）/ Python Worker 的录制契约逐字对齐：
+ * `type` / `strategy` 是 Worker 侧演进的受控词表（`click`/`fill`/`change`/`navigate`，
+ * `strategy` 为 `id`/`name`/`data-testid`/…），前端只做展示与转换，按字面值透传即可；
+ * 词表再演进时在此补变体。
+ */
+export type RecordedAction =
+  | RecordedClickAction
+  | RecordedFillAction
+  | RecordedChangeAction
+  | RecordedNavigateAction;
 
 /** 配置方案 */
 export interface Profile {
@@ -572,6 +820,20 @@ export interface Profile {
    * 脚本退出码 0 视为本次尝试成功（真终态仍由登录后网络验证确认）。
    */
   active_script_task: string;
+  /**
+   * 是否启用持久浏览器会话（门户「记住密码」模式；仅浏览器渠道生效）。
+   *
+   * 启用后浏览器渠道登录走「持久上下文打开门户页 + 回放 recorded_actions +
+   * 网络验证兜底」；开关随方案保存通道（PUT）落盘。
+   */
+  persistent_session_enabled?: boolean;
+  /**
+   * 持久会话录制动作（配置会话 stop 时由后端落盘，按 ts 升序）。
+   *
+   * 不是用户手编字段：编辑器保存**不回传**它（载荷中已剥离，见 useProfiles.saveProfile
+   * 的注释），防止编辑器打开期间的旧草稿把配置会话刚写入的新录制覆盖回去。
+   */
+  recorded_actions?: RecordedAction[];
   [key: string]: unknown;
 }
 
@@ -629,9 +891,9 @@ export interface HttpFlowStep {
   headers: string;
   body: string;
   extract: string;
-    extract_as: string;
-    extracts: HttpExtractRule[];
-    stop_on_redirect: boolean;
+  extract_as: string;
+  extracts: HttpExtractRule[];
+  stop_on_redirect: boolean;
   script: string;
   on_error: "stop" | "continue";
   wait_secs: number;
@@ -757,6 +1019,27 @@ export interface ProfileUpdatePayload extends Partial<Profile> {
    * 两者等价。清除只能经本字段完成。
    */
   clear_password?: boolean;
+}
+
+/** POST /api/profiles/{id}/config-session/start 结果：配置浏览器已拉起、录制已开启 */
+export interface ConfigSessionStartResult {
+  started: boolean;
+}
+
+/**
+ * POST /api/profiles/{id}/config-session/stop 结果：会话已结束。默认（apply=true
+ * 非 discard）录制动作与持久开关已写回方案；`apply=false`（任务录制路径）与
+ * `discard=true` 仅结算会话、不写方案。
+ */
+export interface ConfigSessionStopResult {
+  /** 本次会话录制的动作数（Worker 侧截断后落盘的数量） */
+  recorded_count: number;
+  /** 动作数超出单次上限被截断时为 true */
+  truncated: boolean;
+  /** 后端是否已置位持久会话开关（apply=true 非 discard 时恒为 true；apply=false / discard 回方案当前值） */
+  persistent_session_enabled: boolean;
+  /** 本次会话录制的动作序列（informational 回显；「录制新任务」经 `apply=false` 消费本字段生成任务） */
+  recorded_actions?: RecordedAction[];
 }
 
 /**
@@ -1180,6 +1463,36 @@ export interface EnvironmentStatus {
   last_error: string | null;
 }
 
+/** GitHub 下载源选择偏好：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像） */
+export type MirrorChoice =
+  | { choice: "auto" }
+  | { choice: "direct" }
+  | { choice: "mirror"; mirror: string };
+
+/** 单个下载源的测速结果（初始化弹窗镜像选择行） */
+export interface MirrorProbeEntry {
+  /** 源类型：direct（GitHub 直连）/ mirror（代理镜像） */
+  kind: "direct" | "mirror";
+  /** 镜像前缀（直连为空串；选中偏好即存该值） */
+  prefix: string;
+  /** 展示名（host：github.com / gh-proxy.com 等） */
+  label: string;
+  /** 是否测得数据（false = 超时/失败/零字节） */
+  ok: boolean;
+  /** 已测字节数 */
+  bytes: number;
+  /** 总耗时（毫秒） */
+  elapsed_ms: number;
+  /** 实测吞吐（字节/秒，失败为 0） */
+  throughput: number;
+}
+
+/** POST /api/environment/mirror-probe 响应 */
+export interface MirrorProbeResponse {
+  selected: MirrorChoice;
+  results: MirrorProbeEntry[];
+}
+
 /** 初始化状态 */
 export interface InitStatus {
   agreed: boolean;
@@ -1264,4 +1577,100 @@ export interface AiGenerateResult {
   warnings: string[];
   model: string;
   base_url: string;
+}
+
+/**
+ * AI 流式生成 SSE 事件帧（POST /api/ai/generate/stream 的 `data:` JSON 载荷）。
+ *
+ * 判别字段 `type` 对齐后端 `ai::generate::StreamEvent`（serde tag = "type"、
+ * snake_case）的 8 变体，外加路由层在流首直发的 `started` 帧（回显实际生效的
+ * model / base_url，见 `web/routes/ai.rs`）。各变体字段为 wire 权威契约：
+ * 解析边界一次性收窄（见 `api/index.ts` 的 `generateStream`），消费侧
+ * （AiTaskView）按 type 收窄后直接读字段、不再逐字段断言。
+ */
+export type AiStreamEvent =
+  /** 生成开始（路由层直发）：回显实际生效的模型与接口地址 */
+  | { type: "started"; model: string; base_url: string }
+  /** 开始一次生成尝试 */
+  | { type: "attempt_start"; attempt: number; max: number }
+  /** 收到生成内容增量 */
+  | { type: "delta"; attempt: number; text: string }
+  /** 本次生成内容接收完毕（text_len 为累计 UTF-8 字节数） */
+  | { type: "attempt_delta_done"; attempt: number; text_len: number }
+  /** 本次任务通过校验 */
+  | { type: "validated"; attempt: number }
+  /** 本次任务校验失败（errors 为执行 / 校验错误列表） */
+  | { type: "validation_failed"; attempt: number; errors: string[] }
+  /** 准备重试生成（next 为下一次尝试序号） */
+  | { type: "retrying"; attempt: number; next: number }
+  /** 生成成功并返回完整任务（task 为通过校验的任务 JSON，即动态字段本体） */
+  | { type: "done"; attempts: number; warnings: string[]; task: Record<string, unknown> }
+  /** 生成失败（终态帧） */
+  | { type: "error"; message: string };
+
+/** 应用事件类型标识（后端 `crate::events::AppEvent` 九变体，snake_case） */
+export type AppEventType =
+  | "login_succeeded"
+  | "login_failed"
+  | "network_down"
+  | "network_up"
+  | "task_finished"
+  | "task_failed"
+  | "update_available"
+  | "environment_ready"
+  | "profile_switched";
+
+/**
+ * 事件封装（GET /api/events 条目）。
+ *
+ * `type` 为判别字段，与载荷摘要字段平铺在同一对象；载荷为后端白名单式脱敏
+ * 结构（凭据 / token / URL 查询串在结构上不存在对应字段），字段随 type 可选：
+ * 登录类带 profile_id/channel/reason/attempt，网络类带 profile_id/reason，
+ * 任务类带 task_id/task_kind/reason，更新类带 version/current_version，
+ * 环境类带 python_ready/uv_ready，切换类带 from_profile_id/to_profile_id。
+ */
+export interface EventEnvelope {
+  /** 事件唯一 id（uuid） */
+  id: string;
+  /** 发生时间（UTC，RFC3339 字符串） */
+  timestamp: string;
+  /** 事件类型判别字段 */
+  type: AppEventType;
+  /** 关联档案 id（登录/网络/切换类事件） */
+  profile_id?: string;
+  /** 登录渠道标识（browser / http / script） */
+  channel?: string;
+  /** 失败原因码或短语（登录/任务/网络失败类，已脱敏） */
+  reason?: string;
+  /** 登录第几次尝试（从 1 起） */
+  attempt?: number;
+  /** 任务 id（任务类事件） */
+  task_id?: string;
+  /** 任务类型标识（browser / script / http） */
+  task_kind?: string;
+  /** 新版本号（更新类） */
+  version?: string;
+  /** 当前版本号（更新类） */
+  current_version?: string;
+  /** Python 环境是否可用（环境类） */
+  python_ready?: boolean;
+  /** uv 是否可用（环境类） */
+  uv_ready?: boolean;
+  /** 切换前档案 id（切换类） */
+  from_profile_id?: string;
+  /** 切换后档案 id（切换类） */
+  to_profile_id?: string;
+  [key: string]: unknown;
+}
+
+/** GET /api/events 响应载荷（client.ts 已解包 data 信封） */
+export interface EventsResponse {
+  /** 事件封装数组（时间升序；缺失文件与损坏行已由后端跳过） */
+  events: EventEnvelope[];
+  /** 实际生效的回看天数（缺省 7，钳制 1..=30） */
+  days: number;
+  /** 返回的事件条数 */
+  total: number;
+  /** 是否发生单文件行数截断（true 时更早的行未读入） */
+  truncated: boolean;
 }

@@ -27,15 +27,29 @@ const PROCESS_EXIT_POLL_MS: u64 = 100;
 const PROCESS_EXIT_TIMEOUT_SECS: u64 = 60;
 /// 新进程存活二次探活前的延迟（秒）：等待潜在秒退窗口过去
 const SECOND_ALIVE_PROBE_DELAY_SECS: u64 = 5;
+/// macOS 卸载结果对话框（osascript）限时等待上限（秒）
+///
+/// 正常场景下对话框是模态的，须覆盖"用户读完结果再点掉"的时间；
+/// SSH 等无 GUI 会话下 osascript 可能长时间挂起，超时后放弃展示并继续退出流程。
+#[cfg(target_os = "macos")]
+const RESULT_DIALOG_TIMEOUT_SECS: u64 = 120;
 
 /// campus-auth 更新助手进程
 ///
-/// 两种模式，互斥：
+/// 运行模式，互斥：
 /// - `--apply-update`：等待主进程退出 → 替换 exe → 重启新版本（见 `run_apply_update`）
 /// - `--uninstall`：等待主进程退出 → 删除安装目录（+ 可选保留用户数据）→ 系统提示框
 ///
-/// 合并进同一个 binary 而不是再加一个可执行文件：两者共用"等 PID 退出""路径守卫"
-/// "best-effort 日志"三块逻辑，且发布包少一个文件就少一处需要同步的版本管理。
+/// 发布签名辅助模式（T6-4，离线工具，与更新/卸载流程无关；签名算法与客户端
+/// 校验共用 `updater::signature` 同一套实现）：
+/// - `--gen-signing-key`：生成发布清单签名密钥对（发布方一次性操作）
+/// - `--sign-manifest <清单>`：就地为清单 JSON 注入 signature 字段（私钥取
+///   环境变量 `MANIFEST_SIGNING_KEY`）
+/// - `--verify-manifest <清单>`：用仓内公钥复核清单签名（发布流水线一致性闸门）
+///
+/// 合并进同一个 binary 而不是再加一个可执行文件：更新/卸载共用"等 PID 退出"
+/// "路径守卫""best-effort 日志"三块逻辑；签名辅助复用同一依赖与算法实现，
+/// 发布包少一个文件就少一处需要同步的版本管理。
 #[derive(Parser)]
 #[command(name = "campus-auth-helper", version, about = "Campus-Auth 更新助手")]
 struct HelperCli {
@@ -47,9 +61,42 @@ struct HelperCli {
     #[arg(long, conflicts_with = "apply_update")]
     uninstall: bool,
 
-    /// 主进程 PID（等待其退出后执行替换）
-    #[arg(long)]
-    pid: u32,
+    /// 主进程 PID（等待其退出后执行替换；签名辅助模式无需）
+    #[arg(
+        long,
+        required_unless_present_any = ["gen_signing_key", "sign_manifest", "verify_manifest"]
+    )]
+    pid: Option<u32>,
+
+    /// 生成发布清单签名密钥对：输出私钥（配 GitHub Secret MANIFEST_SIGNING_KEY）
+    /// 与公钥（提交入仓 resources/manifest-pubkey）；与其他模式互斥
+    #[arg(
+        long,
+        conflicts_with_all = ["apply_update", "uninstall", "sign_manifest", "verify_manifest"]
+    )]
+    gen_signing_key: bool,
+
+    /// 就地为清单 JSON 注入 signature 字段（私钥取环境变量
+    /// MANIFEST_SIGNING_KEY）；与其他模式互斥
+    #[arg(
+        long,
+        value_name = "MANIFEST_JSON",
+        conflicts_with_all = ["apply_update", "uninstall", "gen_signing_key", "verify_manifest"]
+    )]
+    sign_manifest: Option<PathBuf>,
+
+    /// 用仓内公钥复核清单签名（发布流水线一致性闸门：私钥与提交入仓的公钥
+    /// 不匹配即失败，防止带病发布）；与其他模式互斥
+    #[arg(
+        long,
+        value_name = "MANIFEST_JSON",
+        conflicts_with_all = ["apply_update", "uninstall", "gen_signing_key", "sign_manifest"]
+    )]
+    verify_manifest: Option<PathBuf>,
+
+    /// 清单签名复核用的公钥文件（默认仓内 resources/manifest-pubkey）
+    #[arg(long, value_name = "PUBKEY_FILE", requires = "verify_manifest")]
+    pubkey_file: Option<PathBuf>,
 
     /// staging 目录路径（可选，默认从 pending.json 读取）
     #[arg(long)]
@@ -146,10 +193,30 @@ impl HelperLog {
     fn debug(&mut self, msg: &str) {
         self.write("DEBUG", msg);
     }
+
+    /// macOS 专用：尽力而为环节的告警（如结果对话框失败，不影响退出码）
+    #[cfg(target_os = "macos")]
+    fn warn(&mut self, msg: &str) {
+        self.write("WARN", msg);
+    }
 }
 
 fn main() {
     let cli = HelperCli::parse();
+
+    // 发布签名辅助模式（离线工具，先于更新/卸载分发）
+    if cli.gen_signing_key {
+        run_gen_signing_key();
+        return;
+    }
+    if let Some(path) = cli.sign_manifest.as_deref() {
+        run_sign_manifest(path);
+        return;
+    }
+    if let Some(path) = cli.verify_manifest.as_deref() {
+        run_verify_manifest(path, cli.pubkey_file.as_deref());
+        return;
+    }
 
     if cli.uninstall {
         run_uninstall(&cli);
@@ -164,8 +231,90 @@ fn main() {
     run_apply_update(&cli);
 }
 
+// ═══ 发布签名辅助模式 ═══
+
+/// 生成发布清单签名密钥对
+///
+/// 私钥输出给维护者配置 GitHub Secret `MANIFEST_SIGNING_KEY`（绝不入仓，
+/// stdout 只显示这一次）；公钥提交入仓 `resources/manifest-pubkey`（release
+/// 构建经 build.rs 编译进二进制，见 `updater::signature` 模块 doc）。
+fn run_gen_signing_key() {
+    let (secret, pubkey) = campus_auth::updater::signature::generate_signing_keypair();
+    println!(
+        "私钥（配置为 GitHub Secret MANIFEST_SIGNING_KEY；仅本次显示，请立即妥善保存，丢失只能换钥重发）:"
+    );
+    println!("{secret}");
+    println!();
+    println!("公钥（base64，写入仓库 resources/manifest-pubkey，随版本提交）:");
+    println!("{pubkey}");
+}
+
+/// 就地为清单 JSON 注入 signature 字段（私钥取环境变量 MANIFEST_SIGNING_KEY）
+fn run_sign_manifest(path: &Path) {
+    let Ok(secret) = std::env::var("MANIFEST_SIGNING_KEY") else {
+        eprintln!("缺少环境变量 MANIFEST_SIGNING_KEY（发布方私钥，base64）");
+        std::process::exit(1);
+    };
+    let document = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("读取清单失败（{}）: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    match campus_auth::updater::signature::sign_manifest_document(&document, &secret) {
+        Ok(signed) => {
+            if let Err(e) = std::fs::write(path, signed) {
+                eprintln!("写回签名清单失败（{}）: {e}", path.display());
+                std::process::exit(1);
+            }
+            println!("已签名并写回 {}", path.display());
+        }
+        Err(e) => {
+            eprintln!("清单签名失败: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// 用公钥文件复核清单签名（发布流水线一致性闸门 / 本地校验）
+///
+/// 公钥默认取仓内 `resources/manifest-pubkey`（`--pubkey-file` 可指定）。
+/// 失败即退出码 1：release 流程中这意味着 Secret 私钥与提交入仓的公钥不匹配，
+/// 必须中止发布。
+fn run_verify_manifest(path: &Path, pubkey_file: Option<&Path>) {
+    let pubkey_path = pubkey_file.unwrap_or_else(|| Path::new("resources/manifest-pubkey"));
+    let document = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("读取清单失败（{}）: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    let pubkey = match std::fs::read_to_string(pubkey_path) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("读取公钥文件失败（{}）: {e}", pubkey_path.display());
+            std::process::exit(1);
+        }
+    };
+    match campus_auth::updater::signature::verify_manifest_document(&document, pubkey.trim()) {
+        Ok(()) => println!("清单签名校验通过（{}）", path.display()),
+        Err(e) => {
+            eprintln!("清单签名校验失败: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// 更新模式主体：等待主进程退出 -> 替换 exe -> 启动新 exe -> 清理
 fn run_apply_update(cli: &HelperCli) {
+    // clap 的 required_unless_present_any 已保证更新/卸载模式携带 --pid；
+    // 此处显式解包保持非 panic 的防御分支
+    let Some(pid) = cli.pid else {
+        eprintln!("更新模式需要 --pid（主进程 PID）");
+        std::process::exit(2);
+    };
     // 0. 计算基准路径并初始化 best-effort 落盘日志
     // （GUI 子系统下 stdout/stderr 不可见，更新失败必须可从 helper.log 诊断）
     let base_path = cli.base_path.clone().unwrap_or_else(|| {
@@ -183,8 +332,8 @@ fn run_apply_update(cli: &HelperCli) {
     let _helper_lock = acquire_helper_lock(&base_path.join("update").join("helper.lock"), &mut log);
 
     // 1. 等待主进程退出
-    log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
-    if !wait_for_process_exit(cli.pid, &mut log) {
+    log.info(&format!("等待主进程 (PID {pid}) 退出..."));
+    if !wait_for_process_exit(pid, &mut log) {
         // 主进程未退出：中止更新，保留 staging 与 pending.json，待主进程下次启动
         // 时由 apply_pending_on_startup 应用（不执行 cleanup，避免摧毁待应用更新）
         std::process::exit(1);
@@ -495,6 +644,12 @@ const UNINSTALL_TEMP_PREFIX: &str = "campus-auth-uninst-";
 /// 一律来自 `campus_auth::uninstall`（**单一事实源**）：界面上列的清单与这里删的东西
 /// 必须逐字对应，两处各写一份必然漂移。
 fn run_uninstall(cli: &HelperCli) {
+    // clap 的 required_unless_present_any 已保证更新/卸载模式携带 --pid；
+    // 此处显式解包保持非 panic 的防御分支
+    let Some(pid) = cli.pid else {
+        eprintln!("卸载模式需要 --pid（主进程 PID）");
+        std::process::exit(2);
+    };
     // 日志必须落在系统临时目录：安装目录（含 logs/）正在被删
     let mut log = HelperLog::open_at(&std::env::temp_dir().join("campus-auth-uninstall.log"));
 
@@ -519,8 +674,8 @@ fn run_uninstall(cli: &HelperCli) {
     }
 
     // 1. 等待主进程退出
-    log.info(&format!("等待主进程 (PID {}) 退出...", cli.pid));
-    if !wait_for_process_exit(cli.pid, &mut log) {
+    log.info(&format!("等待主进程 (PID {pid}) 退出..."));
+    if !wait_for_process_exit(pid, &mut log) {
         uninstall_abort(
             &mut log,
             "卸载已中止",
@@ -572,6 +727,7 @@ fn run_uninstall(cli: &HelperCli) {
     let text = campus_auth::uninstall::report_text(&report, &plan);
     let summary = campus_auth::uninstall::report_summary(&report, &plan);
     notify(
+        &mut log,
         ok,
         if ok {
             "认证喵 · 卸载完成"
@@ -611,6 +767,7 @@ fn uninstall_install_dir(cli: &HelperCli) -> Result<PathBuf, String> {
 fn uninstall_abort(log: &mut HelperLog, title: &str, message: &str) -> ! {
     log.error(&format!("{title}：{message}"));
     notify(
+        log,
         false,
         &format!("认证喵 · {title}"),
         "卸载未能继续，请查看详细原因。",
@@ -674,9 +831,9 @@ fn spawn_uninstall_phase2(
     Ok(())
 }
 
-/// 系统提示框（Windows）/ stderr（其它平台）
+/// 系统提示框（Windows）/ osascript 对话框（macOS）/ stderr（其它平台）
 #[cfg(windows)]
-fn notify(success: bool, title: &str, summary: &str, text: &str) {
+fn notify(_log: &mut HelperLog, success: bool, title: &str, summary: &str, text: &str) {
     // MSVC 发布包内嵌公共控件 v6 清单；其它 Windows 工具链保持原生提示框兜底。
     #[cfg(target_env = "msvc")]
     if show_result_dialog(success, title, summary, text, None) >= 0 {
@@ -712,10 +869,104 @@ fn notify(success: bool, title: &str, summary: &str, text: &str) {
     }
 }
 
-/// 非 Windows 平台：主进程已退出，stderr 可能无人接收，但至少留下痕迹
-#[cfg(not(windows))]
-fn notify(_success: bool, title: &str, summary: &str, text: &str) {
+/// macOS：卸载结果 osascript 对话框
+///
+/// 与 Windows 的任务对话框同口径（窗口标题「认证喵」+ 主指令 + 摘要与详细结果 +
+/// 信息/警告图标）。对话框是尽力而为的 UX：spawn 失败、非零退出、等待超时都只记
+/// WARN，绝不影响 helper 的退出码；SSH 等无 GUI 会话下 osascript 可能长时间挂起，
+/// 因此 spawn 后限时等待，超时放弃并继续退出流程。
+#[cfg(target_os = "macos")]
+fn notify(log: &mut HelperLog, success: bool, title: &str, summary: &str, text: &str) {
+    use std::process::Command;
+    use std::time::Instant;
+
+    let script = build_result_dialog_script(success, title, summary, text);
+    let mut child = match Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            log.warn(&format!("无法启动 osascript，跳过结果对话框: {error}"));
+            return;
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(RESULT_DIALOG_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    // 无 GUI 会话（SSH）下 osascript 会立即失败，属预期内的尽力而为
+                    log.warn(&format!("osascript 结果对话框未正常展示（{status}）"));
+                }
+                return;
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // 超时放弃：杀掉 osascript 防止孤儿对话框长驻，继续退出流程
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    log.warn(&format!(
+                        "结果对话框等待超时（{RESULT_DIALOG_TIMEOUT_SECS} 秒），放弃展示并继续退出"
+                    ));
+                    return;
+                }
+                sleep(Duration::from_millis(100));
+            }
+            Err(error) => {
+                log.warn(&format!("等待 osascript 失败: {error}"));
+                return;
+            }
+        }
+    }
+}
+
+/// 其它 unix 平台：主进程已退出，stderr 可能无人接收，但至少留下痕迹
+#[cfg(not(any(windows, target_os = "macos")))]
+fn notify(_log: &mut HelperLog, _success: bool, title: &str, summary: &str, text: &str) {
     eprintln!("[helper] {title}\n{summary}\n\n{text}");
+}
+
+/// 构造卸载结果对话框的 AppleScript（单行，供 `osascript -e` 使用）
+///
+/// 信息结构与 Windows `show_result_dialog` 一致：主指令取自标题（去掉「认证喵 · 」
+/// 前缀，窗口标题固定为「认证喵」），正文为 摘要 + 详细结果；成功用 note 图标，
+/// 失败用 caution 图标。
+#[cfg(target_os = "macos")]
+fn build_result_dialog_script(success: bool, title: &str, summary: &str, text: &str) -> String {
+    let instruction = title.trim_start_matches("认证喵 · ");
+    format!(
+        "display dialog \"{}\" with title \"认证喵\" buttons {{\"好\"}} default button 1 {}",
+        escape_applescript_line(&format!("{instruction}\n\n{summary}\n\n{text}")),
+        if success {
+            "with icon note"
+        } else {
+            "with icon caution"
+        },
+    )
+}
+
+/// 将任意文本转义为可嵌入 AppleScript 双引号字符串字面量的单行形式
+///
+/// - `\` 与 `"` 是字面量的既有转义字符，加倍处理；
+/// - 换行/回车/制表转成 `\n` `\r` `\t` 转义序列：`osascript -e` 按行解析参数，
+///   文案里的真实换行会把一条 `-e` 拆成多条脚本行导致语法错误；
+/// - 其余字符（含中文、emoji）原样保留：参数按 UTF-8 传给 osascript，无需 \u 转义。
+#[cfg(target_os = "macos")]
+fn escape_applescript_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// 系统任务对话框：简短摘要与可展开的详细结果，宽度固定以避免长路径撑满屏幕。
@@ -1192,6 +1443,38 @@ mod tests {
             Some(close_dialog),
         );
         assert!(result >= 0, "任务对话框启动失败: {result:#x}");
+    }
+
+    /// AppleScript 单行转义：中文原样、引号/反斜杠加倍、换行类转转义序列、结果恒为单行
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_escape_applescript_line() {
+        assert_eq!(escape_applescript_line(""), "");
+        assert_eq!(escape_applescript_line("卸载完成"), "卸载完成");
+        // 双引号与反斜杠必须加倍，否则会提前终止 AppleScript 字符串字面量
+        assert_eq!(escape_applescript_line("说\"好\""), "说\\\"好\\\"");
+        assert_eq!(escape_applescript_line("C:\\路径\\喵"), "C:\\\\路径\\\\喵");
+        assert_eq!(escape_applescript_line("a\nb\r\nc\td"), "a\\nb\\r\\nc\\td");
+        // 原文里真实的"反斜杠+n"不能被误当成换行转义（先加倍再拼 n）
+        assert_eq!(escape_applescript_line("a\\nb"), "a\\\\nb");
+        let mixed = escape_applescript_line("多行\n\"引号\"与\\斜杠\\ 🎉");
+        assert!(!mixed.contains('\n'), "结果必须保持单行: {mixed}");
+    }
+
+    /// 对话框脚本：信息结构与 Windows 版对齐，成功/失败图标分支正确，整体保持单行
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_build_result_dialog_script() {
+        let script =
+            build_result_dialog_script(true, "认证喵 · 卸载完成", "全部成功", "详情\"A\"\n第二行");
+        assert!(script.contains("display dialog"));
+        assert!(script.contains("with title \"认证喵\""));
+        // 主指令取自标题前缀之后，随后是 \n\n 分隔的摘要与详细结果（转义序列形态）
+        assert!(script.contains("卸载完成\\n\\n全部成功\\n\\n详情\\\"A\\\""));
+        assert!(!script.contains('\n'), "脚本必须保持单行: {script}");
+        let failed = build_result_dialog_script(false, "认证喵 · 卸载已中止", "摘要", "详情");
+        assert!(failed.contains("with icon caution"));
+        assert!(failed.contains("卸载已中止"));
     }
 
     /// 更新将分发标记送到程序目录，不标记 Git 工程或普通来源目录。

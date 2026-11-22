@@ -1,5 +1,6 @@
 /* system.css — 系统设置子页（模板徽标已统一走通用 .badge，此处旧类退役保留注释防回潮）
- * .autostart-method-badge -> .badge.badge--sm.badge--mono；.env-pill -> .badge.badge--sm（成功/警告走 --success/--warn） */
+ * .autostart-method-badge -> .badge.badge--sm.badge--mono；.env-pill -> .badge.badge--sm（成功/警告走 --success/--warn）
+ * .badge--mono 修饰定义在 components/badge.css（页面文件不给全局组件类加修饰） */
 
 /* ==================== 配置预设（默认 / 调试） ==================== */
 
@@ -28,6 +29,12 @@
   transition: border-color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
 }
 
+/* 特异度升序：disabled / hover / active（disabled 与后两者无同属性竞争，重排不改变计算值） */
+.run-mode-option:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .run-mode-option:hover:not(:disabled) {
   border-color: rgba(var(--accent-rgb), 0.4);
   background: var(--bg-hover);
@@ -36,11 +43,6 @@
 .run-mode-option.active {
   border-color: rgba(var(--accent-rgb), 0.5);
   background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.1), rgba(var(--purple-rgb), 0.1));
-}
-
-.run-mode-option:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
 }
 
 .run-mode-option-head {
@@ -87,9 +89,6 @@
   margin-top: var(--space-sm);
 }
 
-.badge--mono {
-  font-family: var(--font-mono);
-}
 /* Python 环境状态行 */
 .env-lead {
   margin: 0 0 0.5rem 0;
@@ -125,6 +124,23 @@
 .log-export-footer .hint {
   margin: 0 auto 0 0;
   text-align: left;
+}
+/* 访问与安全：管理凭据行（输入框占满剩余宽度 + 显隐切换按钮）。
+   尺寸对齐 list.css 的 .setting-row-control > input（9px 12px / 38px），
+   本行输入框不是 control 的直接子元素，那两条规则命中不到，这里自持尺寸 */
+.management-password-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.management-password-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  min-height: 38px;
+}
+.management-password-row .btn {
+  white-space: nowrap;
 }
 
 /* ==================== 自动更新（原「网络与更新」Tab 并入，作用域类 .system-update-page） ==================== */

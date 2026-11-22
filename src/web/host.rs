@@ -2,16 +2,22 @@
 //!
 //! 威胁模型：恶意网页把攻击者域名经 DNS rebinding 解析到 127.0.0.1 后，
 //! 页面到本地 Web 服务之间是「同源」请求——CORS 与浏览器 PNA 均不适用，
-//! 可直接读走免鉴权的 `/api/auth/token`（见 `web::auth` 模块说明）接管
-//! 全部 API。CORS 只防「跨源读」，防不住同源化；Host 头校验是该路径上
-//! 的独立防线：rebinding 请求的 Host 恒为攻击者域名，与回环白名单
+//! 可同源调用全部 API。CORS 只防「跨源读」，防不住同源化；Host 头校验是该
+//! 路径上的独立防线：rebinding 请求的 Host 恒为攻击者域名，与回环白名单
 //! 不匹配即被拒。
+//!
+//! 对豁免端点的意义（见 `web::auth` 模块说明）：`POST /api/auth/exchange`
+//! 与 `GET /api/auth/local-token`（仅回环监听可用）都不要求已有 token，是本
+//! 校验的主要防护对象——rebinding 请求的 Host 恒为攻击者域名，会在本层被拒，
+//! 拿不到 `local-token` 的响应；`exchange` 另有 bootstrap 秘钥与管理密码分支
+//! 兜底（回环下密码分支一律拒绝），本校验对它同样是纵深防御。
 //!
 //! 策略按实际绑定地址决定（[`HostPolicy::from_bind_ip`]）：
 //! - 绑定回环（默认）：强制校验；
 //! - 绑定非回环（Docker / LAN 显式暴露）：跳过——暴露面由绑定决定，
 //!   且此场景下浏览器经局域网 IP / 域名访问，Host 恒非回环，强制校验
-//!   会直接打死合法访问。
+//!   会直接打死合法访问；该场景的凭据门禁由监听器准备点 fail-closed
+//!   承担（`app::check_bind_credential_gate`，非回环绑定必须配置管理密码）。
 //!
 //! 兼容性：Host 头缺失（HTTP/1.0、oneshot 单测）放行——rebinding 攻击
 //! 必然携带攻击者域名 Host，缺失不构成该威胁路径。

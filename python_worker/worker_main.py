@@ -24,10 +24,15 @@ import re
 import sys
 import threading
 import time
+from typing import Callable
 
-# 标准库导入完成后，导入本 Worker 模块（其顶层导入 playwright 等重型依赖，
-# 放在此处延后加载，避免 import 阶段即因缺失依赖而崩溃）
+# 标准库导入完成后，导入本 Worker 模块（其顶层导入 playwright 等重型依赖）。
+# 注意：playwright_worker 顶层又导入 step_handlers，后者顶层即 import playwright
+# ——依赖缺失时本 import 同样会崩，"延后加载防崩溃"并不成立。依赖完整性的
+# 兜底由环境引导闭环（Rust EnvironmentManager 引导安装 + uv sync）保证；
+# 此处崩溃是期望行为：fail-fast 让 BridgeSupervisor 立即感知并走重装/重启链路。
 from models import Outcome  # noqa: E402
+from ocr_runtime import OCR_CAPABILITIES, _probe_ocr_capability  # noqa: E402
 from playwright_worker import (  # noqa: E402
     COMMANDS,
     StepCancelled,
@@ -49,78 +54,32 @@ shutdown_event = threading.Event()
 # 避免超大 JSON 解析耗尽内存（P9）
 _MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 
-# OCR 运行时能力（任务 10）：由 _preload_ocr_deps 探测结果填充，
-# 随 worker_health_check 响应上报给 Rust 侧缓存（/api/ocr/status 消费）。
-# 仅 ddddocr 完整加载成功才视为 True；numpy-only/均缺失为 False
-#（识别请求会在运行时报「ddddocr 未安装」）。
-OCR_CAPABILITIES: dict[str, bool] = {"ocr": False}
+#: 命令级超时自愈允许 force_interrupt_pending（关闭当前页打断挂起的 CDP
+#: await）的命令白名单。排除项及理由：
+#: - ocr_recognize / worker_health_check / browser_health_check / shutdown：
+#:   不使用 self._page，超时不应误伤 keep_alive preserve_state 保留页；
+#: - test_redirect / page_capture：使用自建临时浏览器/页面，关 self._page
+#:   打不断它们，反而会误伤 keep_alive 常驻会话（page_capture 已改为独立
+#:   非持久化临时浏览器，取消经 cancel_id 在阶段边界生效）；
+#: - profile_session_start / profile_session_stop / profile_auto_login：使用
+#:   独立持久上下文（独立 Playwright 连接，不复用也不触碰 self._page），强制
+#:   关页既打不着它们也会误伤 keep_alive 常驻会话；profile_session_* 的会话
+#:   存续期（start 返回后到 stop 之间）不处于任何命令执行窗口内，命令级超时
+#:   天然不适用；profile_auto_login 虽是单条命令全程受超时约束，但同样运行在
+#:   独立上下文上，超时自愈靠任务取消 + 退出兜底收尾即可——对齐 debug session
+#:   的豁免口径（独立上下文的命令不进强制关页白名单）；
+#: - close_browser：自带内部超时收敛，无需再关页。
+#: 白名单遗漏新命令时默认「不关页」，方向安全（宁可少自愈，不可误伤）。
+_INTERRUPTIBLE_METHODS = frozenset({
+    "execute_login_attempt", "execute_browser_task",
+    "feedback_capture", "debug_start", "debug_step", "debug_run_all", "debug_stop",
+})
 
-
-def _preload_ocr_deps(*, force: bool = False) -> None:  # noqa: C901
-    """预加载 OCR 依赖到主线程，规避后台线程加载 C 扩展卡死（根因修复）。
-
-    背景：``ddddocr`` 链式加载 numpy C 扩展（``numpy._core._multiarray_umath``
-    及其 numpy.libs/ 下的 OpenBLAS DLL）时，若发生在 **Worker 的后台线程**
-    （``asyncio.to_thread``），Windows 的 loader lock 与 Python import lock
-    会让该加载卡住约 100 秒，超过 OCR_TIMEOUT_SECS 后前端报「模型加载超时」。
-
-    已实测：同样依赖在 **主线程** 加载仅需 ~0.1s；且只要主线程预加载出现过一次，
-    后续后台线程 ``import`` 直接命中 ``sys.modules`` 缓存，不再重新加载 DLL，
-    后续识别全程正常（~0.5s）。
-
-    调用时机：启动期 ``force=False``（能力探测，已安装即在主线程完整加载，
-    同时规避后台线程 DLL loader lock）；含 ocr 步骤的任务在
-    ``playwright_worker._run_task`` 入口 ``force=True`` 强制预热（覆盖探测
-    失败但依赖实际可用的边缘态）。
-
-    探测结果同步写入模块级 ``OCR_CAPABILITIES``（任务 10）：
-    完整加载 → ``{"ocr": True}``；未触发 / 均不可用 → ``{"ocr": False}``。
-    """
-    # 非强制且尚未判定可用时，仅做能力探测（已安装则主线程完整加载，见下）
-    if not force and OCR_CAPABILITIES.get("ocr") is False:
-        _probe_ocr_capability()
-        return
-    # 探测前先复位（幂等）：仅完整加载成功才置 True
-    OCR_CAPABILITIES["ocr"] = False
-    # 主线程先完整加载 ddddocr（连带 numpy 等 C 扩展一并进入 sys.modules 缓存），
-    # 使后续 to_thread 只命中缓存、不再触发 DLL 加载。若顶层 import 过重/异常，
-    # 退化为仅加载 numpy——它正是卡死的那个 C 扩展，单独预加载即已命中根因。
-    try:
-        import ddddocr  # noqa: F401
-
-        logger.info("OCR 依赖已预加载（完整）")
-        OCR_CAPABILITIES["ocr"] = True
-        return
-    except Exception as exc:  # noqa: BLE001 — DLL/运行库损坏常表现为 OSError
-        logger.warning(f"OCR 依赖完整预加载失败，尝试仅加载 numpy: {exc}")
-    try:
-        import numpy  # noqa: F401
-
-        logger.info("OCR 依赖未完整安装，已预加载 numpy 核心")
-    except Exception as exc:  # noqa: BLE001 — best-effort，不能拖垮非 OCR 登录
-        logger.info(f"OCR 依赖不可用，跳过预加载: {exc}")
-
-
-def _probe_ocr_capability() -> None:
-    """探测 OCR 可用性并填充 ``OCR_CAPABILITIES``（随 health check 上报）。
-
-    已安装时会在 **主线程** 完整 ``import ddddocr``（连带 numpy C 扩展进入
-    sys.modules 缓存）——这既让能力上报准确，也天然规避后台线程加载 DLL 的
-    loader lock 卡死（见 ``_preload_ocr_deps`` 的根因说明）；未安装时只做
-    ``find_spec`` 轻量探测，不产生 import WARN。
-    """
-    import importlib.util
-
-    if importlib.util.find_spec("ddddocr") is None:
-        OCR_CAPABILITIES["ocr"] = False
-        return
-    OCR_CAPABILITIES["ocr"] = False
-    try:
-        import ddddocr  # noqa: F401
-
-        OCR_CAPABILITIES["ocr"] = True
-    except Exception:  # noqa: BLE001 — 仅探测，不弹错
-        OCR_CAPABILITIES["ocr"] = False
+# OCR 运行时能力与依赖预加载（``OCR_CAPABILITIES`` / ``_preload_ocr_deps`` /
+# ``_probe_ocr_capability``）已下沉 ocr_runtime.py（P2-1 影子模块修复）：
+# playwright_worker 与本入口必须共享同一份能力字典，任何一端各自定义都会
+# 产生影子副本（force 预热翻转写进影子，health check 读不到）。
+# 此处仅 import 启动探测（main）与能力注入（_serve）所需的名字。
 
 
 def _force_utf8_stdio() -> None:
@@ -139,7 +98,10 @@ def _force_utf8_stdio() -> None:
             if stream is sys.stdin:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             else:
-                stream.reconfigure(encoding="utf-8")
+                # stdout 用 replace 而非 strict：孤立代理字符（页面 JS 可产生）无法编码，
+                # strict 会让响应行写出失败、请求悬挂到 Rust 超时强杀；replace 降级为 '?'
+                # 后整行仍是合法 UTF-8 + 合法 JSON，响应总能写出。stderr 同理，防日志抛错。
+                stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             # reconfigure 失败时检查实际编码：stdout 非 UTF-8 则 IPC 必然乱码，
             # 静默继续只会让 Rust 侧持续丢弃响应行、在途请求全部超时——
@@ -184,7 +146,19 @@ def emit_response(msg_id: int | None, result: dict) -> None:
 
 
 def emit_event(event_type: str, data: dict) -> None:
-    """向 stdout 推送事件（实际事件类型：step_progress / screenshot / dialog）。"""
+    """向 stdout 推送事件。
+
+    实际事件类型：step_progress / screenshot / dialog（业务事件，经 Rust 白名单
+    转发 WebSocket）与 command_started（BRG-1b 内部信令，不进白名单，Rust 据此
+    重置对应请求的超时起算点）。
+
+    P3-7：事件数据写出前经 ``_sanitize_message_fields`` 就地脱敏——事件通道
+    不走 ``_dispatch`` 的响应信封闸口，dialog 事件携带页面 alert 原文（可能含
+    带临时 token 的重定向 URL），键名白名单恰好覆盖其 message 字段；其余
+    事件负载无 message/error 键与裸 str 列表，均为 no-op。各 emit 调用点的
+    负载均为就地构造的独立 dict，就地修改无共享状态风险。
+    """
+    _sanitize_message_fields(data)
     _write_line({"event": event_type, "data": data})
 
 
@@ -273,14 +247,66 @@ def stdin_reader(queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
             logger.debug("入队退出哨兵失败（事件循环可能已关闭）: %r", exc)
 
 
+def _sanitize_message_fields(node: object) -> None:
+    """递归脱敏 dict / list 树中名为 message / error 的字符串字段（就地修改）。
+
+    debug 会话响应的 ``data.results[*].message`` 等嵌套结构与扁平字段统一覆盖；
+    list 内的裸 str 项同样过 ``_sanitize_error``（P3-7）——``dialogs``（页面
+    弹窗文案列表）这类载荷不经键名白名单，门户 alert 里带临时 token 的 URL
+    会原样随响应信封进登录历史；``_sanitize_error`` 对无 query/fragment 的
+    文本原样返回（幂等），重复应用无害。
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("message", "error") and isinstance(value, str):
+                node[key] = _sanitize_error(value)
+            else:
+                _sanitize_message_fields(value)
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            if isinstance(item, str):
+                node[i] = _sanitize_error(item)
+            else:
+                _sanitize_message_fields(item)
+
+
+def _sanitize_response_result(result: object) -> object:
+    """响应信封统一脱敏：所有命令响应在落 stdout 前的最后闸口。
+
+    ``_error_result`` / ``_structured_result`` 各自分内已脱敏，但 handler 以
+    success 信封返回的 ``data``（run_steps 的 StructuredResult.message、debug
+    会话 results 等）此前不经脱敏直达 Rust ``parse_ipc_response`` 进登录历史
+    ——Playwright 异常文本携带门户 URL（含 token=）是真实场景。此处对信封
+    顶层 ``error`` 与 ``data`` 树内 message / error 字段统一过 ``_sanitize_error``，
+    一处收口覆盖全部裸拼点。
+    """
+    if not isinstance(result, dict):
+        return result
+    if isinstance(result.get("error"), str):
+        result["error"] = _sanitize_error(result["error"])
+    _sanitize_message_fields(result.get("data"))
+    return result
+
+
+def _sanitize_emitter(emit: Callable[[int | None, dict], None]) -> Callable[[int | None, dict], None]:
+    """给响应写出函数包一层信封脱敏（``_dispatch`` 写响应前的统一收口）。"""
+
+    def _emit_sanitized(msg_id: int | None, result: dict) -> None:
+        emit(msg_id, _sanitize_response_result(result))
+
+    return _emit_sanitized
+
+
 async def _dispatch(msg: dict, emit=None) -> None:
     """分发单条命令并写回响应。
 
     ``emit`` 为响应写出函数，缺省全局 ``emit_response``；``_dispatch_guarded``
     传入单次守卫包装——真实结果与超时错误竞争同一 id 时仅首个生效（BRG-4）。
+    所有响应信封在写出前统一过 ``_sanitize_response_result`` 脱敏（P1-2 收口）。
     """
     if emit is None:
         emit = emit_response
+    emit = _sanitize_emitter(emit)
     msg_id = msg.get("id")
     method = msg.get("method")
     params = msg.get("params") or {}
@@ -382,10 +408,12 @@ def _error_result(message: str) -> dict:
 async def _dispatch_guarded(msg: dict) -> None:
     """分发单条命令，带命令级超时兜底。
 
-    每条命令在独立 ``asyncio.Task`` 中执行；超时则取消任务并强制关闭当前页面，
-    以中断挂起的 Playwright await（``page.evaluate``/``goto`` 挂在无限循环时
-    仅取消协程无法打断 CDP 调用），随后按 ``UNKNOWN_ERROR`` 回错误响应，
-    避免一条挂起命令永久堵死后续所有命令（A1 自愈）。
+    每条命令在独立 ``asyncio.Task`` 中执行；超时则取消任务，且仅对以
+    ``self._page`` 为执行目标的浏览器类命令（``_INTERRUPTIBLE_METHODS``）
+    追加强制关闭当前页面，以中断挂起的 Playwright await（``page.evaluate``/
+    ``goto`` 挂在无限循环时仅取消协程无法打断 CDP 调用），随后按
+    ``UNKNOWN_ERROR`` 回错误响应，避免一条挂起命令永久堵死后续所有命令
+    （A1 自愈；不使用页面的命令超时不得误关 keep_alive 保留页，见 C5）。
 
     畸形命令防护：``params`` 非对象（列表/字符串）会让 ``_command_timeout``
     内 AttributeError 穿透本协程杀死整个 Worker；``method`` 不可哈希会让
@@ -442,13 +470,17 @@ async def _dispatch_guarded(msg: dict) -> None:
             except Exception:  # noqa: BLE001 — 回包失败只记日志，不得杀死 Worker
                 logger.exception("命令 %s 异常兜底回包失败", method)
         return
-    # 超时：取消任务并强制中断挂起的 Playwright 操作
+    # 超时：取消任务；仅对以 self._page 为执行目标的浏览器类命令追加
+    # 强制中断（关页打断挂起的 CDP await）。不使用页面的命令（OCR /
+    # 健康检查）或使用自建临时浏览器的命令（test_redirect）超时关页只会
+    # 误伤 keep_alive preserve_state 保留的门户心跳页等无关页面。
     logger.error(f"命令 {method} 超时（{timeout_s:.0f}s），强制中断自愈")
     task.cancel()
-    try:
-        await worker_core.force_interrupt_pending()
-    except Exception:  # noqa: BLE001
-        logger.exception("强制中断挂起操作失败")
+    if method in _INTERRUPTIBLE_METHODS:
+        try:
+            await worker_core.force_interrupt_pending()
+        except Exception:  # noqa: BLE001
+            logger.exception("强制中断挂起操作失败")
     # 超时自愈错误响应（原 _timeout_result，与 _error_result 同构已合一；
     # emit_once 保证 handler 恰在超时瞬间完成时不会双回包）
     emit_once(msg_id, _error_result(f"命令 {method} 执行超时（{timeout_s:.0f}s）"))
@@ -485,6 +517,13 @@ async def _serve() -> None:
             if msg is None:
                 break
             method = msg.get("method")
+            # BRG-1b：通知 Rust 该命令已真正开始执行，其超时预算自此起算
+            #（此前 Rust 预算自发送起算，FIFO 排队时间会吃掉预算，导致排队命令
+            # 超时强杀连带中断 Python 侧实际在跑的前序命令）。仅对带数字 id 的
+            # 命令发出；id=0 shutdown 哨兵同样发出无害（Rust 侧无注册项即忽略）。
+            msg_id = msg.get("id")
+            if isinstance(msg_id, int):
+                emit_event("command_started", {"id": msg_id})
             # 每条命令独立 Task + 超时兜底，避免一条挂起命令堵死后续命令（A1）
             await _dispatch_guarded(msg)
             if method == "shutdown":
@@ -498,6 +537,13 @@ async def _serve() -> None:
             await asyncio.wait_for(worker_core.close_browser(), timeout=5.0)
         except Exception:  # noqa: BLE001
             logger.warning("退出时关闭浏览器失败", exc_info=True)
+        # 持久配置会话与自动化浏览器相互独立，close_browser 不触碰它；
+        # 随 Worker 退出一并收尾（EOF / shutdown 路径的幽灵会话兜底，
+        # 幂等，user_data_dir 原样保留）
+        try:
+            await asyncio.wait_for(worker_core.close_profile_session(), timeout=5.0)
+        except Exception:  # noqa: BLE001
+            logger.warning("退出时收尾持久配置会话失败", exc_info=True)
 
 
 def main() -> None:

@@ -11,13 +11,6 @@ export function formatScheduleTime(schedule: { hour?: number; minute?: number } 
   return `${hour}:${minute}`;
 }
 
-/** 秒 → 分钟/秒文本 */
-export function formatTimeValue(seconds: number): string {
-  if (!seconds) return "-";
-  if (seconds < 60) return `${seconds}秒`;
-  return `${Math.round(seconds / 60)}分钟`;
-}
-
 /**
  * 秒 → 中文紧凑时长（仪表盘「已检测时长」统计卡）。
  *
@@ -42,6 +35,20 @@ export function localNowTimestamp(): string {
 /** ISO 时间戳 → "YYYY-MM-DD HH:mm:ss"（日志/历史列表展示用） */
 export function formatTimestamp(ts: string): string {
   return (ts || "").replace("T", " ").substring(0, 19);
+}
+
+/**
+ * ISO 时间戳 → 本地时区 "YYYY-MM-DD HH:mm:ss"（更新检查记录等后端按 UTC 序列化的
+ * 完整时刻展示）。与 {@link formatTimestamp}（后端本地时间的字符串截取）的差别在
+ * **时区**：这里经 `Date` 解析后再按本地时区格式化；解析失败或空串返回空串。
+ * 全站口径固定，不用 `toLocaleString()`（那会跟随浏览器 locale，与列表页不一致）。
+ */
+export function formatLocalDateTime(ts: string | undefined | null): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /** 当前 UTC 时间 → 文件名安全时间戳 YYYYMMDDHHmmss（取 ISO 串前 19 位再去掉分隔符，供导出文件命名） */

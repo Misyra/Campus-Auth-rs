@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::config::ConfigApi;
 use crate::web::error::ApiError;
+use crate::web::openapi::schemas::ErrorResponse;
 
 /// 在候选目录中查找首个存在的任务录制脚本
 fn resolve_script_path(base_path: &std::path::Path) -> std::path::PathBuf {
@@ -40,6 +41,17 @@ fn resolve_script_path(base_path: &std::path::Path) -> std::path::PathBuf {
 ///
 /// 从 `resources/tools/task-recorder.user.js` 读取并返回 Tampermonkey 用户脚本。
 /// 文件缺失时返回 404。
+#[utoipa::path(
+    get,
+    path = "/api/tools/task-recorder.user.js",
+    operation_id = "get_api_tools_task_recorder_user_js",
+    tag = "tools",
+    responses(
+        // 静态文本资源：200 是 JavaScript 源码原文而非 JSON 信封
+        (status = 200, description = "Tampermonkey 任务录制用户脚本原文", content((String = "application/javascript"))),
+        (status = 404, description = "脚本文件缺失，可能需要重新安装或更新软件", body = ErrorResponse),
+    )
+)]
 pub async fn task_recorder(State(config): State<Arc<dyn ConfigApi>>) -> Result<Response, ApiError> {
     let script_path = resolve_script_path(&config.base_path());
 

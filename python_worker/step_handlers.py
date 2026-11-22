@@ -356,6 +356,36 @@ def _looks_like_plain_text(selector: str) -> bool:
     return not any(ch in value for ch in "#.[>+~:=*|^$(),")
 
 
+# 嵌套 frame 链分隔符（录制器 iframe 契约）：主文档 → 目标 iframe 的 CSS
+# 选择器链以 ' >> ' 连接（如 ``iframe#outer >> iframe#inner``），回放侧逐层
+# ``frame_locator`` 下钻——嵌套 iframe 无法靠单层选择器从主文档直达。
+_FRAME_CHAIN_SEPARATOR = " >> "
+
+
+def _split_frame_chain(spec: str) -> list[str]:
+    """按 ' >> ' 拆解嵌套 frame 链；链外规格原样单元素返回（历史行为零变化）。
+
+    只在分隔符处整体分割：frame 规格是录制器生成的 iframe CSS 链，属性值内
+    出现字面 ``' >> '`` 属病态输入，不做引号感知（历史任务从未产生该形态）。
+    """
+    parts = [part.strip() for part in spec.split(_FRAME_CHAIN_SEPARATOR)]
+    return [part for part in parts if part] or [spec]
+
+
+def _frame_locator_chain(page: Any, spec: str) -> Any:
+    """按链逐层构造 FrameLocator（嵌套 frame 的文档化定位路径）。
+
+    单层规格直传 ``page.frame_locator``（历史行为）；多层链逐层
+    ``frame_locator`` 下钻。每段独立走 ``_normalize_selector``（链段以 CSS
+    为主，XPath 形态顺带归一，与单层路径同口径）。
+    """
+    parts = _split_frame_chain(spec)
+    scope = page.frame_locator(_normalize_selector(parts[0]))
+    for part in parts[1:]:
+        scope = scope.frame_locator(_normalize_selector(part))
+    return scope
+
+
 def _match_frame(page: Any, spec: str, *, allow_css_fallback: bool) -> Any:
     """按 frame 规格解析 Page / Frame / FrameLocator 查询作用域（两类步骤共用）。
 
@@ -369,9 +399,10 @@ def _match_frame(page: Any, spec: str, *, allow_css_fallback: bool) -> Any:
     - URL 匹配多个或未找到：合并为同一文案（历史上两类步骤文案发散，现统一）；
     - name 匹配多个：报"匹配不唯一"；
     - name 未命中：``allow_css_fallback=True``（元素查询步骤）时降级为
-      ``page.frame_locator(spec)`` 按 CSS 定位 iframe/frame；``False``
-      （脚本执行步骤）时显式报错——脚本无法经 frame_locator 执行，
-      静默落到主 frame 会让 iframe 门户场景必然假失败。
+      ``page.frame_locator(spec)`` 按 CSS 定位 iframe/frame——含 ' >> '
+      分隔的录制器嵌套链（逐层下钻）；``False``（脚本执行步骤）时显式报错
+      ——脚本无法经 frame_locator 执行，静默落到主 frame 会让 iframe 门户
+      场景必然假失败。
     """
     if page is None:
         raise WorkerError(Outcome.SELECTOR_FAILED, "页面未初始化")
@@ -392,7 +423,7 @@ def _match_frame(page: Any, spec: str, *, allow_css_fallback: bool) -> Any:
     if len(name_matches) > 1:
         raise WorkerError(Outcome.SELECTOR_FAILED, f"frame name 匹配不唯一: {spec}")
     if allow_css_fallback:
-        return page.frame_locator(spec)
+        return _frame_locator_chain(page, spec)
     raise WorkerError(
         Outcome.SELECTOR_FAILED,
         f"脚本/URL 操作的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
@@ -415,6 +446,10 @@ def _looks_like_frame_css(spec: str) -> bool:
     value = spec.strip().lower()
     if value.startswith(("#", ".", "[", "//", "css=", "xpath=")):
         return True
+    # 录制器嵌套链恒以 ' >> ' 分隔：帧名不可能包含该分隔符，含即按 CSS 链处理
+    # （结构段如 iframe:nth-child(2) 不以 iframe+属性字符开头，靠该判定兜住）
+    if _FRAME_CHAIN_SEPARATOR in value:
+        return True
     return bool(re.match(r"^(?:iframe|frame)(?:[.#\[:>+~\s]|$)", value))
 
 
@@ -431,7 +466,8 @@ async def _resolve_frame_scope(
         return None
     if _looks_like_frame_css(spec):
         if allow_css_fallback:
-            return context.page.frame_locator(_normalize_selector(spec))
+            # 含 ' >> ' 嵌套链时逐层下钻（录制器 iframe 契约），单层直传
+            return _frame_locator_chain(context.page, spec)
         raise WorkerError(
             Outcome.SELECTOR_FAILED,
             f"脚本/URL 操作的 frame 仅支持 name 或 url= 规格，不支持 CSS 选择器: {spec}",
@@ -962,8 +998,11 @@ async def handle_evaluate(page, step: StepConfig, context: StepContext) -> None:
                 raise StepCancelled("JS 执行已取消")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                # 与外层步骤 deadline 的归类口径一致（P2-2）：evaluate 系超时归
+                # ASSERTION_FAILED（Rust 侧可重试、不回收 Worker）——门户 JS 未就绪
+                # 这类瞬时超时不应以 UNKNOWN_ERROR 终态终结登录
                 raise WorkerError(
-                    Outcome.UNKNOWN_ERROR, f"JS 执行超时（{timeout_s}s），已中断 JS 调用"
+                    Outcome.ASSERTION_FAILED, f"JS 执行超时（{timeout_s}s），已中断 JS 调用"
                 )
             await asyncio.wait({task}, timeout=min(0.1, remaining))
 
@@ -1211,15 +1250,20 @@ async def run_step_async(
     else:
         timeout_ms = int(context.default_timeout)
     timeout_ms = max(1, timeout_ms)
+    # 超时归类的口径：与 wait_url→NAVIGATION_TIMEOUT、assert_text→ASSERTION_FAILED
+    # 一致，evaluate 系超时也归 ASSERTION_FAILED（Rust 侧 classify 可重试、不回收
+    # Worker）——门户 JS 未就绪/验证码接口慢这类瞬时超时不应终态终结登录。
+    # ocr 维持 UNKNOWN_ERROR：模型加载/推理超时与断言语义无关，且识别器状态可疑，
+    # 终态失败比盲目重试更稳妥（口径可辩论，刻意不动）。
     timeout_outcome = {
         "navigate": Outcome.NAVIGATION_TIMEOUT,
         "goto": Outcome.NAVIGATION_TIMEOUT,
         "wait_url": Outcome.NAVIGATION_TIMEOUT,
         "assert_text": Outcome.ASSERTION_FAILED,
-        "evaluate": Outcome.UNKNOWN_ERROR,
-        "eval": Outcome.UNKNOWN_ERROR,
-        "custom_js": Outcome.UNKNOWN_ERROR,
-        "custom": Outcome.UNKNOWN_ERROR,
+        "evaluate": Outcome.ASSERTION_FAILED,
+        "eval": Outcome.ASSERTION_FAILED,
+        "custom_js": Outcome.ASSERTION_FAILED,
+        "custom": Outcome.ASSERTION_FAILED,
         "ocr": Outcome.UNKNOWN_ERROR,
     }.get(step.step_type, Outcome.SELECTOR_FAILED)
 

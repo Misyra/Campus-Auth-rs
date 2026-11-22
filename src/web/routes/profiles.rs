@@ -7,25 +7,233 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
-use serde::Deserialize;
+use axum::extract::{Path, Query, State};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 use zeroize::Zeroizing;
 
+use crate::bridge::BridgeApi;
 use crate::config::{ConfigApi, LoginChannel, ProfileApi, ProfileData};
 use crate::engine::{EngineApi, EngineCommand, ProfileSwitchSource};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1a profiles 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`：成功响应一律
+// `body = DataEnvelope<XxxData>`，非 2xx 一律 `body = ErrorResponse`。
+// `ProfileSummaryData` / `ProfileShareData` 是对 `crate::config` 侧序列化
+// 形状的**镜像声明**（handler 仍走 `data(json!({...}))` 组装），后续强类型化
+// 批次再让 handler 直接返回这些 DTO；`ProfileDetailData.settings` 暂以
+// `Value` 标注（整体为 `ProfileData` 序列化，形状随 `src/config/schema.rs`
+// 演进，待强类型化批次收敛）。
+
+/// GET /api/profiles 列表项（镜像 `crate::config::ProfileSummary` 的线格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileSummaryData {
+    /// Profile ID
+    pub id: String,
+    /// 显示名称
+    pub name: String,
+    /// 登录用户名
+    pub username: String,
+    /// 运营商
+    pub isp: String,
+    /// 活跃任务 ID
+    pub active_task: String,
+    /// 直连渠道绑定的直连任务 ID（空 = 未绑定）
+    pub active_http_task: String,
+    /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定）
+    pub active_script_task: String,
+    /// 登录执行渠道（browser=浏览器自动化 / http=直连请求 / script=自定义脚本）
+    pub login_channel: String,
+    /// 网关 IP 匹配规则（空 = 无匹配规则）
+    pub gateway_ip: String,
+    /// WiFi SSID 匹配规则（空 = 无匹配规则）
+    pub wifi_ssid: String,
+}
+
+/// GET /api/profiles 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileListData {
+    /// 全部方案摘要（不含密码字段），键为 Profile ID
+    pub profiles: std::collections::HashMap<String, ProfileSummaryData>,
+    /// 活跃方案 ID
+    pub active_profile: String,
+    /// 是否启用按网关/SSID 自动切换
+    pub auto_switch: bool,
+}
+
+/// GET /api/profiles/{id} 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileDetailData {
+    /// 方案详情：`ProfileData` 序列化（password 恒为空串——响应前已清空，
+    /// 不回传密文；network 为运行时 effective 出口）。形状随
+    /// `crate::config::ProfileData` 演进，待强类型化批次收敛
+    #[schema(value_type = Object)]
+    pub settings: Value,
+    /// 密码是否可用（口径同 GET /api/config：能解密而非仅字段非空）
+    pub has_password: bool,
+}
+
+/// 方案分享载荷中的 profile 部分（`GET /api/profiles/{id}/export` 导出格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileShareProfileData {
+    /// 显示名称
+    pub name: String,
+    /// 恒为空串：导出剔除账号（接收方填自己的账号）
+    pub username: String,
+    /// 恒为空串：导出剔除密码（密文跨机器不可解，原样带出会被接收方二次加密）
+    pub password: String,
+    /// 固定登录网址
+    pub auth_url: String,
+    /// 自定义重定向触发地址
+    pub trigger_url: String,
+    /// 运营商
+    pub isp: String,
+    /// 网关 IP 匹配规则
+    pub gateway_ip: String,
+    /// WiFi SSID 匹配规则
+    pub wifi_ssid: String,
+    /// 恒为空串：任务绑定属本机资源，不随方案迁移
+    pub active_task: String,
+    /// 登录执行渠道（browser/http/script；渠道本身是方案属性，随方案走）
+    pub login_channel: String,
+    /// 恒为空串：直连任务绑定不随方案迁移
+    pub active_http_task: String,
+    /// 恒为空串：脚本任务绑定不随方案迁移
+    pub active_script_task: String,
+}
+
+/// GET /api/profiles/{id}/export 响应载荷（分享文件信封）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileShareData {
+    /// 分享格式版本号（当前 1；导入方遇到更高版本提示升级）
+    pub campus_auth_profile: u32,
+    /// 导出时间（UTC RFC3339）
+    pub exported_at: String,
+    /// 导出方应用版本
+    pub app_version: String,
+    /// 建议的导入 ID（取源方案 id；仅建议，被占用时自动追加后缀）
+    pub suggested_id: String,
+    /// 方案内容（已剔除账号与密码、任务绑定置空）
+    pub profile: ProfileShareProfileData,
+}
+
+/// POST /api/profiles/import 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileImportData {
+    /// 实际落盘的方案 ID（与既有方案冲突时自动追加 -2/-3 后缀）
+    pub id: String,
+    /// 分享文件是否携带 v9 内联直连配置（已忽略；前端据此提示到任务页重配直连任务）
+    pub legacy_http_config_dropped: bool,
+}
+
+/// POST /api/profiles/detect 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProfileDetectData {
+    /// 检测到的网关 IP（未检测到时为 null）
+    pub gateway_ip: Option<String>,
+    /// 检测到的 WiFi SSID（未检测到时为 null）
+    pub ssid: Option<String>,
+    /// 匹配到的方案 ID（无匹配时为 null）
+    pub matched_profile_id: Option<String>,
+    /// 匹配到的方案名称（无匹配时为 null）
+    pub matched_profile_name: Option<String>,
+}
+
+/// POST /api/profiles/auto-switch 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AutoSwitchData {
+    /// 当前活跃方案 ID
+    pub active_profile: String,
+    /// 面向用户的提示消息
+    pub message: String,
+}
+
+/// POST /api/profiles/{id}/config-session/start 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConfigSessionStartData {
+    /// 配置浏览器是否已拉起且录制已开启（成功响应恒为 true）
+    pub started: bool,
+}
+
+/// `crate::config::schema::RecordedAction` 的线格式镜像声明（与 Worker 录制契约
+/// 同形）：config 持久化树走 schemars::JsonSchema 体系、与 utoipa ToSchema 互不
+/// 复用（见 `Cargo.toml` 对 schemars 的用途注记），profiles 域契约用本镜像标注
+/// 响应形状。字段须与源类型逐字对齐（含 `type` 改名与 `value` 的省略语义）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RecordedActionData {
+    /// 动作类型：`click`（按钮/提交类点击）、`change`（`<select>` 选择）、
+    /// `fill`（输入框填写，值可为凭据占位符）或 `navigate`（页面导航）
+    #[serde(rename = "type")]
+    pub action_type: String,
+    /// 目标元素选择器（Worker 按启发式优先级取首个命中）
+    pub selector: String,
+    /// 选择器采用的启发式级别（与 `selector` 配对）
+    pub strategy: String,
+    /// 事件时间戳（毫秒；Worker 侧按此升序返回并做 500ms 去重）
+    pub ts: i64,
+    /// `change`/`fill`/`navigate` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}`
+    /// 占位符、`navigate` 为落地页 URL）；仅 `click` 无此键（序列化时跳过，与
+    /// Worker 返回形状一致）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// 非顶层 frame 内捕获的动作：主文档到目标 iframe 的 CSS 选择器链，
+    /// ' >> ' 分隔；顶层捕获缺此键
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
+}
+
+/// POST /api/profiles/{id}/config-session/stop 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConfigSessionStopData {
+    /// 本次会话录制的动作数（Worker 侧截断后的真实数量；discard 时仅回显不落盘）
+    pub recorded_count: u64,
+    /// 动作数超出 Worker 单次上限（50 条）被截断
+    pub truncated: bool,
+    /// 方案的持久会话开关：apply=true（缺省）且非 discard 恒为 true（写回后的值），
+    /// 其余情况回方案当前值（未写回，不虚报）
+    pub persistent_session_enabled: bool,
+    /// 本次会话录制的动作数组（informational：无论 discard 与否、apply 与否，
+    /// Worker 回包携带即返回——已过凭据等值归一，值与方案凭据恒等时替换为
+    /// 占位符；Worker 侧已有单次 50 条截断守卫，量级可控）。
+    /// 任务录制流程经 `apply=false` 消费本字段，前端不必再发一次 GET 方案详情
+    pub recorded_actions: Vec<RecordedActionData>,
+}
+
+/// POST /api/profiles/{id}/config-session/start 查询参数
+#[derive(Deserialize, ToSchema)]
+pub struct ConfigSessionStartQuery {
+    /// `true`（缺省）为录制配置会话（注入录制器，stop 可落盘录制）；
+    /// `false` 为**自由浏览**模式：同样拉起 headed 持久浏览器并导航到门户地址，
+    /// 但不注入录制器——供已启用持久会话的方案单独打开浏览器手动登录（勾选
+    /// 门户「记住密码」），用完直接关窗即结束（幽灵收尾口径与录制会话一致）
+    #[serde(default = "true_default")]
+    pub record: bool,
+}
+
+/// `serde(default)` 需要的 `true` 常量函数（保持缺省录制口径）
+fn true_default() -> bool {
+    true
+}
 
 /// POST /api/profiles/{id} 请求体：创建 Profile（可选匹配/认证字段与 PUT 同语义，创建即完整落盘）
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ProfileCreateBody {
-    /// 本方案统一网络出口。
+    /// 本方案统一网络出口。形状：`{mode: direct|system|proxy|interface,
+    /// interface_id, proxy_url, dns_servers[]}`（整体结构见
+    /// `crate::network::settings::NetworkSettings`，待强类型化批次收敛）
+    #[schema(value_type = Object)]
     pub network: Option<crate::network::settings::NetworkSettings>,
     /// 与路径参数冗余的历史字段：路径已携带 id，body 内可省略（路径优先）
     pub id: Option<String>,
     pub name: String,
     pub username: String,
+    /// 登录密码明文；空串 = 不设独立密码（服务端加密为 `ENC:` 密文存储，响应不回传）
+    #[schema(value_type = String)]
     pub password: Zeroizing<String>,
     /// 编辑器同屏的可选匹配/认证设置：创建即完整落盘（此前仅收 4 字段，
     /// 网关/SSID/认证地址等会被静默丢弃，须再编辑一次才能保存）
@@ -36,11 +244,17 @@ pub struct ProfileCreateBody {
     pub gateway_ip: Option<String>,
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
+    /// 登录执行渠道：browser（默认）/ http（直连）/ script（自定义脚本）
+    #[schema(value_type = String)]
     pub login_channel: Option<LoginChannel>,
     /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
     pub active_http_task: Option<String>,
     /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）
     pub active_script_task: Option<String>,
+    /// 是否启用持久浏览器会话（门户「记住密码」模式）；缺省不启用。
+    /// 录制动作（recorded_actions）不进创建/更新通道：它只由配置会话
+    /// stop 端点写回，本字段只承载开关
+    pub persistent_session_enabled: Option<bool>,
 }
 
 /// 所有保存路径共用的出口校验；任意脚本无法由本程序强制绑定网卡。
@@ -59,31 +273,15 @@ pub(crate) fn validate_profile_network(profile: &ProfileData) -> Result<(), Stri
 }
 
 /// 校验 http/https URL 并返回 trim 结果（认证地址/重定向触发地址共用；空串直通）
+///
+/// scheme + 主机名两级判定已上提至 `crate::web::validate`（与 config 域同一
+/// 实现），本包装只保留 profiles 域特有的 trim 与空串直通语义。
 fn validate_http_url(label: &str, raw: &str) -> Result<String, ApiError> {
     let trimmed = raw.trim().to_string();
     if trimmed.is_empty() {
         return Ok(trimmed);
     }
-    let parsed = trimmed
-        .parse::<url::Url>()
-        .map_err(|_| ApiError::BadRequest(format!("{label}格式非法: {trimmed}")))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        _ => {
-            return Err(ApiError::BadRequest(format!(
-                "{label}仅支持 http/https，当前为: {}",
-                parsed.scheme()
-            )));
-        }
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ApiError::BadRequest(format!("{label}缺少主机名: {trimmed}")))?;
-    if host.is_empty() {
-        return Err(ApiError::BadRequest(format!(
-            "{label}缺少主机名: {trimmed}"
-        )));
-    }
+    crate::web::validate::validate_http_url(label, &trimmed)?;
     Ok(trimmed)
 }
 
@@ -160,12 +358,17 @@ pub(crate) async fn validate_login_task_binding(
 }
 
 /// PUT /api/profiles/{id} 请求体：字段全可选，仅覆盖出现的字段（空密码 = 保留原密码）
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct ProfileUpdateBody {
-    /// 本方案统一网络出口。
+    /// 本方案统一网络出口。形状：`{mode: direct|system|proxy|interface,
+    /// interface_id, proxy_url, dns_servers[]}`（整体结构见
+    /// `crate::network::settings::NetworkSettings`，待强类型化批次收敛）
+    #[schema(value_type = Object)]
     pub network: Option<crate::network::settings::NetworkSettings>,
     pub name: Option<String>,
     pub username: Option<String>,
+    /// 登录密码明文；空串 = 未修改（保留原密码），非空由服务端加密为 `ENC:` 密文
+    #[schema(value_type = String)]
     pub password: Option<Zeroizing<String>>,
     /// 显式清除已保存密码。
     ///
@@ -183,26 +386,46 @@ pub struct ProfileUpdateBody {
     pub gateway_ip: Option<String>,
     pub wifi_ssid: Option<String>,
     pub active_task: Option<String>,
+    /// 登录执行渠道：browser（默认）/ http（直连）/ script（自定义脚本）
+    #[schema(value_type = String)]
     pub login_channel: Option<LoginChannel>,
     /// 直连渠道绑定的直连任务 ID（空 = 未绑定，直连登录不可用）
     pub active_http_task: Option<String>,
     /// 脚本渠道绑定的脚本任务 ID（空 = 未绑定，脚本登录不可用）
     pub active_script_task: Option<String>,
+    /// 是否启用持久浏览器会话（门户「记住密码」模式）；仅显式出现时覆盖。
+    ///
+    /// **录制动作（recorded_actions）刻意不进本请求体**：它是配置会话
+    /// stop 端点写回的编排产物，不是用户手编字段。serde 对未知字段静默
+    /// 忽略（无 `deny_unknown_fields`），前端即使把编辑器全文回传也碰不到
+    /// 它（守护测试钉住该行为）
+    pub persistent_session_enabled: Option<bool>,
 }
 
 /// POST /api/profiles/switch 请求体：要切换到的目标 Profile ID
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct SwitchBody {
+    /// 目标 Profile ID（须已存在）
     pub profile_id: String,
 }
 
 /// POST /api/profiles/auto-switch 请求体：启用/禁用自动切换
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct AutoSwitchBody {
+    /// 是否启用按网关/SSID 自动切换活跃方案
     pub enabled: bool,
 }
 
 /// GET /api/profiles — 列出全部 Profile
+#[utoipa::path(
+    get,
+    path = "/api/profiles",
+    operation_id = "get_api_profiles",
+    tag = "profiles",
+    responses(
+        (status = 200, description = "全部方案摘要（不含密码）+ 活跃方案与自动切换开关", body = DataEnvelope<ProfileListData>),
+    )
+)]
 pub async fn list_profiles(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -227,6 +450,23 @@ pub async fn list_profiles(
 /// 「已保存 / 未设置」并决定是否提供「清除已保存密码」。只回 `settings` 一个
 /// 空串密码时，前端无法区分「没设密码」和「有密码但被抹掉了」——两者都会渲染成
 /// 空输入框，占位文案只能猜。
+///
+/// 契约注解：`settings` 为 `ProfileData` 整体序列化，暂以 `Value` 标注
+/// （待强类型化批次收敛）；其中 password 恒为空串（响应前清空，不回传密文）。
+#[utoipa::path(
+    get,
+    path = "/api/profiles/{id}",
+    operation_id = "get_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    responses(
+        (status = 200, description = "方案详情（settings.password 恒为空串，network 为运行时 effective 出口）+ has_password", body = DataEnvelope<ProfileDetailData>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 500, description = "方案读取或序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_profile(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(id): Path<String>,
@@ -391,6 +631,20 @@ fn parse_share_payload(body: &Value) -> Result<(ProfileData, String, bool), ApiE
 }
 
 /// GET /api/profiles/{id}/export — 导出方案为可分享的 JSON（剔除账号与密码）
+#[utoipa::path(
+    get,
+    path = "/api/profiles/{id}/export",
+    operation_id = "get_api_profiles_id_export",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    responses(
+        (status = 200, description = "分享文件信封（username/password 恒为空串，任务绑定置空；可直接作为 POST /api/profiles/import 的请求体）", body = DataEnvelope<ProfileShareData>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 500, description = "方案读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn export_profile(
     State(config): State<Arc<dyn ConfigApi>>,
     Path(id): Path<String>,
@@ -405,6 +659,23 @@ pub async fn export_profile(
 /// ID 冲突时自动追加 `-2`/`-3` 后缀而非报 409：导入的语义是"新增一份可用方案"，
 /// 让用户先解决命名冲突再重试属于把内部标识泄漏成用户负担；同时绝不覆盖既有
 /// 方案（覆盖会连带清掉对方的账号密码）。
+///
+/// 契约注解：请求体为宽松 `Value`——格式仅认「本应用导出的信封」（须含
+/// `campus_auth_profile` 版本标记），兼容 `{ data: {...} }` 外壳写法，
+/// 载荷内的账号/密码字段一律忽略，故不声明强类型请求体。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/import",
+    operation_id = "post_api_profiles_import",
+    tag = "profiles",
+    request_body(content = Value, description = "方案分享文件（GET /api/profiles/{id}/export 的导出格式；须含 campus_auth_profile 版本标记，载荷中的账号与密码字段被忽略）"),
+    responses(
+        (status = 200, description = "导入结果（id 冲突时自动追加 -2/-3 后缀，绝不覆盖既有方案）", body = DataEnvelope<ProfileImportData>),
+        (status = 400, description = "非本应用导出的分享文件（缺版本标记 / 格式更新 / 方案名缺失 / URL 或渠道值非法）", body = ErrorResponse),
+        (status = 409, description = "同名方案过多（自动后缀超过 10000 个）", body = ErrorResponse),
+        (status = 500, description = "方案写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn import_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     Json(body): Json<Value>,
@@ -449,6 +720,22 @@ pub async fn import_profile(
 /// body 必填 `name/username/password`（password 空串=不设独立密码）；
 /// 可选 `auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task/active_http_task`
 /// 与 PUT 同语义，支持创建时一次带上编辑器内的全部字段。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/{id}",
+    operation_id = "post_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID（路径优先于 body.id；两者皆空则 400）"),
+    ),
+    request_body(content = ProfileCreateBody, description = "创建载荷：name/username/password 必填，其余可选字段与 PUT 同语义，创建即完整落盘"),
+    responses(
+        (status = 200, description = "创建成功（纯新建语义：命中既有 id 由 Service 层拒绝为 409）", body = DataEnvelope<String>),
+        (status = 400, description = "缺少 id、URL 格式非法、网络出口无效、或渠道任务绑定校验失败", body = ErrorResponse),
+        (status = 409, description = "Profile ID 已存在", body = ErrorResponse),
+        (status = 500, description = "密码加密或方案写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn create_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -514,6 +801,9 @@ pub async fn create_profile(
     if let Some(active_script_task) = body.active_script_task {
         profile.active_script_task = active_script_task;
     }
+    if let Some(persistent_session_enabled) = body.persistent_session_enabled {
+        profile.persistent_session_enabled = persistent_session_enabled;
+    }
     if let Some(network) = body.network {
         network.validate().map_err(ApiError::BadRequest)?;
         profile.network = Some(network);
@@ -533,6 +823,22 @@ pub async fn create_profile(
 }
 
 /// PUT /api/profiles/{id} — 更新 Profile
+#[utoipa::path(
+    put,
+    path = "/api/profiles/{id}",
+    operation_id = "put_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    request_body(content = ProfileUpdateBody, description = "更新载荷：仅覆盖出现的字段；password 空串 = 保留原密码，clear_password = true 显式清除（优先于 password）"),
+    responses(
+        (status = 200, description = "更新成功（合并/校验在 profiles_lock 事务临界区内完成）", body = DataEnvelope<String>),
+        (status = 400, description = "字段校验失败（URL 非法、网络出口无效、渠道任务绑定缺失等）", body = ErrorResponse),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 500, description = "密码加密或方案写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn update_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -605,6 +911,9 @@ pub async fn update_profile(
                     if let Some(active_script_task) = body.active_script_task {
                         profile.active_script_task = active_script_task;
                     }
+                    if let Some(persistent_session_enabled) = body.persistent_session_enabled {
+                        profile.persistent_session_enabled = persistent_session_enabled;
+                    }
                     if let Some(network) = body.network {
                         network.validate()?;
                         profile.network = Some(network);
@@ -637,10 +946,37 @@ pub async fn update_profile(
 }
 
 /// DELETE /api/profiles/{id} — 删除 Profile
+#[utoipa::path(
+    delete,
+    path = "/api/profiles/{id}",
+    operation_id = "delete_api_profiles_id",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+    ),
+    responses(
+        (status = 200, description = "删除成功", body = DataEnvelope<String>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 409, description = "default 方案不可删除，或方案有进行中的配置/录制会话（须先结束会话）", body = ErrorResponse),
+        (status = 500, description = "方案删除失败", body = ErrorResponse),
+    )
+)]
 pub async fn delete_profile(
+    State(bridge): State<Arc<dyn BridgeApi>>,
     State(profiles): State<Arc<dyn ProfileApi>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    // 活跃配置/录制会话归属本方案时拒绝删除：会话命令按方案 ID 派发
+    // （stop 端点先 load_profile），方案文件一删、收尾即 404，录制/配置
+    // 浏览器沦为无人能收的孤儿——且配置会话豁免空闲回收，会活到应用退出。
+    // 删除前必须先结束会话（Codex 三轮）
+    if let Some(owner) = bridge.config_session_owner()
+        && owner.profile_id == id
+    {
+        return Err(ApiError::Conflict(
+            "该方案有进行中的配置/录制会话，请先在对应页面结束会话再删除".into(),
+        ));
+    }
     profiles.delete_profile(&id).await?;
     tracing::info!(profile_id = %id, "删除 Profile");
     Ok(data(Value::String("ok".into())))
@@ -653,6 +989,18 @@ pub async fn delete_profile(
 /// 命令同步引擎派生状态（ActiveProfile 状态广播 + 监测中的即时探测与
 /// 定时器重建）。历史实现只调 ProfileService、绕过 Engine：切换后引擎内
 /// 的探测上下文不随切换刷新，Web 与自动切换两个入口的生效行为不一致。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/switch",
+    operation_id = "post_api_profiles_switch",
+    tag = "profiles",
+    request_body(content = SwitchBody, description = "要切换到的目标 Profile ID"),
+    responses(
+        (status = 200, description = "切换已持久化（Engine 派生状态同步失败仅告警，经 reload 收敛）", body = DataEnvelope<String>),
+        (status = 404, description = "目标方案不存在", body = ErrorResponse),
+        (status = 500, description = "切换落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn switch_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(engine): State<Arc<dyn EngineApi>>,
@@ -676,6 +1024,16 @@ pub async fn switch_profile(
 ///
 /// 复用 ProfileService.detect_matching_profile 做网关 IP / WiFi SSID 匹配，
 /// 支持 AND/OR 匹配逻辑。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/detect",
+    operation_id = "post_api_profiles_detect",
+    tag = "profiles",
+    responses(
+        (status = 200, description = "网关 IP / SSID 检测结果与匹配到的方案（无匹配时对应字段为 null）", body = DataEnvelope<ProfileDetectData>),
+        (status = 500, description = "网关或 SSID 检测失败", body = ErrorResponse),
+    )
+)]
 pub async fn detect_profile(
     State(profiles): State<Arc<dyn ProfileApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -705,6 +1063,17 @@ pub async fn detect_profile(
 }
 
 /// POST /api/profiles/auto-switch — 设置自动切换开关
+#[utoipa::path(
+    post,
+    path = "/api/profiles/auto-switch",
+    operation_id = "post_api_profiles_auto_switch",
+    tag = "profiles",
+    request_body(content = AutoSwitchBody, description = "启用/禁用按网关/SSID 自动切换活跃方案"),
+    responses(
+        (status = 200, description = "开关已落库并回显当前活跃方案", body = DataEnvelope<AutoSwitchData>),
+        (status = 500, description = "设置落盘失败", body = ErrorResponse),
+    )
+)]
 pub async fn auto_switch(
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(config): State<Arc<dyn ConfigApi>>,
@@ -718,20 +1087,370 @@ pub async fn auto_switch(
     })))
 }
 
+/// POST /api/profiles/{id}/config-session/start — 启动持久配置会话（无请求体）
+///
+/// 编排口径与登录编排的持久自动登录装配同源：
+/// - `user_data_dir`：按方案 id 拼接的持久目录（browser_profiles/<id>/），
+///   派发前 ensure 创建（持久目录按需创建口径）；
+/// - `portal_url`：方案浏览器导航有效地址（认证地址回退链，留空时落触发
+///   地址，恒非空）；
+/// - `browser_settings`：整体下发运行时浏览器设置（资源路由 / 直连 / stealth
+///   口径对齐 Worker 启动逻辑）。
+///
+/// 两种模式（`?record=` 查询参数，缺省 `true`）：
+/// - **录制配置会话**（缺省）：headed 持久浏览器 + 注入录制器，stop 结算时
+///   录制动作与开关写回方案；
+/// - **自由浏览**（`record=false`）：同样 headed 持久浏览器并导航到门户地址，
+///   但不注入录制器——供已启用持久会话的方案单独「打开浏览器」手动登录
+///   （勾选门户「记住密码」），用完直接关窗即结束（Worker 幽灵收尾，
+///   user_data_dir 原样保留）。该模式要求方案已启用 `persistent_session_enabled`
+///   （400 拦截），stop 端点拒绝其非 discard 结算（无录制可落盘）。
+///
+/// 占用互斥：Worker 侧同一时刻仅允许一个活跃配置会话（重复 start 回结构化
+/// 错误）；Rust 侧会话矩阵把 `profile_session_start/stop` 归为持久类命令，
+/// 在途登录 / 调试 / 重定向检测期间快速失败（409）。
+///
+/// 归属记录：start 成功后把 (session_id, profile_id, record) 记入 Bridge 的
+/// 归属注册表——Worker 不感知方案 id，stop 端点依赖该记录拒绝「把 A 方案
+/// 会话的录制写进 B 方案」与「未录制会话的落盘结算」。
+///
+/// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_START_TIMEOUT`]）
+/// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
+/// 见该常量处说明）——超时判定成立且槽位由本请求持有时，Bridge 先等 Worker
+/// 自愈释放槽位再返回超时。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/{id}/config-session/start",
+    operation_id = "post_api_profiles_id_config_session_start",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+        ("record" = bool, Query, description = "false 时以自由浏览模式打开持久浏览器（不注入录制器），须先启用持久会话；缺省 true 为录制配置会话"),
+    ),
+    responses(
+        (status = 200, description = "配置浏览器已拉起（录制模式录制已开启；自由浏览模式不录制；会话存续期不受命令级超时约束，直到 stop）", body = DataEnvelope<ConfigSessionStartData>),
+        (status = 400, description = "非浏览器渠道（持久会话仅浏览器渠道支持），或自由浏览模式要求方案已启用持久会话", body = ErrorResponse),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 409, description = "已有活跃配置会话（Worker 占用互斥）或会话槽位忙（在途登录/调试/重定向检测）", body = ErrorResponse),
+        (status = 500, description = "持久会话目录创建失败或命令超时等内部错误", body = ErrorResponse),
+        (status = 503, description = "Worker 未安装，或配置浏览器/门户页启动失败（环境不可用）", body = ErrorResponse),
+    )
+)]
+pub async fn start_config_session(
+    State(bridge): State<Arc<dyn BridgeApi>>,
+    State(config): State<Arc<dyn ConfigApi>>,
+    Path(id): Path<String>,
+    Query(query): Query<ConfigSessionStartQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let profile = config.load_profile(&id)?;
+    // 渠道校验：持久会话依赖门户「记住密码」（cookie/localStorage 持久化），
+    // 直连与脚本渠道没有浏览器会话可录
+    if profile.login_channel != LoginChannel::Browser {
+        return Err(ApiError::BadRequest(
+            "持久会话仅浏览器渠道支持，请先将本方案的登录渠道切换为浏览器".into(),
+        ));
+    }
+    // 自由浏览模式门禁：该模式的意义就是「用已启用的持久浏览器」，未启用时
+    // 拒绝（录制模式不受此限——它是把开关打开的引导路径）
+    if !query.record && !profile.persistent_session_enabled {
+        return Err(ApiError::BadRequest(
+            "请先启用本方案的持久会话（勾选「启用持久会话」并保存）后再打开浏览器".into(),
+        ));
+    }
+    // portal_url / browser_settings / network 取运行时口径（含认证地址回退链与
+    // 全局浏览器设置）；**network 必须随载荷下发**——bridge 的 apply_browser 在
+    // 载荷无 network 键时回退**活跃方案**的出口：非活跃方案的录制/配置会话会
+    // 用错出口（需代理的方案按直连开门户、无关活跃方案的坏网卡连累本会话
+    // 启动）（Codex 四轮）
+    let rt = config.runtime_config_for_profile(&id)?;
+    let user_data_dir = crate::utils::paths::browser_profile_dir(&config.base_path(), &id);
+    // 持久目录由编排侧 ensure（登录编排同口径）：目录建不出来时 Worker 启动
+    // 持久上下文必然失败，早失败早提示
+    std::fs::create_dir_all(&user_data_dir).map_err(|e| {
+        ApiError::Internal(format!(
+            "创建持久会话目录失败（{}）: {e}",
+            user_data_dir.display()
+        ))
+    })?;
+    let params = serde_json::json!({
+        "user_data_dir": user_data_dir,
+        "portal_url": rt.profile.effective_browser_login_url(),
+        "record": query.record,
+        "browser_settings": rt.browser,
+        "network": rt.network,
+    });
+    let resp = bridge.execute_config_session_start(params).await?;
+    // Worker 结构化失败（success=false）：占用互斥命中（重复启动）归 409，
+    // 其余（浏览器/门户环境故障）归 503。占用文案钉在 python_worker 的
+    // profile_session_start 契约上（「已存在活跃配置会话，请先停止当前配置会话」）
+    if !resp.result.success {
+        let msg = resp
+            .result
+            .error
+            .unwrap_or_else(|| "配置会话启动失败".into());
+        if msg.contains("已存在活跃配置会话") {
+            return Err(ApiError::Conflict(msg));
+        }
+        return Err(ApiError::ServiceUnavailable(msg));
+    }
+    // 记录归属（覆盖旧记录）：Worker 单会话语义下新 start 即旧会话终结
+    let session_id = resp
+        .result
+        .data
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    bridge.set_config_session_owner(crate::bridge::ConfigSessionOwner {
+        session_id,
+        profile_id: id.clone(),
+        record: query.record,
+    });
+    tracing::info!(
+        profile_id = %id,
+        record = query.record,
+        "配置会话已启动（headed 持久浏览器）"
+    );
+    Ok(data(serde_json::json!({ "started": true })))
+}
+
+/// POST /api/profiles/{id}/config-session/stop 查询参数
+#[derive(Deserialize, ToSchema)]
+pub struct ConfigSessionStopQuery {
+    /// 丢弃本次录制：仅关闭浏览器，**不落盘录制、不写方案**（A47 对齐决策：
+    /// 「只退出不保存」的显式出口）。录制内容仍回显真实计数与动作数组（信息无害）
+    #[serde(default)]
+    pub discard: bool,
+    /// 结算写盘开关（缺省 true）：非 discard 时录制动作写回方案 +
+    /// `persistent_session_enabled=true`（方案编辑器「完成配置」路径）；
+    /// `false` 仅结算会话（关浏览器、取回动作）**不写方案**——任务录制流程
+    /// 专用：录制生成浏览器任务不该顺带把方案翻成持久会话。apply=false 时
+    /// 「未录制会话拒绝非 discard」守卫放行（本就不写方案，无空录制覆盖面）
+    #[serde(default)]
+    pub apply: Option<bool>,
+}
+
+/// 录制值等值归一：fill/change 值与方案凭据恒等时替换为对应占位符
+///
+/// P1-1b 结构性后备防线：Worker 侧启发式（`fillValueFor`）对非 `type=password`
+/// 密码框可能录下明文（如点门户「显示密码」把 type 切成 `text`、自绘密码框
+/// `type=text`），单靠前端启发式兜不住——本归一在 stop 结算处用方案快照明文
+/// 凭据对 fill/change 值做恒等比对，命中（原文或 URL 编码形态）一律替换
+/// `{{USERNAME}}`/`{{PASSWORD}}`。空凭据跳过（无可比对面）；占位符字面值不与
+/// 真实凭据恒等、原样透传；`click`/`navigate` 值不参与比对（navigate 恒为
+/// 落地页 URL）。URL 编码口径复用 `login::http_login::collect_secrets` 的
+/// `form_urlencoded::byte_serialize` 手段，不另造轮子
+fn normalize_recorded_credential_values(
+    actions: &mut [crate::config::schema::RecordedAction],
+    username: &str,
+    password: &str,
+) {
+    for action in actions.iter_mut() {
+        // 仅 fill/change 携带用户输入值；navigate 是页面导航 URL，click 无值
+        if !matches!(action.action_type.as_str(), "fill" | "change") {
+            continue;
+        }
+        let Some(value) = action.value.as_deref() else {
+            continue;
+        };
+        if !username.is_empty() && value_matches_credential(value, username) {
+            action.value = Some("{{USERNAME}}".to_string());
+        } else if !password.is_empty() && value_matches_credential(value, password) {
+            action.value = Some("{{PASSWORD}}".to_string());
+        }
+    }
+}
+
+/// 值与凭据恒等判定：原文或 URL 编码（`form_urlencoded::byte_serialize`）形态
+fn value_matches_credential(value: &str, credential: &str) -> bool {
+    if value == credential {
+        return true;
+    }
+    value == url::form_urlencoded::byte_serialize(credential.as_bytes()).collect::<String>()
+}
+
+/// POST /api/profiles/{id}/config-session/stop — 停止配置会话并结算录制
+///
+/// 非 discard 且 apply=true（缺省）：解析 Worker 回传的 `recorded_actions`，经
+/// 方案更新事务（与 PUT 同一 profiles_lock 临界区）一次性写回
+/// `recorded_actions + persistent_session_enabled=true`——事务化是 A47 对齐项：
+/// 并发保存同一方案不丢字段，录制不被「先 load 后 save」的陈旧快照覆盖。
+///
+/// 非 discard 且 apply=false：仅结算会话（关浏览器、取回动作）**不写方案**——
+/// 任务录制流程专用：前端要的是动作数组去生成浏览器任务，不需要「录制任务」
+/// 顺带把方案改成持久会话。响应里 `persistent_session_enabled` 回方案当前值
+/// （与 discard 的回显口径一致）。
+///
+/// discard：仅关闭浏览器取回计数与动作数组，方案保持原样（录制不落盘、开关不动）。
+///
+/// 未录制会话（自由浏览模式打开，`owner.record == false`）拒绝 apply=true（缺省）
+/// 且非 discard 的结算（400）：其回包 `recorded_actions` 恒为空数组，照单落盘会以
+/// 空数组**覆盖方案既有录制**——守卫钉死这条数据丢失路径。apply=false 不写方案、
+/// 无覆盖面，放行（取回的同样是空数组）。
+///
+/// 响应 `recorded_actions` 数组为 informational：无论 discard 与否、apply 与否，
+/// Worker 回包携带即返回——结算处先经凭据等值归一（fill/change 值与方案凭据
+/// 恒等时替换为 `{{USERNAME}}`/`{{PASSWORD}}`，见
+/// [`normalize_recorded_credential_values`]），落盘与回显同一次覆盖。
+///
+/// 超时回执时延：命令预算（[`crate::bridge::CONFIG_SESSION_STOP_TIMEOUT`]）
+/// 耗尽后可能附加至多 ~10s 槽位宽限等待（[`crate::bridge::GRACE_WAIT_DURATION`]，
+/// 见该常量处说明）。
+#[utoipa::path(
+    post,
+    path = "/api/profiles/{id}/config-session/stop",
+    operation_id = "post_api_profiles_id_config_session_stop",
+    tag = "profiles",
+    params(
+        ("id" = String, Path, description = "Profile ID"),
+        ("discard" = bool, Query, description = "true 时仅关闭浏览器不落盘录制（缺省 false）"),
+        ("apply" = Option<bool>, Query, description = "结算写盘开关（缺省 true）：非 discard 时录制动作写回方案；false 仅结算会话不写方案，任务录制流程专用"),
+    ),
+    responses(
+        (status = 200, description = "会话已结束；响应携带录制动作数组（informational，discard/apply=false 也回显）——apply=true（缺省）且非 discard 时已写回方案，apply=false 仅结算不写方案", body = DataEnvelope<ConfigSessionStopData>),
+        (status = 404, description = "方案不存在", body = ErrorResponse),
+        (status = 409, description = "无活跃配置会话，或活跃会话属于其他方案（归属校验拒绝跨方案写盘）", body = ErrorResponse),
+        (status = 500, description = "录制动作解析失败或命令超时等内部错误", body = ErrorResponse),
+        (status = 503, description = "Worker 未安装或环境不可用（Worker 重启后无活跃会话的陈旧归属走 409 自愈）", body = ErrorResponse),
+    )
+)]
+pub async fn stop_config_session(
+    State(bridge): State<Arc<dyn BridgeApi>>,
+    State(profiles): State<Arc<dyn ProfileApi>>,
+    State(config): State<Arc<dyn ConfigApi>>,
+    Path(id): Path<String>,
+    Query(query): Query<ConfigSessionStopQuery>,
+) -> Result<Json<Value>, ApiError> {
+    // 缺省 true：方案编辑器「完成配置」路径与历史调用方不动，任务录制流程显式
+    // 传 apply=false 关闭写盘副作用
+    let apply = query.apply.unwrap_or(true);
+    let profile = config.load_profile(&id)?;
+    // 归属校验先行：本地无记录 / 记录指向别的方案时一律不派发——占用互斥
+    // 以 Worker 为权威，但「会话属于哪个方案」只有 Rust 侧知道，跨方案
+    // 写盘必须在这里拦下
+    let owner = bridge
+        .config_session_owner()
+        .ok_or_else(|| ApiError::Conflict("无活跃配置会话".into()))?;
+    if owner.profile_id != id {
+        return Err(ApiError::Conflict(format!(
+            "活跃配置会话属于方案「{}」，请在该方案下停止",
+            owner.profile_id
+        )));
+    }
+    // 未录制会话（自由浏览模式）没有可落盘的录制内容，apply=true（缺省）且非
+    // discard 的结算会以空数组覆盖方案既有录制——在归属校验后、派发前拦下
+    // （归属保留，可改用 discard 或 apply=false 重新结算）；apply=false 本就
+    // 不写方案，无覆盖面，放行
+    if !owner.record && apply && !query.discard {
+        return Err(ApiError::BadRequest(
+            "本次会话以自由浏览模式打开（未录制），无可保存的录制内容；请用「仅关闭」方式结束会话"
+                .into(),
+        ));
+    }
+    let resp = bridge
+        .execute_config_session_stop(serde_json::json!({ "session_id": owner.session_id }))
+        .await?;
+    // 收到 Worker 结构化回包即清归属：成功 = 会话已拆除；结构化失败 = 会话
+    // 本已不存在（Worker 重启/崩溃后的陈旧归属）。仅传输层错误（上方 `?`，
+    // 超时/崩溃，会话状态未知）保持归属，等下次 stop 惰性自愈
+    bridge.take_config_session_owner();
+    if !resp.result.success {
+        let msg = resp
+            .result
+            .error
+            .unwrap_or_else(|| "停止配置会话失败".into());
+        // Worker 侧无会话（文案钉在 python_worker 的 profile_session_stop 契约）：
+        // 陈旧归属自愈为统一的 409「无活跃配置会话」
+        if msg.contains("没有活跃配置会话") || msg.contains("配置会话不存在") {
+            return Err(ApiError::Conflict("无活跃配置会话".into()));
+        }
+        return Err(ApiError::Internal(msg));
+    }
+    let truncated = resp
+        .result
+        .data
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Worker 返回形状即方案存储形状（RecordedAction 契约逐字对齐），解析失败
+    // 属于契约破裂，按内部错误处理而不静默丢录制
+    let mut recorded: Vec<crate::config::schema::RecordedAction> = resp
+        .result
+        .data
+        .get("recorded_actions")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| ApiError::Internal(format!("录制动作解析失败: {e}")))?
+        .unwrap_or_default();
+    // 等值归一先于序列化：落盘与响应回显一次覆盖（明文凭据在两处都不得留存）。
+    // 凭据取 `runtime_config_for_profile` 的解密快照——解密失败时密码为空、
+    // 归一按空凭据跳过（fail-open：不归一也不丢录制）
+    let credentials = config.runtime_config_for_profile(&id)?;
+    normalize_recorded_credential_values(
+        &mut recorded,
+        &credentials.profile.username,
+        &credentials.profile.password,
+    );
+    let recorded_count = recorded.len() as u64;
+    // 动作数组进响应：无论 discard 与否、apply 与否，Worker 回包携带即原样返回
+    // ——apply=false 的任务录制流程靠它取动作序列，省一次 GET 方案详情。
+    // 序列化须在写盘分支 move 掉 recorded 之前完成
+    let recorded_actions = serde_json::to_value(&recorded).unwrap_or_default();
+    let mut persistent_enabled = profile.persistent_session_enabled;
+    if !query.discard && apply {
+        let actions = recorded;
+        let result = profiles
+            .update_profile_tx(
+                &id,
+                Box::new(move |mut profile| {
+                    Box::pin(async move {
+                        profile.recorded_actions = actions;
+                        profile.persistent_session_enabled = true;
+                        Ok(profile)
+                    })
+                }),
+            )
+            .await?;
+        match result {
+            Ok(_) => persistent_enabled = true,
+            // 事务闭包在本路径无可失败校验，该分支按不可达防御处理
+            Err(msg) => return Err(ApiError::BadRequest(msg)),
+        }
+    }
+    tracing::info!(
+        profile_id = %id,
+        discard = query.discard,
+        apply,
+        recorded_count,
+        truncated,
+        "配置会话已停止"
+    );
+    Ok(data(serde_json::json!({
+        "recorded_count": recorded_count,
+        "truncated": truncated,
+        "persistent_session_enabled": persistent_enabled,
+        "recorded_actions": recorded_actions,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::VecDeque;
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use tower::ServiceExt; // oneshot
 
+    use crate::bridge::{BridgeError, ConfigSessionOwner, IpcResponse, IpcResult};
     use crate::config::{ConfigError, ProfileData, ProfileSummary, SettingsData};
     use crate::engine::EngineError;
     use crate::tasks::{TaskApi, TaskError, TaskKind};
 
-    #[derive(Default)]
     struct MockInner {
         profiles: Vec<ProfileData>,
         active: String,
@@ -740,6 +1459,10 @@ mod tests {
         dispatched_apply_profile: Vec<String>,
         /// 内存任务表：只服务 `validate_login_task_binding` 的存在性 + 类型判定
         tasks: Vec<(String, TaskKind)>,
+        /// 方案根目录（base_path）：配置会话 start 在其下 ensure 持久目录，
+        /// 用 TempDir 保证不污染进程工作目录
+        #[allow(dead_code)]
+        base: tempfile::TempDir,
     }
 
     /// 内存 EngineApi：仅记录 ApplyProfile 派发（switch 路由联动验证）
@@ -938,6 +1661,106 @@ mod tests {
         }
     }
 
+    // ============ 配置会话端点（config-session）的 Bridge mock ============
+
+    /// 预置回包脚本的一项
+    enum MockReply {
+        /// Worker 成功回包（success=true，data 为响应载荷）
+        Ok(Value),
+        /// Worker 结构化失败（success=false，error 为消息）
+        WorkerError(String),
+        /// 传输层错误（execute_with_timeout 直接返回 Err）
+        Transport(BridgeError),
+    }
+
+    /// 内存 BridgeApi：按脚本依序回包并记录派发，归属注册表用真实语义
+    struct MockBridgeApi {
+        script: std::sync::Mutex<VecDeque<MockReply>>,
+        sent: std::sync::Mutex<Vec<(String, Value)>>,
+        owner: std::sync::Mutex<Option<ConfigSessionOwner>>,
+    }
+
+    impl MockBridgeApi {
+        fn new(script: Vec<MockReply>) -> Self {
+            Self {
+                script: std::sync::Mutex::new(script.into()),
+                sent: std::sync::Mutex::new(Vec::new()),
+                owner: std::sync::Mutex::new(None),
+            }
+        }
+
+        /// 派发的命令与参数（按序）
+        fn sent(&self) -> Vec<(String, Value)> {
+            self.sent.lock().unwrap().clone()
+        }
+
+        /// 当前归属
+        fn owner(&self) -> Option<ConfigSessionOwner> {
+            self.owner.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BridgeApi for MockBridgeApi {
+        async fn execute(&self, method: &str, params: Value) -> Result<IpcResponse, BridgeError> {
+            self.execute_with_timeout(method, params, Duration::from_secs(1))
+                .await
+        }
+
+        fn cancel(&self, _cancel_id: &str) {}
+
+        async fn execute_with_timeout(
+            &self,
+            method: &str,
+            params: Value,
+            _timeout: Duration,
+        ) -> Result<IpcResponse, BridgeError> {
+            self.sent.lock().unwrap().push((method.to_string(), params));
+            match self.script.lock().unwrap().pop_front() {
+                Some(MockReply::Ok(data)) => Ok(IpcResponse {
+                    id: 1,
+                    result: IpcResult {
+                        success: true,
+                        data,
+                        error: None,
+                    },
+                }),
+                Some(MockReply::WorkerError(msg)) => Ok(IpcResponse {
+                    id: 1,
+                    result: IpcResult {
+                        success: false,
+                        data: Value::Null,
+                        error: Some(msg),
+                    },
+                }),
+                Some(MockReply::Transport(e)) => Err(e),
+                None => panic!("MockBridgeApi 回包脚本已耗尽: {method}"),
+            }
+        }
+
+        async fn force_recycle(&self) {}
+
+        fn has_live_worker(&self) -> bool {
+            false
+        }
+
+        async fn recycle_if_running(&self) {}
+
+        async fn shutdown(&self) {}
+
+        fn config_session_owner(&self) -> Option<ConfigSessionOwner> {
+            self.owner.lock().unwrap().clone()
+        }
+
+        fn set_config_session_owner(&self, owner: ConfigSessionOwner) {
+            *self.owner.lock().unwrap() = Some(owner);
+        }
+
+        fn take_config_session_owner(&self) -> Option<ConfigSessionOwner> {
+            self.owner.lock().unwrap().take()
+        }
+    }
+
     /// 内存 ConfigApi（profiles handler 测试所需的最小面）
     struct MockConfigApi(Arc<std::sync::Mutex<MockInner>>);
 
@@ -993,7 +1816,7 @@ mod tests {
         }
 
         fn base_path(&self) -> std::path::PathBuf {
-            std::path::PathBuf::new()
+            self.0.lock().unwrap().base.path().to_path_buf()
         }
 
         fn runtime_snapshot(&self) -> std::sync::Arc<crate::config::RuntimeConfig> {
@@ -1027,13 +1850,14 @@ mod tests {
     }
 
     /// 多 State 提取的测试 Router：ProfileApi + ConfigApi + EngineApi + TaskApi
-    /// 组合为单一 state 类型
+    /// + BridgeApi 组合为单一 state 类型
     #[derive(Clone)]
     struct TestState {
         profiles: Arc<dyn ProfileApi>,
         config: Arc<dyn ConfigApi>,
         engine: Arc<dyn EngineApi>,
         tasks: Arc<dyn TaskApi>,
+        bridge: Arc<dyn BridgeApi>,
     }
 
     impl axum::extract::FromRef<TestState> for Arc<dyn ProfileApi> {
@@ -1057,6 +1881,12 @@ mod tests {
     impl axum::extract::FromRef<TestState> for Arc<dyn TaskApi> {
         fn from_ref(state: &TestState) -> Self {
             state.tasks.clone()
+        }
+    }
+
+    impl axum::extract::FromRef<TestState> for Arc<dyn BridgeApi> {
+        fn from_ref(state: &TestState) -> Self {
+            state.bridge.clone()
         }
     }
 
@@ -1109,6 +1939,18 @@ mod tests {
     }
 
     fn mock_app() -> (axum::Router, Arc<std::sync::Mutex<MockInner>>) {
+        let (app, inner, _bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(Vec::new())));
+        (app, inner)
+    }
+
+    /// 带预置回包脚本的 mock app（配置会话端点测试用）；返回 bridge 具体句柄供断言
+    fn mock_app_with_bridge(
+        bridge: Arc<MockBridgeApi>,
+    ) -> (
+        axum::Router,
+        Arc<std::sync::Mutex<MockInner>>,
+        Arc<MockBridgeApi>,
+    ) {
         let inner = Arc::new(std::sync::Mutex::new(MockInner {
             profiles: vec![profile_of("default"), profile_of("dorm")],
             active: "default".into(),
@@ -1119,12 +1961,14 @@ mod tests {
                 browser_task("portal-browser"),
                 script_task("portal-login"),
             ],
+            base: tempfile::TempDir::new().unwrap(),
         }));
         let state = TestState {
             profiles: Arc::new(MockProfileApi(inner.clone())),
             config: Arc::new(MockConfigApi(inner.clone())),
             engine: Arc::new(MockEngineApi(inner.clone())),
             tasks: Arc::new(MockTaskApi(inner.clone())),
+            bridge: bridge.clone(),
         };
         let app = axum::Router::new()
             .route("/api/profiles", get(list_profiles))
@@ -1142,8 +1986,16 @@ mod tests {
                 "/api/profiles/auto-switch",
                 axum::routing::post(auto_switch),
             )
+            .route(
+                "/api/profiles/{id}/config-session/start",
+                axum::routing::post(start_config_session),
+            )
+            .route(
+                "/api/profiles/{id}/config-session/stop",
+                axum::routing::post(stop_config_session),
+            )
             .with_state(state);
-        (app, inner)
+        (app, inner, bridge)
     }
 
     // 测试脚手架统一走共享 test_support（WE2-5：原逐文件复制的 body_json 已收敛）
@@ -1325,6 +2177,58 @@ mod tests {
             .unwrap();
         assert_ne!(resp.status(), StatusCode::OK);
         assert_eq!(inner.lock().unwrap().profiles.len(), 2);
+    }
+
+    /// 活跃配置/录制会话归属本方案时拒绝删除：方案一删、按方案派发的
+    /// stop 即 404，浏览器沦为无人能收的孤儿（配置会话豁免空闲回收）——
+    /// 必须先结束会话（Codex 三轮钉住）
+    #[tokio::test]
+    async fn test_delete_profile_with_active_config_session_rejected() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(Vec::new())));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/profiles/dorm")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        // 方案原样保留（删除未执行）
+        assert!(
+            inner
+                .lock()
+                .unwrap()
+                .profiles
+                .iter()
+                .any(|p| p.id == "dorm")
+        );
+
+        // 会话归属其他方案时不拦本方案的删除
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "other".into(),
+            record: true,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/profiles/dorm")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// auto-switch 落库并回显 active
@@ -2603,5 +3507,763 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ============ 配置会话端点（config-session start/stop）============
+
+    /// Worker 回包里的一条录制动作（与 profile_session_stop 响应契约同形）
+    fn recorded_click_json(ts: i64) -> Value {
+        serde_json::json!({
+            "type": "click",
+            "selector": "#login-btn",
+            "strategy": "id",
+            "ts": ts,
+        })
+    }
+
+    async fn post_config_session(app: &axum::Router, uri: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// start 成功：派发 profile_session_start（持久目录 / 门户地址 / 录制开启 /
+    /// 浏览器设置整体下发）并记录归属
+    #[tokio::test]
+    async fn config_session_start_成功派发并记录归属() {
+        let (app, _inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Ok(
+                serde_json::json!({"session_id": "sess-1", "recorded": true}),
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["started"], true);
+
+        let sent = bridge.sent();
+        assert_eq!(sent.len(), 1, "应恰好派发一条命令");
+        assert_eq!(sent[0].0, "profile_session_start");
+        let params = &sent[0].1;
+        // Windows 路径分隔符为反斜杠，统一按正斜杠口径断言（CI windows 矩阵）
+        let user_data_dir = params["user_data_dir"].as_str().unwrap().replace('\\', "/");
+        assert!(
+            user_data_dir.ends_with("browser_profiles/dorm"),
+            "持久目录应按方案 id 拼接: {params}"
+        );
+        assert!(
+            !params["portal_url"].as_str().unwrap().is_empty(),
+            "portal_url 取 effective_browser_login_url 口径恒非空"
+        );
+        assert_eq!(params["record"], true, "录制必须开启");
+        assert!(
+            params["browser_settings"].is_object(),
+            "browser_settings 整体下发: {params}"
+        );
+        assert!(
+            params["network"].is_object(),
+            "network（所选方案出口）必须随载荷下发——bridge 无键时回退活跃方案出口: {params}"
+        );
+        let owner = bridge.owner().expect("start 成功后应记录归属");
+        assert_eq!(owner.session_id, "sess-1");
+        assert_eq!(owner.profile_id, "dorm");
+        assert!(owner.record, "录制模式（缺省）归属应带 record=true");
+    }
+
+    /// start 时 Worker 报占用（重复启动）→ 409
+    #[tokio::test]
+    async fn config_session_start_worker占用归409() {
+        let (app, _inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::WorkerError(
+                "已存在活跃配置会话，请先停止当前配置会话".into(),
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("已存在活跃配置会话"),
+            "{v}"
+        );
+        assert!(bridge.owner().is_none(), "start 失败不得留下归属记录");
+    }
+
+    /// start 时 Rust 会话矩阵拒绝（在途登录占用槽位）→ 409
+    #[tokio::test]
+    async fn config_session_start_会话槽位忙归409() {
+        let (app, _inner, _bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Transport(
+                BridgeError::WorkerBusy,
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    /// start 时方案不存在 → 404，且不派发任何命令
+    #[tokio::test]
+    async fn config_session_start_方案不存在404() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp = post_config_session(&app, "/api/profiles/ghost/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(bridge.sent().is_empty(), "404 前不得派发命令");
+    }
+
+    /// start 时非浏览器渠道 → 400（持久会话仅浏览器渠道）
+    #[tokio::test]
+    async fn config_session_start_非浏览器渠道400() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .login_channel = LoginChannel::Http;
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("持久会话仅浏览器渠道"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty(), "渠道校验先于派发");
+    }
+
+    /// start 时 Worker 未安装 → 503（既有 From<BridgeError> 映射）
+    #[tokio::test]
+    async fn config_session_start_worker未安装503() {
+        let (app, _inner, _bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Transport(
+                BridgeError::WorkerNotInstalled,
+            )])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/start").await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// 自由浏览模式（?record=false）：派发 record=false 并记录未录制归属
+    #[tokio::test]
+    async fn config_session_start_free模式派发并记录归属() {
+        let (app, inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Ok(
+                serde_json::json!({"session_id": "sess-2", "recorded": false}),
+            )])));
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .persistent_session_enabled = true;
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/start?record=false").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["started"], true);
+
+        let sent = bridge.sent();
+        assert_eq!(sent.len(), 1, "应恰好派发一条命令");
+        assert_eq!(sent[0].0, "profile_session_start");
+        assert_eq!(sent[0].1["record"], false, "自由浏览模式不得注入录制器");
+        let owner = bridge.owner().expect("start 成功后应记录归属");
+        assert_eq!(owner.profile_id, "dorm");
+        assert!(!owner.record, "自由浏览模式归属应带 record=false");
+    }
+
+    /// 自由浏览模式门禁：方案未启用持久会话 → 400，且不派发命令
+    #[tokio::test]
+    async fn config_session_start_free模式未启用持久会话400() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/start?record=false").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("启用本方案的持久会话"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty(), "门禁先于派发");
+        assert!(bridge.owner().is_none(), "拒绝时不得留下归属记录");
+    }
+
+    /// 未录制会话（自由浏览模式）拒绝 apply=true（缺省）非 discard 结算：空数组
+    /// 照单落盘会覆盖方案既有录制；改用 discard 仅关闭或 apply=false 不写盘结算
+    /// 均放行并清空归属
+    #[tokio::test]
+    async fn config_session_stop_未录制会话拒绝落盘结算() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            // discard 结算的 Worker 回包（record=false 契约：空数组）
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [],
+                "truncated": false,
+            })),
+            // apply=false 结算的 Worker 回包（同样空数组，仅取回不写盘）
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [],
+                "truncated": false,
+            })),
+        ])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: false,
+        });
+        // 先录制前既有动作，验证不被空数组覆盖
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .recorded_actions = vec![crate::config::schema::RecordedAction {
+            action_type: "click".into(),
+            selector: "#real-btn".into(),
+            strategy: "id".into(),
+            ts: 42,
+            value: None,
+            frame: None,
+        }];
+
+        // 非 discard：400 且不派发、归属保留（可改用 discard 重新结算）
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("自由浏览模式打开（未录制）"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty(), "守卫先于派发");
+        assert!(bridge.owner().is_some(), "守卫不得清空归属");
+
+        // discard=true：仅关闭放行，既有录制原样保留
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?discard=true").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "discard 不写回，回方案当前值"
+        );
+        // 断言收进块作用域释放锁：clippy 的 await_holding_lock 只认作用域 drop，
+        // 不认显式 drop（本测试后续仍有 await 点）
+        {
+            let guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+            assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
+            assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        }
+        assert!(bridge.owner().is_none(), "discard 结算后归属应清空");
+
+        // apply=false：不写盘同样放行（守卫防的是空录制覆盖方案，本路径无覆盖面）
+        // ——discard 结算已清归属，重新登记模拟会话仍在跑
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: false,
+        });
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?apply=false").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(
+            v["data"]["recorded_actions"],
+            serde_json::json!([]),
+            "record=false 契约回包为空数组，原样回显"
+        );
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "apply=false 不写回，回方案当前值"
+        );
+        {
+            let guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+            assert_eq!(dorm.recorded_actions.len(), 1, "既有录制不得被覆盖");
+            assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        }
+        assert!(bridge.owner().is_none(), "apply=false 结算后归属应清空");
+    }
+
+    /// stop 非 discard：录制解析后事务写回方案（动作 + 开关），归属随结算清空
+    #[tokio::test]
+    async fn config_session_stop_落盘写回方案() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [
+                    recorded_click_json(1000),
+                    {"type": "change", "selector": "#isp", "strategy": "name", "ts": 2000, "value": "电信"}
+                ],
+                "truncated": true,
+            })),
+        ])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["recorded_count"], 2);
+        assert_eq!(v["data"]["truncated"], true);
+        assert_eq!(v["data"]["persistent_session_enabled"], true);
+
+        // 派发参数带会话 id
+        let sent = bridge.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "profile_session_stop");
+        assert_eq!(sent[0].1["session_id"], "sess-1");
+
+        // 方案写回断言
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.recorded_actions.len(), 2);
+        assert_eq!(dorm.recorded_actions[0].selector, "#login-btn");
+        assert_eq!(dorm.recorded_actions[1].value.as_deref(), Some("电信"));
+        assert!(dorm.persistent_session_enabled);
+        drop(guard);
+        // 归属已随结算清空
+        assert!(bridge.owner().is_none(), "stop 结算后归属应清空");
+    }
+
+    /// stop discard=true：只关浏览器，录制不落盘、方案不动；响应仍回真实计数、
+    /// 动作数组与方案当前开关值
+    #[tokio::test]
+    async fn config_session_stop_discard不落盘() {
+        let (app, inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::Ok(
+                serde_json::json!({
+                    "recorded_actions": [recorded_click_json(1000)],
+                    "truncated": false,
+                }),
+            )])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?discard=true").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["recorded_count"], 1, "discard 仍回显真实计数");
+        assert_eq!(v["data"]["truncated"], false);
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "未写回，回方案当前值"
+        );
+        assert_eq!(
+            v["data"]["recorded_actions"]
+                .as_array()
+                .expect("discard 也要回动作数组")
+                .len(),
+            1,
+            "动作数组与计数同源回显"
+        );
+        assert_eq!(
+            v["data"]["recorded_actions"][0]["selector"], "#login-btn",
+            "动作数组内容为 Worker 回包原样"
+        );
+
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert!(dorm.recorded_actions.is_empty(), "discard 不得写回录制");
+        assert!(!dorm.persistent_session_enabled, "discard 不得打开开关");
+        drop(guard);
+        assert!(bridge.owner().is_none());
+    }
+
+    /// stop apply=false 非 discard：仅结算会话不写方案——方案既有录制与持久
+    /// 开关均保持原样（任务录制流程专用：响应带动作数组，前端不必再 GET 方案）
+    #[tokio::test]
+    async fn config_session_stop_apply_false不写方案仅回动作数组() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [
+                    recorded_click_json(1000),
+                    {"type": "fill", "selector": "#user", "strategy": "id", "ts": 2000, "value": "{{USERNAME}}"}
+                ],
+                "truncated": false,
+            })),
+        ])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        // 预置方案既有录制与持久开关（false）：验证既不被覆盖也不被翻转
+        inner
+            .lock()
+            .unwrap()
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "dorm")
+            .unwrap()
+            .recorded_actions = vec![crate::config::schema::RecordedAction {
+            action_type: "click".into(),
+            selector: "#real-btn".into(),
+            strategy: "id".into(),
+            ts: 42,
+            value: None,
+            frame: None,
+        }];
+
+        let resp =
+            post_config_session(&app, "/api/profiles/dorm/config-session/stop?apply=false").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["data"]["recorded_count"], 2);
+        assert_eq!(v["data"]["truncated"], false);
+        assert_eq!(
+            v["data"]["persistent_session_enabled"], false,
+            "apply=false 不写回，回方案当前值（开关不被动翻转）"
+        );
+        let actions = v["data"]["recorded_actions"]
+            .as_array()
+            .expect("apply=false 响应必须携带动作数组");
+        assert_eq!(actions.len(), 2, "动作数组与计数同源");
+        assert_eq!(actions[0]["selector"], "#login-btn");
+        assert_eq!(actions[1]["value"], "{{USERNAME}}", "值原样透传");
+
+        // 方案断言：既有录制原样保留（尤其不被 Worker 新录制覆盖）、开关不动
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.recorded_actions.len(), 1, "apply=false 不得写回录制");
+        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        assert!(!dorm.persistent_session_enabled, "apply=false 不得打开开关");
+        drop(guard);
+        assert!(bridge.owner().is_none(), "结算后归属应清空");
+    }
+
+    /// P1-1b 等值归一矩阵（纯函数）：明文 / URL 编码命中替换、空凭据跳过、
+    /// 占位符原样、click/navigate 不参与比对
+    #[test]
+    fn normalize_recorded_credential_values_归一矩阵() {
+        use crate::config::schema::RecordedAction;
+
+        fn action(kind: &str, value: Option<&str>) -> RecordedAction {
+            RecordedAction {
+                action_type: kind.into(),
+                selector: "#x".into(),
+                strategy: "id".into(),
+                ts: 1,
+                value: value.map(str::to_string),
+                frame: None,
+            }
+        }
+        let username = "stu001";
+        let password = "p@ss w0rd";
+
+        // 明文命中：fill 与 change 均参与，各替换为对应占位符
+        let mut actions = vec![
+            action("fill", Some("stu001")),
+            action("change", Some("p@ss w0rd")),
+        ];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value.as_deref(), Some("{{USERNAME}}"));
+        assert_eq!(actions[1].value.as_deref(), Some("{{PASSWORD}}"));
+
+        // URL 编码形态命中（form_urlencoded 口径：@ → %40、空格 → +）
+        let mut actions = vec![action("fill", Some("p%40ss+w0rd"))];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value.as_deref(), Some("{{PASSWORD}}"));
+
+        // 空凭据跳过：无凭据可比对，值原样保留
+        let mut actions = vec![action("fill", Some("stu001")), action("fill", None)];
+        normalize_recorded_credential_values(&mut actions, "", "");
+        assert_eq!(actions[0].value.as_deref(), Some("stu001"));
+        assert_eq!(actions[1].value, None);
+
+        // 占位符值原样：不与真实凭据恒等，透传
+        let mut actions = vec![
+            action("fill", Some("{{PASSWORD}}")),
+            action("fill", Some("{{USERNAME}}")),
+        ];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value.as_deref(), Some("{{PASSWORD}}"));
+        assert_eq!(actions[1].value.as_deref(), Some("{{USERNAME}}"));
+
+        // click/navigate 不参与比对：navigate 值与凭据恒等也原样保留
+        let mut actions = vec![action("click", None), action("navigate", Some(password))];
+        normalize_recorded_credential_values(&mut actions, username, password);
+        assert_eq!(actions[0].value, None);
+        assert_eq!(actions[1].value.as_deref(), Some("p@ss w0rd"));
+
+        // 用户名命中优先于密码判定（同值凭据不产生歧义替换）
+        let mut actions = vec![action("fill", Some("stu001"))];
+        normalize_recorded_credential_values(&mut actions, "stu001", "stu001");
+        assert_eq!(actions[0].value.as_deref(), Some("{{USERNAME}}"));
+    }
+
+    /// P1-1b 等值归一（结算路径）：Worker 启发式漏判录下的明文凭据在 stop
+    /// 结算处归一为占位符——响应回显与方案落盘同一次覆盖，两处均无明文
+    #[tokio::test]
+    async fn config_session_stop_明文凭据归一为占位符() {
+        let (app, inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![
+            MockReply::Ok(serde_json::json!({
+                "recorded_actions": [
+                    {"type": "fill", "selector": "#user", "strategy": "id", "ts": 1000, "value": "stu001"},
+                    {"type": "fill", "selector": "#pwd", "strategy": "id", "ts": 2000, "value": "p@ss w0rd"},
+                    {"type": "change", "selector": "#isp", "strategy": "name", "ts": 3000, "value": "p%40ss+w0rd"},
+                ],
+                "truncated": false,
+            })),
+        ])));
+        // 方案快照凭据：用户名原文命中，密码原文 / URL 编码形态各命中一条
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.username = "stu001".into();
+            dorm.password = "p@ss w0rd".into();
+        }
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        let actions = v["data"]["recorded_actions"].as_array().unwrap();
+        assert_eq!(actions[0]["value"], "{{USERNAME}}", "回显：用户名原文命中");
+        assert_eq!(actions[1]["value"], "{{PASSWORD}}", "回显：密码原文命中");
+        assert_eq!(
+            actions[2]["value"], "{{PASSWORD}}",
+            "回显：密码 URL 编码形态命中"
+        );
+
+        // 落盘同一份归一结果：方案存储不留明文
+        {
+            let guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+            assert_eq!(dorm.recorded_actions.len(), 3);
+            assert_eq!(
+                dorm.recorded_actions[0].value.as_deref(),
+                Some("{{USERNAME}}")
+            );
+            assert_eq!(
+                dorm.recorded_actions[1].value.as_deref(),
+                Some("{{PASSWORD}}")
+            );
+            assert_eq!(
+                dorm.recorded_actions[2].value.as_deref(),
+                Some("{{PASSWORD}}")
+            );
+        }
+        assert!(bridge.owner().is_none(), "结算后归属应清空");
+    }
+
+    /// 契约镜像漂移守卫（P3-19）：`RecordedActionData` 是
+    /// `config::schema::RecordedAction` 的线格式镜像声明，两侧 serde 序列化形状
+    /// 必须逐键逐值一致（含 `frame` 的携带/缺省两形态与 `value` 的省略语义）——
+    /// 源类型演化而镜像未跟随时本测试失败（口径与 system.rs 的
+    /// `contract_mirror_dtos_match_source_wire_shapes` 先例一致）
+    #[test]
+    fn recorded_action_data_matches_source_wire_shape() {
+        use crate::config::schema::RecordedAction;
+
+        fn pair(
+            kind: &str,
+            value: Option<&str>,
+            frame: Option<&str>,
+        ) -> (RecordedAction, RecordedActionData) {
+            let value = value.map(str::to_string);
+            let frame = frame.map(str::to_string);
+            (
+                RecordedAction {
+                    action_type: kind.into(),
+                    selector: "#x".into(),
+                    strategy: "id".into(),
+                    ts: 42,
+                    value: value.clone(),
+                    frame: frame.clone(),
+                },
+                RecordedActionData {
+                    action_type: kind.into(),
+                    selector: "#x".into(),
+                    strategy: "id".into(),
+                    ts: 42,
+                    value,
+                    frame,
+                },
+            )
+        }
+
+        // 形态矩阵：click 无值；navigate 恒携带 value（落地页 URL）；
+        // fill 占位符值；frame 携带 / 缺省各覆盖一档
+        for (kind, value, frame) in [
+            ("click", None, None),
+            ("navigate", Some("http://portal/success"), None),
+            ("fill", Some("{{USERNAME}}"), None),
+            ("fill", Some("{{PASSWORD}}"), Some("#host >> iframe#portal")),
+        ] {
+            let (source, mirror) = pair(kind, value, frame);
+            assert_eq!(
+                serde_json::to_value(&source).expect("源类型序列化"),
+                serde_json::to_value(&mirror).expect("镜像序列化"),
+                "{kind} 形态线格式漂移"
+            );
+        }
+
+        // 缺省语义钉死：顶层 click 线格式不带 value / frame 键（不是 null）
+        let (source, _mirror) = pair("click", None, None);
+        let wire = serde_json::to_value(&source).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "click", "selector": "#x", "strategy": "id", "ts": 42}),
+            "{wire}"
+        );
+    }
+
+    /// stop 无活跃会话（本地无归属）→ 409 且不派发
+    #[tokio::test]
+    async fn config_session_stop_无活跃会话409() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["message"], "无活跃配置会话");
+        assert!(bridge.sent().is_empty(), "归属缺失时不得派发 stop");
+    }
+
+    /// stop 归属指向别的方案 → 409（跨方案写盘在归属校验处拦下），归属保留
+    #[tokio::test]
+    async fn config_session_stop_跨方案归属409() {
+        let (app, _inner, bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp = post_config_session(&app, "/api/profiles/default/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert!(
+            v["error"]["message"].as_str().unwrap().contains("属于方案"),
+            "{v}"
+        );
+        assert!(bridge.sent().is_empty());
+        assert!(
+            bridge.owner().is_some(),
+            "归属校验失败时不得清空记录（会话仍在别的方案名下）"
+        );
+    }
+
+    /// stop 陈旧归属（Worker 重启后已无会话）→ 409 自愈并清空归属
+    #[tokio::test]
+    async fn config_session_stop_陈旧归属自愈409() {
+        let (app, _inner, bridge) =
+            mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![MockReply::WorkerError(
+                "当前没有活跃配置会话，请先启动".into(),
+            )])));
+        bridge.set_config_session_owner(ConfigSessionOwner {
+            session_id: "sess-1".into(),
+            profile_id: "dorm".into(),
+            record: true,
+        });
+        let resp = post_config_session(&app, "/api/profiles/dorm/config-session/stop").await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["message"], "无活跃配置会话");
+        assert!(bridge.owner().is_none(), "结构化失败后归属应自愈清空");
+    }
+
+    /// A47 对齐守护：PUT 带未知 `recorded_actions` 字段不得覆盖方案录制
+    /// （serde 静默忽略未知字段），显式 `persistent_session_enabled` 正常生效
+    #[tokio::test]
+    async fn put_未知recorded_actions字段不覆盖录制() {
+        let (app, inner, _bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        {
+            let mut guard = inner.lock().unwrap();
+            let dorm = guard.profiles.iter_mut().find(|p| p.id == "dorm").unwrap();
+            dorm.recorded_actions = vec![crate::config::schema::RecordedAction {
+                action_type: "click".into(),
+                selector: "#real-btn".into(),
+                strategy: "id".into(),
+                ts: 42,
+                value: None,
+                frame: None,
+            }];
+            dorm.persistent_session_enabled = true;
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/profiles/dorm")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "改名",
+                            "recorded_actions": [{"type": "click", "selector": "#bogus"}],
+                            "persistent_session_enabled": false
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let guard = inner.lock().unwrap();
+        let dorm = guard.profiles.iter().find(|p| p.id == "dorm").unwrap();
+        assert_eq!(dorm.name, "改名");
+        assert_eq!(dorm.recorded_actions.len(), 1, "录制必须原样保留");
+        assert_eq!(dorm.recorded_actions[0].selector, "#real-btn");
+        assert!(
+            !dorm.persistent_session_enabled,
+            "显式 persistent_session_enabled 字段应生效"
+        );
+    }
+
+    /// 创建通道接受 persistent_session_enabled（缺省 false 不受影响）
+    #[tokio::test]
+    async fn create_profile_接受持久会话开关() {
+        let (app, inner, _bridge) = mock_app_with_bridge(Arc::new(MockBridgeApi::new(vec![])));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/profiles/persist-on")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "持久方案",
+                            "username": "u",
+                            "password": "p",
+                            "persistent_session_enabled": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let guard = inner.lock().unwrap();
+        let created = guard
+            .profiles
+            .iter()
+            .find(|p| p.id == "persist-on")
+            .expect("应已创建");
+        assert!(created.persistent_session_enabled);
     }
 }

@@ -7,10 +7,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// JsonSchema：schemars 导出配置树的结构快照（阶段 5 T5-0，测试内快照最小面，
+// 见本文件 tests 的 config_json_schema_contains_core_sections）；仅追加契约
+// 描述能力，不参与 serde 序列化路径
+use schemars::JsonSchema;
+
 /// settings.json 顶层结构（v6 schema）
 ///
 /// 聚合全局配置 [`GlobalConfig`] 与活跃 Profile 引用。
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct SettingsData {
     /// 配置 schema 版本号，当前代码支持最高 [`crate::config::CURRENT_CONFIG_VERSION`]
@@ -38,7 +43,7 @@ impl Default for SettingsData {
 }
 
 /// 全局共享设置（所有 Profile 共享）
-#[derive(Deserialize, Serialize, Clone, Debug, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(default)]
 pub struct GlobalConfig {
     /// 浏览器启动参数
@@ -57,10 +62,12 @@ pub struct GlobalConfig {
     pub app: AppSettings,
     /// 自动更新配置
     pub updater: UpdaterSettings,
+    /// 推送通知配置（webhook / Bark / Server酱 / Telegram 通道）
+    pub notification: NotificationSettings,
 }
 
 /// 浏览器启动参数
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct BrowserSettings {
     /// 是否无头模式
@@ -145,7 +152,7 @@ impl Default for BrowserSettings {
 ///
 /// 注：原 `enabled` 死字段已删除——监测启停由引擎 Start/Stop 控制，各探测
 /// 类型另有 tcp_enabled/http_enabled/url_enabled 独立开关。
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct MonitorSettings {
     /// 探测间隔（秒，默认 300；Engine 消费时钳制到 20~1200）
@@ -254,7 +261,7 @@ impl Default for MonitorSettings {
 }
 
 /// 暂停时段配置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct PauseSettings {
     /// 是否启用暂停时段（默认启用：23:00–06:00 夜间不自动登录，宿舍定时
@@ -283,7 +290,7 @@ impl Default for PauseSettings {
 }
 
 /// 日志配置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct LoggingSettings {
     /// 日志级别（ERROR/WARN/INFO/DEBUG/TRACE，大小写不敏感；无效值回退 INFO）
@@ -305,7 +312,7 @@ impl Default for LoggingSettings {
 }
 
 /// 会话级重试策略
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct RetrySettings {
     /// 最大重试次数
@@ -324,7 +331,7 @@ impl Default for RetrySettings {
 }
 
 /// Python Worker 管理
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct WorkerSettings {
     /// Worker 空闲超时（秒），超时后关闭释放内存
@@ -343,7 +350,7 @@ impl Default for WorkerSettings {
 }
 
 /// 应用级设置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct AppSettings {
     /// 启动后是否自动打开浏览器控制台
@@ -365,6 +372,16 @@ pub struct AppSettings {
     /// 长期运行场景下浏览器/Worker 常驻内存会缓慢增长，按周期优雅自重启回收。
     /// 运行时修改无需重启即生效（重启计时任务每分钟读一次该值）。
     pub auto_restart_hours: u32,
+    /// 管理密码：非回环绑定（Docker / 局域网显式暴露）下经 `POST /api/auth/exchange`
+    /// 的 password 分支换取鉴权 token 的唯一凭据；回环绑定下该分支一律拒绝。
+    ///
+    /// 空串 = 未配置（此时非回环绑定会因 fail-closed 门禁拒绝启动，除非以
+    /// `--allow-unauthenticated-bind` 显式豁免）。CLI/env 覆盖值
+    /// （`--management-password` / `CAMPUS_AUTH_MANAGEMENT_PASSWORD`）优先于本字段；
+    /// exchange 每次请求实时读取本字段，UI 修改即时生效。
+    /// 注意：明文存储（与 proxy_url 同级安全档），经 GET/PATCH /api/config 透出，
+    /// 暴露面由 token 鉴权兜底；局域网 HTTP 明文传输下的凭据可见性风险见 docker/README.md。
+    pub management_password: String,
 }
 
 impl Default for AppSettings {
@@ -381,6 +398,9 @@ impl Default for AppSettings {
             // 默认启用 24h 周期自重启：长期运行内存缓慢增长的主要回收手段，
             // 新装即受保护；存量用户 settings.json 已显式存值，不受默认值影响
             auto_restart_hours: 24,
+            // 管理密码默认未配置：回环绑定（默认部署形态）无需它，非回环绑定
+            // 由启动期 fail-closed 门禁提示用户显式配置或豁免
+            management_password: String::new(),
         }
     }
 }
@@ -390,7 +410,7 @@ impl Default for AppSettings {
 /// - `Stable` 正式版：仅跟随稳定发布（GitHub releases/latest 语义）
 /// - `Prerelease` 测试版：仅跟随预发布（alpha/beta 等 prerelease）
 /// - `All` 全通道最新版：正式版与预发布一起比较，哪个高跟哪个
-#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateChannel {
     /// 正式版（默认）
@@ -403,7 +423,7 @@ pub enum UpdateChannel {
 }
 
 /// 自动更新配置
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct UpdaterSettings {
     /// 启动时是否检查更新（`auto_check_enabled` 开启时生效）
@@ -464,6 +484,477 @@ impl Default for UpdaterSettings {
     }
 }
 
+/// 推送通知支持的事件类型白名单（与 `events::AppEvent::kind()` 同值；前端
+/// 「事件类型开关组」的可选项也以此为准）
+pub const NOTIFICATION_EVENT_TYPES: &[&str] = &[
+    "login_succeeded",
+    "login_failed",
+    "network_down",
+    "network_up",
+    "task_finished",
+    "task_failed",
+    "update_available",
+    "environment_ready",
+    "profile_switched",
+];
+
+/// 推送通道数量上限（防误配刷屏与端点滥用；前端同口径）
+pub const NOTIFICATION_MAX_CHANNELS: usize = 10;
+
+/// 单通道超时下界（秒）
+pub const NOTIFICATION_TIMEOUT_MIN: u32 = 1;
+/// 单通道超时上界（秒）
+pub const NOTIFICATION_TIMEOUT_MAX: u32 = 60;
+
+/// 重试次数上界（重试次数不含首次）
+pub const NOTIFICATION_RETRY_MAX_ATTEMPTS_MAX: u32 = 10;
+/// 重试基准间隔上界（秒；基准间隔为首次重试前的等待）
+pub const NOTIFICATION_RETRY_BASE_INTERVAL_MAX: u32 = 60;
+
+/// webhook 自定义请求头数量上限
+pub const NOTIFICATION_MAX_HEADERS: usize = 16;
+
+/// 通道默认超时（秒）
+fn default_notification_timeout() -> u32 {
+    10
+}
+
+/// 推送通道类型
+///
+/// `Webhook` 为自定义 POST JSON 通道；`Bark` / `Serverchan` / `Telegram`
+/// 为预设通道（各自只需凭据字段，消息格式内建模板化，无需用户写模板）；
+/// `Os` 为本机桌面系统通知（无凭据、无远端端点）。
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationChannelKind {
+    /// 自定义 Webhook（POST JSON 模板）
+    #[default]
+    Webhook,
+    /// Bark（iOS 推送）
+    Bark,
+    /// Server酱（微信推送）
+    Serverchan,
+    /// Telegram Bot
+    Telegram,
+    /// 系统通知（本机桌面通知中心）
+    Os,
+}
+
+impl NotificationChannelKind {
+    /// 中文展示名（通道 `name` 留空时回退使用）
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Webhook => "Webhook",
+            Self::Bark => "Bark",
+            Self::Serverchan => "Server酱",
+            Self::Telegram => "Telegram",
+            Self::Os => "系统通知",
+        }
+    }
+}
+
+/// webhook 自定义请求头（`value` 可为密钥：明文存储，口径与 `proxy_url` 同级，
+/// 暴露面由 GET/PATCH /api/config 的 token 鉴权兜底）
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct NotificationHeader {
+    /// 头名称（如 `Authorization`）
+    pub name: String,
+    /// 头值（可为密钥）
+    pub value: String,
+}
+
+/// 单个推送通道（serde tagged，`type` 为判别字段，snake_case）
+///
+/// 各通道共有 `id` / `name` / `enabled` / `timeout_seconds`；预设通道只需
+/// 凭据字段，webhook 额外携带自定义头与 JSON 模板，系统通知无任何凭据字段。
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NotificationChannel {
+    /// 自定义 Webhook：向 `url` POST 渲染后的 JSON 模板
+    Webhook {
+        /// 通道唯一 id（同一 settings 内去重）
+        id: String,
+        /// 显示名（空时前端/日志回退类型名）
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// 目标 URL（仅 http/https）
+        url: String,
+        /// 自定义请求头（可含密钥头；未含 `content-type` 时补 `application/json`）
+        #[serde(default)]
+        headers: Vec<NotificationHeader>,
+        /// POST JSON 模板，占位符 `{{event_type}}/{{summary}}/{{profile}}/{{time}}/{{detail}}`；
+        /// 留空使用内建默认模板
+        #[serde(default)]
+        body_template: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+    /// Bark：POST `{server}/{device_key}`，内建 `{"title","body"}` JSON
+    Bark {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// 自建服务器地址（留空使用官方 `https://api.day.app`）
+        #[serde(default)]
+        server: String,
+        /// 设备 key
+        device_key: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+    /// Server酱：POST `https://sctapi.ftqq.com/{send_key}.send`（表单 title/desp）
+    Serverchan {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// SendKey（sct 开头）
+        send_key: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+    /// Telegram Bot：POST `https://api.telegram.org/bot{token}/sendMessage`
+    Telegram {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// Bot token
+        bot_token: String,
+        /// 目标 chat id（数字或 @channel）
+        chat_id: String,
+        /// 单次请求超时（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+    /// 系统通知：本机桌面通知中心（Windows toast / macOS 通知中心 / Linux freedesktop）
+    ///
+    /// 无凭据字段（走本机桌面会话，没有远端端点可配）；`timeout_seconds`
+    /// 对系统通知语义较弱（是阻塞发送调用的放弃上限，而非 HTTP 超时），
+    /// 保留共字段一致性便于统一校验与展示。
+    Os {
+        /// 通道唯一 id
+        id: String,
+        /// 显示名
+        name: String,
+        /// 是否启用
+        enabled: bool,
+        /// 阻塞发送调用的放弃上限（秒）
+        #[serde(default = "default_notification_timeout")]
+        timeout_seconds: u32,
+    },
+}
+
+impl NotificationChannel {
+    /// 通道类型判别
+    pub fn kind(&self) -> NotificationChannelKind {
+        match self {
+            Self::Webhook { .. } => NotificationChannelKind::Webhook,
+            Self::Bark { .. } => NotificationChannelKind::Bark,
+            Self::Serverchan { .. } => NotificationChannelKind::Serverchan,
+            Self::Telegram { .. } => NotificationChannelKind::Telegram,
+            Self::Os { .. } => NotificationChannelKind::Os,
+        }
+    }
+
+    /// 通道唯一 id
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Webhook { id, .. }
+            | Self::Bark { id, .. }
+            | Self::Serverchan { id, .. }
+            | Self::Telegram { id, .. }
+            | Self::Os { id, .. } => id,
+        }
+    }
+
+    /// 用户填写的显示名（可能为空）
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Webhook { name, .. }
+            | Self::Bark { name, .. }
+            | Self::Serverchan { name, .. }
+            | Self::Telegram { name, .. }
+            | Self::Os { name, .. } => name,
+        }
+    }
+
+    /// 展示名：`name` 非空用它，否则回退类型中文名
+    pub fn display_name(&self) -> &str {
+        let name = self.name().trim();
+        if name.is_empty() {
+            self.kind().display_label()
+        } else {
+            name
+        }
+    }
+
+    /// 是否启用
+    pub fn enabled(&self) -> bool {
+        match self {
+            Self::Webhook { enabled, .. }
+            | Self::Bark { enabled, .. }
+            | Self::Serverchan { enabled, .. }
+            | Self::Telegram { enabled, .. }
+            | Self::Os { enabled, .. } => *enabled,
+        }
+    }
+
+    /// 单次请求超时（秒）
+    pub fn timeout_seconds(&self) -> u32 {
+        match self {
+            Self::Webhook {
+                timeout_seconds, ..
+            }
+            | Self::Bark {
+                timeout_seconds, ..
+            }
+            | Self::Serverchan {
+                timeout_seconds, ..
+            }
+            | Self::Telegram {
+                timeout_seconds, ..
+            }
+            | Self::Os {
+                timeout_seconds, ..
+            } => *timeout_seconds,
+        }
+    }
+}
+
+/// 推送通知设置（`global.notification` 节；serde default 免迁移，不 bump config_version）
+///
+/// 保存侧校验见 [`Self::validate`]（PATCH /api/config 合并后调用）；
+/// 消费方为 `crate::notification`（订阅 EventBus 后按配置推送）。
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(default)]
+pub struct NotificationSettings {
+    /// 总开关（关闭后服务空转，不发送任何通知；测试发送端点不受此开关限制）
+    pub enabled: bool,
+    /// 推送通道列表（最多 [`NOTIFICATION_MAX_CHANNELS`] 个）
+    pub channels: Vec<NotificationChannel>,
+    /// 触发通知的事件类型集合（白名单校验；空集合 = 不推送任何事件）
+    pub events: Vec<String>,
+    /// 是否启用免打扰时段
+    pub quiet_enabled: bool,
+    /// 免打扰开始小时（0-23）
+    pub quiet_start_hour: u8,
+    /// 免打扰开始分钟（0-59）
+    pub quiet_start_minute: u8,
+    /// 免打扰结束小时（0-23；支持跨零点，如 22:00–08:00）
+    pub quiet_end_hour: u8,
+    /// 免打扰结束分钟（0-59）
+    pub quiet_end_minute: u8,
+    /// 发送失败的重试次数（不含首次；指数退避），0 = 只发一次
+    pub retry_max_attempts: u32,
+    /// 首次重试前等待的基准秒数，之后逐次翻倍（如 2 → 4 → 8）
+    pub retry_base_interval_seconds: u32,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            // 默认关闭：推送是可选能力，需用户显式添加通道并开启
+            enabled: false,
+            channels: Vec::new(),
+            // 默认只推最值得知道的两类：登录失败与网络断开（成功/恢复类噪音大）
+            events: vec!["login_failed".to_string(), "network_down".to_string()],
+            quiet_enabled: false,
+            quiet_start_hour: 22,
+            quiet_start_minute: 0,
+            quiet_end_hour: 8,
+            quiet_end_minute: 0,
+            retry_max_attempts: 3,
+            retry_base_interval_seconds: 2,
+        }
+    }
+}
+
+/// 校验 URL 仅 http/https 且带主机名（推送通道 URL 与 Bark 自建服务器共用）
+fn validate_notification_url(url: &str, label: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| format!("{label}格式非法: {url}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!("{label}仅支持 http/https，当前为: {other}"));
+        }
+    }
+    let host = parsed.host_str().unwrap_or("");
+    if host.is_empty() {
+        return Err(format!("{label}缺少主机名: {url}"));
+    }
+    Ok(())
+}
+
+impl NotificationSettings {
+    /// 事件类型是否在推送集合内
+    pub fn is_event_enabled(&self, kind: &str) -> bool {
+        self.events.iter().any(|e| e == kind)
+    }
+
+    /// 免打扰窗口（本地时间判定）；时/分越界（手改配置文件）时返回 `None`
+    /// 视为未启用窗口，避免解析失败误伤
+    pub fn quiet_window(&self) -> Option<(chrono::NaiveTime, chrono::NaiveTime)> {
+        if !self.quiet_enabled {
+            return None;
+        }
+        let start = chrono::NaiveTime::from_hms_opt(
+            u32::from(self.quiet_start_hour),
+            u32::from(self.quiet_start_minute),
+            0,
+        )?;
+        let end = chrono::NaiveTime::from_hms_opt(
+            u32::from(self.quiet_end_hour),
+            u32::from(self.quiet_end_minute),
+            0,
+        )?;
+        Some((start, end))
+    }
+
+    /// 保存侧全量校验（PATCH /api/config 合并后调用；全部中文错误信息）
+    ///
+    /// 校验项：通道数量 / id 唯一且非空 / URL 仅 http-https / 超时与重试上下界 /
+    /// 事件类型白名单 / 免打扰时段时-分范围 / webhook 自定义头数量与头名 /
+    /// webhook 模板用样例值渲染后必须是合法 JSON。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.channels.len() > NOTIFICATION_MAX_CHANNELS {
+            return Err(format!(
+                "推送通道最多 {} 个，当前 {} 个",
+                NOTIFICATION_MAX_CHANNELS,
+                self.channels.len()
+            ));
+        }
+        let mut seen_ids = std::collections::HashSet::new();
+        for channel in &self.channels {
+            let id = channel.id().trim();
+            if id.is_empty() {
+                return Err(format!(
+                    "推送通道 {} 的 id 不能为空",
+                    channel.display_name()
+                ));
+            }
+            if !seen_ids.insert(id.to_string()) {
+                return Err(format!("推送通道 id 重复: {id}"));
+            }
+            if !(NOTIFICATION_TIMEOUT_MIN..=NOTIFICATION_TIMEOUT_MAX)
+                .contains(&channel.timeout_seconds())
+            {
+                return Err(format!(
+                    "推送通道 {} 的超时必须在 {}-{} 秒之间",
+                    channel.display_name(),
+                    NOTIFICATION_TIMEOUT_MIN,
+                    NOTIFICATION_TIMEOUT_MAX
+                ));
+            }
+            match channel {
+                NotificationChannel::Webhook {
+                    url,
+                    headers,
+                    body_template,
+                    ..
+                } => {
+                    validate_notification_url(url, "推送通道 Webhook 地址")?;
+                    if headers.len() > NOTIFICATION_MAX_HEADERS {
+                        return Err(format!("自定义请求头最多 {} 个", NOTIFICATION_MAX_HEADERS));
+                    }
+                    for header in headers {
+                        if header.name.trim().is_empty() {
+                            return Err("自定义请求头名称不能为空".to_string());
+                        }
+                    }
+                    // 模板用样例值渲染后必须可解析为 JSON：占位符写在 JSON 字符串
+                    // 值内才合法（如 {"title":"{{summary}}"}）；裸占位符渲染即碎，
+                    // 保存时拦下远好于每次推送都静默失败
+                    if !body_template.trim().is_empty()
+                        && let Err(e) = serde_json::from_str::<serde_json::Value>(
+                            &crate::notification::template::render_webhook_body(
+                                body_template,
+                                &crate::notification::template::MessageContent::sample(),
+                            ),
+                        )
+                    {
+                        return Err(format!("Webhook 消息模板渲染后不是合法 JSON: {e}"));
+                    }
+                }
+                NotificationChannel::Bark {
+                    server, device_key, ..
+                } => {
+                    if device_key.trim().is_empty() {
+                        return Err("推送通道 Bark 的 device_key 不能为空".to_string());
+                    }
+                    // 自建服务器留空 = 官方地址，非空才校验
+                    let server = server.trim();
+                    if !server.is_empty() {
+                        validate_notification_url(server, "推送通道 Bark 服务器地址")?;
+                    }
+                }
+                NotificationChannel::Serverchan { send_key, .. } => {
+                    if send_key.trim().is_empty() {
+                        return Err("推送通道 Server酱 的 SendKey 不能为空".to_string());
+                    }
+                }
+                NotificationChannel::Telegram {
+                    bot_token, chat_id, ..
+                } => {
+                    if bot_token.trim().is_empty() {
+                        return Err("推送通道 Telegram 的 Bot Token 不能为空".to_string());
+                    }
+                    if chat_id.trim().is_empty() {
+                        return Err("推送通道 Telegram 的 Chat ID 不能为空".to_string());
+                    }
+                }
+                // 系统通知无凭据字段可错：id 唯一/非空与超时上下界已由上方公共校验覆盖
+                NotificationChannel::Os { .. } => {}
+            }
+        }
+        for event in &self.events {
+            if !NOTIFICATION_EVENT_TYPES.contains(&event.as_str()) {
+                return Err(format!(
+                    "通知事件类型 {event} 不在支持列表，可选值: {}",
+                    NOTIFICATION_EVENT_TYPES.join(", ")
+                ));
+            }
+        }
+        for (hour, minute, label) in [
+            (self.quiet_start_hour, self.quiet_start_minute, "免打扰开始"),
+            (self.quiet_end_hour, self.quiet_end_minute, "免打扰结束"),
+        ] {
+            if hour > 23 {
+                return Err(format!("{label}小时必须在 0-23 之间"));
+            }
+            if minute > 59 {
+                return Err(format!("{label}分钟必须在 0-59 之间"));
+            }
+        }
+        if self.retry_max_attempts > NOTIFICATION_RETRY_MAX_ATTEMPTS_MAX {
+            return Err(format!(
+                "重试次数最多 {} 次",
+                NOTIFICATION_RETRY_MAX_ATTEMPTS_MAX
+            ));
+        }
+        if self.retry_base_interval_seconds == 0
+            || self.retry_base_interval_seconds > NOTIFICATION_RETRY_BASE_INTERVAL_MAX
+        {
+            return Err(format!(
+                "重试基准间隔必须在 1-{} 秒之间",
+                NOTIFICATION_RETRY_BASE_INTERVAL_MAX
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// 登录执行渠道
 ///
 /// `Browser` 走 Python Worker 浏览器自动化（默认，兼容存量）；`Http` 为 Rust
@@ -471,7 +962,7 @@ impl Default for UpdaterSettings {
 /// 自定义脚本——把登录动作整个交给用户写的脚本任务，由 Rust 起本地子进程执行，
 /// 同样不启动 Worker/浏览器（凭据经环境变量注入，契约见
 /// `docs/guides/custom-script-guide.md` 的「用脚本登录」一节）。
-#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginChannel {
     /// 浏览器自动化（默认）
@@ -484,9 +975,9 @@ pub enum LoginChannel {
 }
 
 impl LoginChannel {
-    /// 当前构建是否允许使用该渠道；路由器版不提供浏览器自动化。
+    /// 当前构建是否允许使用该渠道；路由器版/安卓版不提供浏览器自动化。
     pub fn is_supported(self) -> bool {
-        !cfg!(feature = "openwrt") || self.is_in_process()
+        !cfg!(any(feature = "openwrt", feature = "android")) || self.is_in_process()
     }
 
     /// 是否由 Rust 控制登录且不需要 Python 环境、浏览器与 Worker。
@@ -511,11 +1002,47 @@ impl LoginChannel {
     }
 }
 
+/// 持久会话录制动作（`profile_session_stop` 返回的 `recorded_actions` 元素）
+///
+/// 字段与 Python Worker 的录制契约逐字对齐（`python_worker/config_session.py`
+/// 的汇聚逻辑 + README「录制契约」一节）：`type`/`selector`/`strategy`/`ts` 恒存在，
+/// `value` 由 `change`/`fill`/`navigate` 动作携带（点击不录值，缺键反序列化为
+/// `None`；`fill` 的值为录制时的输入内容——凭据经 `{{USERNAME}}`/`{{PASSWORD}}`
+/// 占位符录制，密码永不落明文，回放时由 `profile_auto_login` 下发的凭据解析），
+/// `frame` 仅在非顶层 frame（iframe）内捕获时携带（顶层捕获缺键）。
+///
+/// `type` 与 `strategy` 刻意保持 `String` 而非枚举：两者都是 Worker 侧演进的
+/// 受控词表（当前 `type` 为 `click`/`change`/`fill`/`navigate`，`strategy` 为
+/// `id`/`name`/`data-testid`/`data`/`text`/`structure`），枚举会在未来 Worker
+/// 新增词表值时让旧主程序读不动方案文件；存储与回放按字面值处理即可。
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct RecordedAction {
+    /// 动作类型：`click`（按钮/提交类点击）、`change`（`<select>` 选择）、
+    /// `fill`（输入框填写，值可为凭据占位符）或 `navigate`（页面导航）
+    #[serde(rename = "type")]
+    pub action_type: String,
+    /// 目标元素选择器（Worker 按启发式优先级取首个命中）
+    pub selector: String,
+    /// 选择器采用的启发式级别（同上，与 [`RecordedAction::selector`] 配对）
+    pub strategy: String,
+    /// 事件时间戳（毫秒；Worker 侧按此升序返回并做 500ms 去重）
+    pub ts: i64,
+    /// `change`/`fill`/`navigate` 动作的值（`fill` 可为 `{{USERNAME}}`/`{{PASSWORD}}`
+    /// 占位符、`navigate` 为落地页 URL）；仅 `click` 无此键（序列化时跳过，与
+    /// Worker 返回形状一致）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// 非顶层 frame 内捕获的动作：主文档到目标 iframe 的 CSS 选择器链，
+    /// ' >> ' 分隔；顶层捕获缺此键
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
+}
+
 /// 单个 Profile 文件内容（`config/profiles/{id}.json`）
 ///
 /// 凭证类字段（如 [`ProfileData::password`]）在磁盘上以 `ENC:` 前缀的密文存储，
 /// 内存 `RuntimeConfig` 中解密为明文。
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(default)]
 pub struct ProfileData {
     /// 统一校园网出口；缺省时在运行时兼容旧代理设置。
@@ -549,6 +1076,18 @@ pub struct ProfileData {
     /// 与 `active_http_task` 同一口径：脚本渠道**没有**内置兜底任务（登录逻辑只能
     /// 由用户写），故空值不是"用默认"，而是"脚本登录不可用"，保存与登录两侧都会拦。
     pub active_script_task: String,
+    /// 是否启用持久浏览器会话（门户「记住密码」模式）
+    ///
+    /// 启用后浏览器渠道的登录走「无头持久上下文打开门户页 + 回放
+    /// [`ProfileData::recorded_actions`] + 网络验证兜底」；会话数据持久在
+    /// `<base>/browser_profiles/<id>/`（见 `utils::paths::browser_profile_dir`）。
+    /// 字段在结构体末尾追加：serde 按声明序序列化，追加不打乱既有键序。
+    pub persistent_session_enabled: bool,
+    /// 持久会话录制动作（配置会话 `profile_session_stop` 取回，按 `ts` 升序）
+    ///
+    /// 由「配置会话」编排写入（Worker 返回什么存什么，上不封顶条数由 Worker 侧
+    /// 截断并给 `truncated` 标记），不是用户在界面上手编的字段。
+    pub recorded_actions: Vec<RecordedAction>,
 }
 
 impl Default for ProfileData {
@@ -568,12 +1107,16 @@ impl Default for ProfileData {
             login_channel: LoginChannel::default(),
             active_http_task: String::new(),
             active_script_task: String::new(),
+            persistent_session_enabled: false,
+            recorded_actions: Vec::new(),
         }
     }
 }
 
 /// 启动动作枚举
-#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq, JsonSchema, clap::ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 #[clap(rename_all = "snake_case")]
 pub enum StartupAction {
@@ -593,6 +1136,7 @@ pub enum StartupAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
 
     #[test]
     fn monitor_defaults_to_http_204_only() {
@@ -655,13 +1199,130 @@ mod tests {
         assert_eq!(LoginChannel::default(), LoginChannel::Browser);
     }
 
+    /// 持久会话字段免迁移：旧方案 JSON 无新字段 → 反序列化得默认值，无需 bump
+    /// config_version；再序列化时新字段追加在末尾（serde 按声明序产出），不打乱
+    /// 既有键在磁盘文件里的先后。
+    #[test]
+    fn persistent_session_fields_default_and_key_order() {
+        let legacy = serde_json::json!({
+            "network": null,
+            "id": "dorm",
+            "name": "宿舍",
+            "username": "2023xxxx",
+            "password": "",
+            "auth_url": "",
+            "trigger_url": "",
+            "isp": "telecom",
+            "gateway_ip": "",
+            "wifi_ssid": "",
+            "active_task": "",
+            "login_channel": "browser",
+            "active_http_task": "",
+            "active_script_task": "",
+        });
+        let profile: ProfileData = serde_json::from_value(legacy).unwrap();
+        assert!(!profile.persistent_session_enabled, "缺省关闭");
+        assert!(profile.recorded_actions.is_empty(), "缺省空表");
+
+        // 新字段声明在结构体末尾：磁盘序列化时既有键序保持不变（json! 的 Map 是
+        // BTreeMap 测不出顺序，这里直接对 struct 序列化文本断言相对位置）
+        let text = serde_json::to_string_pretty(&profile).unwrap();
+        let script_task_pos = text
+            .find("\"active_script_task\"")
+            .expect("既有字段不得丢失");
+        let enabled_pos = text
+            .find("\"persistent_session_enabled\"")
+            .expect("新开关应落盘");
+        let actions_pos = text.find("\"recorded_actions\"").expect("新动作表应落盘");
+        assert!(
+            script_task_pos < enabled_pos && enabled_pos < actions_pos,
+            "新字段必须追加在既有字段之后，避免方案文件键序漂移"
+        );
+    }
+
+    /// RecordedAction 与 Worker 录制契约（python_worker/config_session.py）逐字对齐：
+    /// `type`/`selector`/`strategy`/`ts` 恒存在，`value` 由 change/fill 携带（click
+    /// 缺键 → None，回写时同样不带 value 键，与 Worker 返回形状一致；fill 的值
+    /// 可为凭据占位符，按字面值透传）；`frame` 仅 iframe 内捕获时携带（可选键，
+    /// 缺键 → None，回写时同样不带该键）。
+    #[test]
+    fn recorded_action_matches_worker_contract() {
+        let worker_shape = serde_json::json!([
+            {
+                "type": "click",
+                "selector": "#login-btn",
+                "strategy": "id",
+                "ts": 1731475200123i64,
+            },
+            {
+                "type": "change",
+                "selector": "[name=\"isp\"]",
+                "strategy": "name",
+                "ts": 1731475200456i64,
+                "value": "telecom",
+            },
+            {
+                "type": "fill",
+                "selector": "#password",
+                "strategy": "id",
+                "ts": 1731475200789i64,
+                "value": "{{PASSWORD}}",
+            },
+            {
+                "type": "fill",
+                "selector": "#user",
+                "strategy": "id",
+                "ts": 1731475200901i64,
+                "value": "{{USERNAME}}",
+                "frame": "#host >> iframe#portal",
+            },
+        ]);
+        let actions: Vec<RecordedAction> = serde_json::from_value(worker_shape).unwrap();
+        assert_eq!(actions.len(), 4);
+        assert_eq!(actions[0].action_type, "click");
+        assert_eq!(actions[0].selector, "#login-btn");
+        assert_eq!(actions[0].strategy, "id");
+        assert_eq!(actions[0].ts, 1731475200123);
+        assert_eq!(actions[0].value, None, "click 无 value 键");
+        assert_eq!(actions[0].frame, None, "顶层捕获缺 frame 键 → None");
+        assert_eq!(actions[1].action_type, "change");
+        assert_eq!(actions[1].value.as_deref(), Some("telecom"));
+        assert_eq!(
+            actions[1].frame, None,
+            "缺 frame 键 → None（serde default）"
+        );
+        // fill 携带值且占位符原样透传（凭据解析在回放侧，存储永不落明文）
+        assert_eq!(actions[2].action_type, "fill");
+        assert_eq!(actions[2].value.as_deref(), Some("{{PASSWORD}}"));
+        // iframe 内捕获：frame 选择器链原样透传（' >> ' 分隔由 Worker 侧保证）
+        assert_eq!(actions[3].action_type, "fill");
+        assert_eq!(actions[3].value.as_deref(), Some("{{USERNAME}}"));
+        assert_eq!(actions[3].frame.as_deref(), Some("#host >> iframe#portal"));
+
+        // 回写形状：click 不得出现 "value": null（Worker 契约里 click 不带该键）；
+        // frame 为 None 的动作同样不得出现 "frame" 键
+        let click_json = serde_json::to_value(&actions[0]).unwrap();
+        assert!(click_json.get("value").is_none(), "{click_json}");
+        assert!(click_json.get("frame").is_none(), "{click_json}");
+        assert_eq!(click_json["type"], "click");
+        // change 回写保留 value
+        let change_json = serde_json::to_value(&actions[1]).unwrap();
+        assert_eq!(change_json["value"], "telecom");
+        // fill 回写同样保留 value（占位符字面值）
+        let fill_json = serde_json::to_value(&actions[2]).unwrap();
+        assert_eq!(fill_json["value"], "{{PASSWORD}}");
+        // frame 携带时回写保留（回放侧据此映射 StepConfig.frame）
+        let framed_json = serde_json::to_value(&actions[3]).unwrap();
+        assert_eq!(framed_json["frame"], "#host >> iframe#portal");
+    }
+
     #[test]
     fn openwrt_channel_support_preserves_in_process_login() {
         assert!(LoginChannel::Http.is_supported());
         assert!(LoginChannel::Script.is_supported());
         assert_eq!(
             LoginChannel::Browser.is_supported(),
-            !cfg!(feature = "openwrt")
+            !cfg!(any(feature = "openwrt", feature = "android"))
         );
     }
 
@@ -738,5 +1399,347 @@ mod tests {
         let legacy_json = r#"{"check_on_startup":true,"release_source_url":"https://x","check_interval_hours":24,"use_proxy":true,"proxy_port":7891}"#;
         let parsed: UpdaterSettings = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(parsed.resolved_proxy_url(), "http://127.0.0.1:7891");
+    }
+
+    // ============ 推送通知（notification 节） ============
+
+    /// 构造合法的 webhook 通道（测试正反例的基线）
+    fn webhook_channel() -> NotificationChannel {
+        NotificationChannel::Webhook {
+            id: "ch-1".into(),
+            name: "自建机器人".into(),
+            enabled: true,
+            url: "https://example.com/hook".into(),
+            headers: vec![NotificationHeader {
+                name: "Authorization".into(),
+                value: "Bearer secret".into(),
+            }],
+            body_template: String::new(),
+            timeout_seconds: 10,
+        }
+    }
+
+    /// 指定 URL 与消息模板的 webhook 通道（正反例局部变形用）
+    fn webhook_with(url: &str, body_template: &str) -> NotificationChannel {
+        NotificationChannel::Webhook {
+            id: "ch-1".into(),
+            name: String::new(),
+            enabled: true,
+            url: url.into(),
+            headers: Vec::new(),
+            body_template: body_template.into(),
+            timeout_seconds: 10,
+        }
+    }
+
+    /// serde tagged 通道：type 判别字段字面量与默认超时
+    #[test]
+    fn notification_channel_serde_tagged() {
+        let value = serde_json::to_value(webhook_channel()).unwrap();
+        assert_eq!(value["type"], "webhook");
+        assert_eq!(value["id"], "ch-1");
+        assert_eq!(value["timeout_seconds"], 10);
+        let back: NotificationChannel = serde_json::from_value(value).unwrap();
+        assert_eq!(back, webhook_channel());
+        // 未知 type 显式报错（不静默落入其他变体）
+        assert!(
+            serde_json::from_value::<NotificationChannel>(serde_json::json!({
+                "type": "pigeon", "id": "x"
+            }))
+            .is_err()
+        );
+        // 缺 type 判别字段同样报错
+        assert!(
+            serde_json::from_value::<NotificationChannel>(serde_json::json!({ "id": "x" }))
+                .is_err()
+        );
+    }
+
+    /// 缺字段兼容：timeout_seconds / headers / body_template / server 均可省略
+    #[test]
+    fn notification_channel_tolerates_missing_fields() {
+        let channel: NotificationChannel = serde_json::from_value(serde_json::json!({
+            "type": "bark", "id": "b1", "name": "", "enabled": true, "device_key": "key"
+        }))
+        .unwrap();
+        assert_eq!(channel.timeout_seconds(), 10, "缺省超时回退 10 秒");
+        assert_eq!(channel.display_name(), "Bark", "空 name 回退类型名");
+    }
+
+    /// os 通道：serde tagged 往返 + 无凭据字段（缺 timeout_seconds 用默认）+ 校验通过
+    #[test]
+    fn notification_channel_os_serde_and_validate() {
+        let channel = NotificationChannel::Os {
+            id: "os-1".into(),
+            name: "桌面提醒".into(),
+            enabled: true,
+            timeout_seconds: 5,
+        };
+        let value = serde_json::to_value(&channel).unwrap();
+        assert_eq!(value["type"], "os");
+        assert_eq!(value["id"], "os-1");
+        assert_eq!(value["timeout_seconds"], 5);
+        let back: NotificationChannel = serde_json::from_value(value).unwrap();
+        assert_eq!(back, channel, "os 通道 serde 往返保形");
+
+        // 缺 timeout_seconds：走共字段默认值；空 name 回退类型中文名
+        let minimal: NotificationChannel = serde_json::from_value(serde_json::json!({
+            "type": "os", "id": "os-1", "name": "", "enabled": true
+        }))
+        .unwrap();
+        assert_eq!(minimal.timeout_seconds(), 10, "缺省超时回退 10 秒");
+        assert_eq!(minimal.display_name(), "系统通知", "空 name 回退类型名");
+
+        // 无字段可错：默认校验基线直接通过
+        let s = NotificationSettings {
+            channels: vec![channel],
+            ..NotificationSettings::default()
+        };
+        assert!(
+            s.validate().is_ok(),
+            "os 通道应通过校验: {:?}",
+            s.validate()
+        );
+    }
+
+    /// 默认值：总开关关、事件集默认 login_failed + network_down、免打扰 22:00-08:00
+    #[test]
+    fn notification_defaults() {
+        let s = NotificationSettings::default();
+        assert!(!s.enabled, "推送默认关闭");
+        assert!(s.channels.is_empty());
+        assert_eq!(s.events, vec!["login_failed", "network_down"]);
+        assert!(!s.quiet_enabled);
+        assert_eq!((s.quiet_start_hour, s.quiet_start_minute), (22, 0));
+        assert_eq!((s.quiet_end_hour, s.quiet_end_minute), (8, 0));
+        assert_eq!(s.retry_max_attempts, 3);
+        assert_eq!(s.retry_base_interval_seconds, 2);
+        // 旧 settings.json 无 notification 节 → serde default 免迁移
+        let legacy: crate::config::SettingsData =
+            serde_json::from_str(r#"{"config_version":10,"active_profile_id":"default","auto_switch":false,"global":{"browser":{},"monitor":{},"pause":{},"logging":{},"retry_settings":{},"worker":{},"app":{},"updater":{}}}"#)
+                .unwrap();
+        assert_eq!(legacy.global.notification, NotificationSettings::default());
+    }
+
+    /// 校验正反例：合法配置通过；URL scheme / 超时越界 / 事件白名单 / 重复 id /
+    /// 免打扰范围 / 重试界限 / 凭据缺失逐一拦截
+    #[test]
+    fn notification_validate_positive_and_negative() {
+        let mut s = NotificationSettings {
+            channels: vec![webhook_channel()],
+            ..NotificationSettings::default()
+        };
+        assert!(s.validate().is_ok(), "基线配置应通过: {:?}", s.validate());
+
+        // 事件类型白名单
+        s.events = vec!["hack_the_planet".into()];
+        assert!(s.validate().is_err());
+        s.events = vec!["login_failed".into(), "network_down".into()];
+
+        // 非法 scheme
+        s.channels = vec![NotificationChannel::Webhook {
+            id: "ch-1".into(),
+            name: String::new(),
+            enabled: true,
+            url: "ftp://example.com/hook".into(),
+            headers: Vec::new(),
+            body_template: String::new(),
+            timeout_seconds: 10,
+        }];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("http/https"), "{err}");
+        // 缺主机名（WHATWG 解析器会吞掉多余斜杠把 ///path 当主机，用空 authority 触发）
+        s.channels = vec![webhook_with("http://", "")];
+        assert!(s.validate().is_err());
+        s.channels = vec![webhook_channel()];
+
+        // 超时越界
+        let bark = |timeout_seconds: u32| NotificationChannel::Bark {
+            id: "b1".into(),
+            name: String::new(),
+            enabled: true,
+            server: String::new(),
+            device_key: "k".into(),
+            timeout_seconds,
+        };
+        s.channels = vec![bark(0)];
+        assert!(s.validate().is_err());
+        s.channels = vec![bark(61)];
+        assert!(s.validate().is_err());
+
+        // 重复 id
+        s.channels = vec![webhook_channel(), webhook_channel()];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("id 重复"), "{err}");
+        // 空 id
+        s.channels = vec![NotificationChannel::Serverchan {
+            id: "  ".into(),
+            name: String::new(),
+            enabled: true,
+            send_key: "sct".into(),
+            timeout_seconds: 10,
+        }];
+        assert!(s.validate().is_err());
+        // 预设通道凭据缺失
+        s.channels = vec![NotificationChannel::Telegram {
+            id: "t1".into(),
+            name: String::new(),
+            enabled: true,
+            bot_token: "tk".into(),
+            chat_id: "  ".into(),
+            timeout_seconds: 10,
+        }];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("Chat ID"), "{err}");
+
+        // 免打扰范围
+        s.channels = Vec::new();
+        s.quiet_start_hour = 24;
+        assert!(s.validate().is_err());
+        s.quiet_start_hour = 22;
+        s.quiet_end_minute = 60;
+        assert!(s.validate().is_err());
+        s.quiet_end_minute = 0;
+
+        // 重试界限
+        s.retry_max_attempts = 11;
+        assert!(s.validate().is_err());
+        s.retry_max_attempts = 3;
+        s.retry_base_interval_seconds = 0;
+        assert!(s.validate().is_err());
+        s.retry_base_interval_seconds = 2;
+        assert!(s.validate().is_ok());
+    }
+
+    /// 非法 webhook 模板（渲染后不是合法 JSON）在保存时拦下
+    #[test]
+    fn notification_validate_rejects_broken_webhook_template() {
+        // 裸占位符：渲染后 JSON 碎掉
+        let mut s = NotificationSettings {
+            channels: vec![NotificationChannel::Webhook {
+                id: "ch-1".into(),
+                name: String::new(),
+                enabled: true,
+                url: "https://example.com/hook".into(),
+                headers: Vec::new(),
+                body_template: r#"{"title": {{summary}}}"#.into(),
+                timeout_seconds: 10,
+            }],
+            ..NotificationSettings::default()
+        };
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("合法 JSON"), "{err}");
+        // 合法模板（占位符位于字符串值内）通过
+        s.channels = vec![webhook_with(
+            "https://example.com/hook",
+            r#"{"title": "{{summary}}", "text": "{{detail}}"}"#,
+        )];
+        assert!(s.validate().is_ok());
+    }
+
+    /// 免打扰窗口解析：越界时/分返回 None（手改配置文件的防御口径）
+    #[test]
+    fn notification_quiet_window_bounds() {
+        let mut s = NotificationSettings::default();
+        assert!(s.quiet_window().is_none(), "未启用时无窗口");
+        s.quiet_enabled = true;
+        let (start, end) = s.quiet_window().unwrap();
+        assert_eq!(
+            (start.hour(), start.minute(), end.hour(), end.minute()),
+            (22, 0, 8, 0)
+        );
+        s.quiet_start_hour = 25;
+        assert!(s.quiet_window().is_none(), "越界时/分不得构造窗口");
+    }
+
+    // ============ schemars 配置树 JSON Schema 快照（T5-0） ============
+
+    /// 配置树 JSON Schema 快照必须含核心段
+    ///
+    /// 导出面取「测试内快照」而非新增 API 端点（最小面：契约管线尚不需要
+    /// 运行时 schema 服务，后续有消费方再升为 GET /api/config/schema）。
+    /// schemars 1.x 的形态：`schema_for!` 根类型内联在顶层（properties 直挂根），
+    /// 被引用的嵌套命名类型进 `$defs` 并以 `$ref` 关联——据此 SettingsData /
+    /// ProfileData 的字段断言落在根 properties，GlobalConfig 落在
+    /// `$defs/GlobalConfig/properties`；叶子 NetworkSettings 的 JsonSchema
+    /// derive 由 src/network/settings.rs 提供。
+    #[test]
+    fn config_json_schema_contains_core_sections() {
+        let settings = serde_json::to_value(schemars::schema_for!(SettingsData))
+            .expect("SettingsData schema 应可序列化");
+        let profile = serde_json::to_value(schemars::schema_for!(ProfileData))
+            .expect("ProfileData schema 应可序列化");
+
+        // settings.json 树：根内联 + 嵌套类型入 $defs
+        let defs = settings
+            .get("$defs")
+            .and_then(|d| d.as_object())
+            .expect("schemars 根 schema 应含 $defs");
+        for section in [
+            "GlobalConfig",
+            "BrowserSettings",
+            "MonitorSettings",
+            "PauseSettings",
+            "LoggingSettings",
+            "RetrySettings",
+            "WorkerSettings",
+            "AppSettings",
+            "UpdaterSettings",
+            "NotificationSettings",
+            "NotificationChannel",
+            "UpdateChannel",
+            "StartupAction",
+        ] {
+            assert!(
+                defs.contains_key(section),
+                "配置树 schema 缺少 {section} 定义"
+            );
+        }
+        for key in [
+            "config_version",
+            "active_profile_id",
+            "auto_switch",
+            "global",
+        ] {
+            assert!(
+                settings["properties"].get(key).is_some(),
+                "SettingsData 顶层缺少 {key} 字段"
+            );
+        }
+        let global_props = &defs["GlobalConfig"]["properties"];
+        for key in [
+            "browser",
+            "monitor",
+            "logging",
+            "app",
+            "updater",
+            "notification",
+        ] {
+            assert!(
+                global_props.get(key).is_some(),
+                "GlobalConfig 缺少 {key} 段"
+            );
+        }
+
+        // config/profiles/{id}.json 树：凭据、渠道绑定与持久会话字段齐备
+        let profile_props = &profile["properties"];
+        for key in [
+            "id",
+            "username",
+            "password",
+            "auth_url",
+            "isp",
+            "login_channel",
+            "active_http_task",
+            "active_script_task",
+            "persistent_session_enabled",
+            "recorded_actions",
+            "network",
+        ] {
+            assert!(
+                profile_props.get(key).is_some(),
+                "ProfileData 缺少 {key} 字段"
+            );
+        }
     }
 }

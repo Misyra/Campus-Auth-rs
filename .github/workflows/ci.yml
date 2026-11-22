@@ -5,6 +5,10 @@ on:
     branches: [master]
   pull_request:
 
+# CI 只拉代码跑检查，无发布/推包需求，GITHUB_TOKEN 收敛为只读
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -13,6 +17,7 @@ jobs:
   rust-msrv:
     name: Rust MSRV
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 读取声明的最低 Rust 版本
@@ -25,18 +30,41 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
+      # 缓存 Cargo 产物避免每次全量重编（key 自动含 rustc 版本与 Cargo.lock，per-job scope 不共享）
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: 最低版本锁定构建检查
         run: cargo +${{ steps.msrv.outputs.version }} check --locked --all-targets --features no-embed
 
   rust-clippy:
     name: Rust Clippy
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       # CI 不消费本地调试符号；关闭 dev/test debuginfo 可显著降低 Windows PDB/codegen 成本。
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Dockerfile 的 rust 基础镜像 tag 与 rust-toolchain.toml 是双源声明：升级 Rust
+      # 时只改一边，容器构建就会现场下载另一套工具链，产物与本地/CI 不可复现。
+      # 口径：tag 的主/次版本必须与 channel 一致（patch 由 rustup 按 channel 解析，
+      # 即 tag 1.98 ↔ channel 1.98.0 视为一致）。
+      - name: Dockerfile Rust 工具链一致性检查
+        shell: pwsh
+        run: |
+          $config = Get-Content rust-toolchain.toml -Raw
+          if ($config -notmatch 'channel\s*=\s*"([^"]+)"') { throw "rust-toolchain.toml 缺少 toolchain.channel" }
+          $channel = $Matches[1]
+          $dockerfile = Get-Content Dockerfile -Raw
+          # 兼容 tag@digest 形式：只取 tag 段（无 digest 或带 digest 均可命中，纯 digest 无版本 tag 则报错）
+          if ($dockerfile -notmatch '(?m)^FROM\s+rust:([^@\s]+)') { throw "Dockerfile 未找到 rust: 基础镜像（需保留版本 tag）" }
+          $imageTag = $Matches[1]
+          $dockerVersion = ($imageTag -replace '-.*$', '')
+          if ($channel -ne $dockerVersion -and -not $channel.StartsWith("$dockerVersion.")) {
+            throw "Dockerfile rust:$imageTag 与 rust-toolchain.toml channel=$channel 漂移，请同步升级两边"
+          }
+          Write-Host "Dockerfile rust:$imageTag 与 rust-toolchain.toml channel=$channel 一致"
 
       - name: 读取 Rust 工具链版本
         id: rust-toolchain
@@ -53,6 +81,8 @@ jobs:
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # 格式错误在该 job 编译前尽早失败。
       - name: 格式检查（cargo fmt --check）
@@ -82,6 +112,7 @@ jobs:
   rust-tests:
     name: Rust Tests
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -102,6 +133,12 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          # 与 rust-toolchain.toml 的 components 对齐显式安装：漏装会让后续
+          # cargo 调用隐式同步时撞 hosted 镜像的 bin/cargo-fmt 残留（PR #33
+          # OpenWrt 侧同款毛刺三次复现，ci 侧提前堵住）
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: 安装 Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -115,13 +152,14 @@ jobs:
         run: npm ci && npm run build
 
       - name: 单元与集成测试
-        run: cargo test
+        run: cargo test --locked
 
   # W10：unix 平台编译 + 测试此前完全缺席，unix 分支的编译错误要到打 tag 的
   # release 构建才首次暴露。此 job 覆盖 macOS / Linux 的 clippy + 测试。
   rust-tests-unix:
     name: Rust Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -142,7 +180,9 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
-          components: clippy
+          components: clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       # tray-icon 的 Linux 后端链接 GTK3 / appindicator / xdo（muda 菜单模拟点击），
       # 构建期需要 -dev 头文件（与 release.yml 保持一致）
@@ -167,11 +207,12 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: 单元与集成测试
-        run: cargo test
+        run: cargo test --locked
 
   frontend-python:
     name: Frontend + Python
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -194,19 +235,35 @@ jobs:
           enable-cache: true
           cache-dependency-glob: python_worker/uv.lock
 
-      # 类型检查独立成步：此前它只隐含在 npm run build 里，
-      # 一旦失败会混在构建日志中难以辨认（曾因此长期未发现检查本身失效）。
       - name: 安装前端依赖
         working-directory: frontend
         run: npm ci
 
+      # openapi.json 与入库生成物 api.d.ts 的一致性门禁：后端契约改动后若忘跑
+      # npm run typegen 重新生成，前端类型就停留在旧契约上，在此尽早失败。
+      - name: 前端 typegen 一致性检查
+        working-directory: frontend
+        run: npm run typegen:check
+
+      # 类型检查独立成步：此前它只隐含在 npm run build 里，
+      # 一旦失败会混在构建日志中难以辨认（曾因此长期未发现检查本身失效）。
       - name: 前端类型检查（vue-tsc）
         working-directory: frontend
         run: npm run typecheck
 
-      - name: 前端单元测试（vitest）
+      - name: 前端 ESLint
         working-directory: frontend
-        run: npm test
+        run: npm run lint
+
+      - name: 前端样式守卫（stylelint）
+        working-directory: frontend
+        run: npm run lint:css
+
+      # --coverage 让 vite.config.ts coverage 块的 thresholds 真正参与判定：
+      # 此前 npm test 不带覆盖率，跌破阈值的提交 CI 照常全绿，门禁形同虚设
+      - name: 前端单元测试与覆盖率门禁（vitest）
+        working-directory: frontend
+        run: npm run test -- --coverage
 
       - name: Python Worker 语法检查
         run: python -m compileall python_worker
@@ -216,9 +273,15 @@ jobs:
         run: uv sync --dev --frozen && uv run pytest
 
   e2e-login-chain:
-    name: E2E Login Chain
-    runs-on: windows-latest
-    timeout-minutes: 30
+    name: E2E Login Chain (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS 与 Windows 全链路同跑：mac 是发布目标平台（release.yml 双 darwin
+        # target），此前登录链路只在 Windows 验证，mac 侧回归要等打 tag 才暴露
+        os: [windows-latest, macos-latest]
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -240,6 +303,12 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          # 与 rust-toolchain.toml 的 components 对齐显式安装：漏装会让后续
+          # cargo 调用隐式同步时撞 hosted 镜像的 bin/cargo-fmt 残留（PR #33
+          # OpenWrt 侧同款毛刺三次复现，ci 侧提前堵住）
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: 安装 Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -267,7 +336,8 @@ jobs:
       # 全链路需要：Playwright chromium（浏览器执行）+ ddddocr（含 Pillow，mock
       # 验证码生成与 Worker OCR 共用；版本 pin 死保证可复现，升级前先本地验证
       # OCR 识别率）+ OCR 模型预热（首载下载约 20MB，预热后计入 uv 缓存，
-      # 不占用测试时间）
+      # 不占用测试时间）。双平台同一套步骤：macOS/Windows runner 上 chromium
+      # 无需系统依赖补装（Linux 才需要 playwright install --with-deps）
       - name: 准备 E2E 环境（浏览器 + OCR）
         working-directory: python_worker
         run: |
@@ -279,3 +349,102 @@ jobs:
       # 严格模式禁止把依赖缺失的提前返回记成全链路通过。
       - name: 登录全链路集成测试
         run: cargo test --test login_chain
+
+  # ========================================================================
+  # 覆盖率门禁（T4-4）——按模块域分组断言行覆盖率阈值
+  #
+  # 口径：cargo llvm-cov --lib 只跑库内单元测试（#[cfg(test)]），从 JSON
+  # 摘要按 src/{config,login,engine,updater}/ 前缀分组加权求行覆盖率，
+  # 逐一断言。不用 llvm-cov --fail-* 参数：其阈值只能作用于全部文件
+  # 整体，无法按域分组。
+  #
+  # 基线来源：2026-11-13 于 macOS arm64（rustc 1.98.0，cargo-llvm-cov
+  # 0.9.1）对当期 master 实测（数字见下方 DOMAINS 注释）。阈值 = 实测
+  # 基线 - 4pp（容忍跨平台 cfg 分支与测试环境的抖动，防 flaky）。
+  #
+  # 调阈值流程：
+  #   1. 本地 `cargo llvm-cov --lib --json --summary-only` 实测各域新基线
+  #   2. 同步更新下方 DOMAINS 的阈值与本注释
+  # ========================================================================
+  coverage:
+    name: Rust Coverage Gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 读取 Rust 工具链版本
+        id: rust-toolchain
+        run: |
+          channel=$(grep -oP 'channel\s*=\s*"\K[^"]+' rust-toolchain.toml || sed -n 's/channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 Rust 工具链（llvm-tools-preview 为 llvm-cov 必需组件）
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: 安装 Linux 托盘构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev pkg-config
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 默认特性的 rust-embed 编译需要 frontend/dist
+      - name: 构建前端资源
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: 安装 cargo-llvm-cov
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-llvm-cov
+
+      - name: 按域断言覆盖率阈值
+        run: |
+          cargo llvm-cov --lib --locked --json --summary-only > coverage-summary.json
+          python3 - <<'EOF'
+          import json
+
+          # 四域行覆盖率阈值（= 2026-11-13 实测基线 - 4pp；基线与调整流程
+          # 见上方 job 注释）
+          DOMAINS = {
+              "config": 87.95,   # 基线 91.95%
+              "login": 86.38,    # 基线 90.38%
+              "engine": 83.09,   # 基线 87.09%
+              "updater": 70.52,  # 基线 74.52%
+          }
+
+          files = json.load(open("coverage-summary.json"))["data"][0]["files"]
+          per = {k: [0.0, 0.0] for k in DOMAINS}
+          for f in files:
+              for domain in DOMAINS:
+                  # llvm-cov 的 filename 为工作区绝对路径（前缀平台相关，本地
+                  # 与 CI 实测一致），相对形态一并兼容——首次真跑 0.00% 即此
+                  name = f["filename"]
+                  if name.startswith(f"src/{domain}/") or f"/src/{domain}/" in name:
+                      per[domain][0] += f["summary"]["lines"]["covered"]
+                      per[domain][1] += f["summary"]["lines"]["count"]
+
+          failed = False
+          for domain, (covered, total) in per.items():
+              pct = covered / total * 100 if total else 0.0
+              threshold = DOMAINS[domain]
+              ok = pct >= threshold
+              print(f"{domain:10s} {pct:6.2f}% (阈值 {threshold:5.2f}%) {'OK' if ok else 'FAIL'}")
+              failed |= not ok
+          if failed:
+              raise SystemExit("覆盖率门禁未达标：见上方 FAIL 行，调阈值流程见 job 注释")
+          EOF

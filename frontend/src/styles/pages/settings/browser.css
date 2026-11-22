@@ -29,6 +29,9 @@
   transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
 
+/* 特异度升序：focus-visible / disabled / hover / [aria-pressed]，三态间无同属性竞争，重排不改变计算值 */
+.browser-choice:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; }
+.browser-choice:disabled { opacity: .55; cursor: not-allowed; }
 .browser-choice:hover:not(:disabled) { background: rgba(var(--accent-rgb), .06); }
 .browser-choice[aria-pressed="true"] {
   border-color: var(--accent-text);
@@ -36,8 +39,6 @@
   color: var(--text-primary);
 }
 
-.browser-choice:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; }
-.browser-choice:disabled { opacity: .55; cursor: not-allowed; }
 .browser-choice > :is(img, svg) { flex-shrink: 0; }
 .browser-choice-check { position: absolute; top: 5px; right: 5px; width: 12px; height: 12px; color: var(--accent-text); }
 
@@ -46,7 +47,8 @@
   background: rgba(var(--accent-rgb), 0.06);
   border: 1px solid rgba(var(--accent-rgb), 0.15);
   border-radius: var(--radius-lg);
-  margin-top: var(--space-xs);
+  /* 12px（原文件尾部重复规则合并而来，后写的 0.75rem 才是生效值） */
+  margin-top: 0.75rem;
 }
 
 .browser-safe-info p {
@@ -71,12 +73,9 @@
   border-color: rgba(var(--warning-rgb), 0.3);
   background: rgba(var(--warning-rgb), 0.06);
 }
-/* 顶部提示与底部警告的纵向间距（替代模板内联 style） */
+/* 顶部提示的纵向间距（替代模板内联 style）；底部 .browser-safe-info 的间距在其基础规则中 */
 .browser-notice--top {
   margin-bottom: 0.75rem;
-}
-.browser-safe-info {
-  margin-top: 0.75rem;
 }
 .browser-safe-info:first-child {
   margin-top: 0;
@@ -113,8 +112,8 @@
   color: var(--text-secondary);
 }
 
-/* 数据目录跟随说明换行，避免窄屏被长路径撑开。 */
-.browser-data-path code { white-space: normal; overflow-wrap: anywhere; }
+/* .browser-data-path 已随「设置行文字减法」退役：数据目录说明并入 ? 气泡文本
+   （BrowserSessionRows 的 persistentDescription 计算值）。 */
 
 @media (max-width: 640px) {
   .browser-warning-copy {

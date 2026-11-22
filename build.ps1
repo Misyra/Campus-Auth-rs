@@ -9,6 +9,7 @@
 #   dist/
 #   ├── campus-auth(.exe)            # 主程序（前端已嵌入）
 #   ├── campus-auth-helper(.exe)     # 更新替换助手
+#   ├── campus-auth.version          # 版本 marker（一行 Cargo.toml 版本号，更新器读取）
 #   ├── LICENSE                     # AGPL-3.0-only 全文（二进制分发必备）
 #   ├── Dockerfile                   # Docker 构建文件
 #   ├── docker-compose.yml           # 默认 GHCR 镜像编排
@@ -23,6 +24,10 @@
 # 打包产物仅在 $Out（默认 dist/，见 .gitignore /dist/）；不再向项目根目录复制 exe，
 # 版本以 `target/release/campus-auth --version`（= Cargo.toml）为准，避免根残留误导。
 # 要求 pwsh 7+（UTF-8），Windows PowerShell 5.1 会按 ANSI 解析中文导致乱码。
+# macOS 亦可直接运行（brew install pwsh）：路径分隔符统一用 /（Join-Path 不会转换
+# 反斜杠，写 "\" 在 unix 是文件名的一部分）、产物为无 .exe 后缀的 unix 二进制
+# （Windows 版本资源校验在非 Windows 平台跳过）。分发侧 quarantine 提示见
+# release.yml 的 macOS 平台说明；Docker 部署文件随包口径两平台一致。
 
 param(
     [switch]$SkipFrontend,
@@ -118,7 +123,7 @@ if (-not $SkipFrontend) {
     }
 } else {
     Write-Host "=== 1/4 跳过前端构建（使用现有 frontend/dist） ==="
-    if (-not (Test-Path (Join-Path $Root "frontend\dist\index.html"))) {
+    if (-not (Test-Path (Join-Path $Root "frontend/dist/index.html"))) {
         throw "frontend/dist 不存在，请先执行 npm run build 或去掉 -SkipFrontend"
     }
 }
@@ -133,12 +138,21 @@ try {
     Pop-Location
 }
 
+$cargoVersion = [regex]::Match((Get-Content -LiteralPath (Join-Path $Root "Cargo.toml") -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
 if ($IsWindows) {
-    $cargoVersion = [regex]::Match((Get-Content -LiteralPath (Join-Path $Root "Cargo.toml") -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
     foreach ($binary in @("campus-auth.exe", "campus-auth-helper.exe")) {
         $built = Get-Item -LiteralPath (Join-Path $Root "target/release/$binary")
         if ($built.VersionInfo.ProductVersion -ne $cargoVersion) {
             throw "$binary 的版本资源与 Cargo 版本不一致，拒绝打包"
+        }
+    }
+} else {
+    # 非 Windows 无 PE 版本资源：改为执行二进制的 --version（clap 输出 "<name> <ver>"）
+    # 比对，防止把陈旧的 target 产物打进包里
+    foreach ($binary in @("campus-auth", "campus-auth-helper")) {
+        $reported = & (Join-Path $Root "target/release/$binary") --version
+        if ("$reported" -notmatch [regex]::Escape($cargoVersion)) {
+            throw "$binary 自报版本（$reported）与 Cargo.toml version=$cargoVersion 不一致，拒绝打包"
         }
     }
 }
@@ -152,7 +166,7 @@ New-Item -ItemType Directory -Path $Out | Out-Null
 # 二进制（Windows 带 .exe）
 $exeSuffix = ""
 if ($IsWindows -or $env:OS -match "Windows") { $exeSuffix = ".exe" }
-$releaseDir = Join-Path $Root "target\release"
+$releaseDir = Join-Path $Root "target/release"
 # 兼容直接执行与 CI 交叉编译：优先取 target/release，缺失则报错提示
 $mainExe = Join-Path $releaseDir "campus-auth$exeSuffix"
 $helperExe = Join-Path $releaseDir "campus-auth-helper$exeSuffix"
@@ -162,6 +176,10 @@ Copy-Item $mainExe $Out
 Copy-Item $helperExe $Out
 # 明确区分携带 Cargo 源码的便携包与开发工程，卸载时仍保留源码仓库守卫。
 Set-Content -LiteralPath (Join-Path $Out "campus-auth.portable") -Value "campus-auth-portable-v1" -Encoding utf8NoBOM
+
+# 版本 marker：非 Windows 无 PE 版本资源，更新器从包内 exe 同目录的该文件提取
+# 版本（与 Windows 版本资源同源取 Cargo.toml version；与 release.yml 组装口径一致）
+Set-Content -LiteralPath (Join-Path $Out "campus-auth.version") -Value $cargoVersion -Encoding utf8NoBOM
 
 Copy-Item (Join-Path $Root "resources") (Join-Path $Out "resources") -Recurse
 
@@ -246,5 +264,5 @@ $sizeMB = [math]::Round(
 
 Write-Host "=== 4/4 完成 ==="
 Write-Host "便携版输出: $Out（约 ${sizeMB} MB，解压后直接运行 campus-auth$exeSuffix）"
-Write-Host "本地冒烟: $Out\campus-auth$exeSuffix --status（勿用 target/debug 测 release 行为）"
+Write-Host "本地冒烟: $Out/campus-auth$exeSuffix --status（勿用 target/debug 测 release 行为）"
 Write-Host "Docker 部署: 解压后 docker compose pull && docker compose up -d（默认 GHCR 预构建镜像）"

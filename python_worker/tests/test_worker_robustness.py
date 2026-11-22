@@ -17,8 +17,10 @@ from pathlib import Path
 
 import pytest
 
+import browser_lifecycle
 import playwright_worker
 import worker_main
+import worker_paths
 from playwright_worker import (
     _PAGE_RESOURCE_PROBE_JS,
     _capture_page_resources,
@@ -28,6 +30,7 @@ from playwright_worker import (
     cancel_registry,
 )
 from step_handlers import StepCancelled, WorkerError, _safe_op, _sanitize_error
+from fakes import FakeBrowser, FakeContext, FakePage
 
 
 def _run(coro):
@@ -73,6 +76,24 @@ def test_to_ms_non_positive_falls_back_to_default():
     # 正常值行为不变
     assert _to_ms({"timeout": 3}, "timeout", 10000) == 3000
     assert _to_ms({"timeout": "15"}, "timeout", 10000) == 15000
+
+
+def test_to_ms_non_dict_falls_back_to_default():
+    """畸形 browser_settings（truthy 非 dict）不得抛 AttributeError：统一回退默认值。"""
+    assert _to_ms(["x"], "timeout", 10000) == 10000
+    assert _to_ms("str", "timeout", 10000) == 10000
+
+
+def test_command_timeout_survives_non_dict_browser_settings():
+    """_command_timeout 在 _dispatch_guarded 的 try 之外调用 _to_ms：
+    畸形 browser_settings 不得炸穿 Worker 进程。"""
+    # 有 rust_timeout_ms 预算时短路返回，畸形 settings 不参与推导
+    assert (
+        worker_main._command_timeout({"browser_settings": ["a"], "rust_timeout_ms": 60000})
+        == 54.0
+    )
+    # 无预算字段时走 _to_ms 推导路径（C4 实际崩溃路径）：回退默认 10s → 270s 地板
+    assert worker_main._command_timeout({"browser_settings": ["a"]}) == 270.0
 
 
 # ── 修复 3：畸形命令防护 ──
@@ -148,33 +169,7 @@ def test_dispatch_guarded_error_response_after_emit_failure(monkeypatch):
 
 
 # ── 修复 4：_close_session / 热恢复清 _wired_page_ids ──
-
-
-class _WirePage:
-    """可统计 dialog 绑定次数的页面对象替身。"""
-
-    def __init__(self):
-        self.handlers: dict[str, object] = {}
-
-    def on(self, event, cb):
-        self.handlers.setdefault(event, []).append(cb)
-
-    async def close(self):
-        pass
-
-
-class _WireContext:
-    def __init__(self):
-        self.pages: list = []
-
-    async def new_page(self):
-        return _WirePage()
-
-    async def close(self):
-        pass
-
-    def on(self, event, cb):
-        pass
+# 原 _WirePage/_WireContext 已收敛至 fakes.py（FakePage/FakeContext）
 
 
 def test_close_session_clears_wired_page_ids():
@@ -182,9 +177,9 @@ def test_close_session_clears_wired_page_ids():
 
     async def _run_case():
         core = WorkerCore()
-        page = _WirePage()
+        page = FakePage()
         core._page = page
-        core._context = _WireContext()
+        core._context = FakeContext()
         core._browser = object()
         core._wired_page_ids.add(id(page))
         await core._close_session()
@@ -192,7 +187,7 @@ def test_close_session_clears_wired_page_ids():
 
         # persistent 模式（context 保留）：同样要清，防止对象 id 复用漏绑新页
         core2 = WorkerCore()
-        ctx = _WireContext()
+        ctx = FakeContext()
         core2._context = ctx
         core2._browser = None
         core2._wired_page_ids.add(123456)
@@ -208,14 +203,7 @@ def test_hot_recovery_clears_wired_page_ids_before_new_context():
 
     async def _run_case():
         core = WorkerCore()
-
-        class FakeBrowser:
-            def is_connected(self):
-                return True
-
-            async def new_context(self, **kwargs):
-                return _WireContext()
-
+        # 原内联 FakeBrowser 已收敛至 fakes.py（is_connected True + new_context）
         core._browser = FakeBrowser()
         core._context = None
         core._last_browser_settings = {"pure_mode": True}
@@ -252,14 +240,14 @@ def test_close_browser_internal_timeout_yields_to_command_budget(monkeypatch):
         async def fake_session(self):
             released.append(True)
 
-        orig_env = pw._WORKER_KEEP_ALIVE
+        orig_env = browser_lifecycle._WORKER_KEEP_ALIVE
         orig_session = WorkerCore._close_session
-        pw._WORKER_KEEP_ALIVE = True
+        browser_lifecycle._WORKER_KEEP_ALIVE = True
         WorkerCore._close_session = fake_session
         try:
             await core.handle_close_browser({"rust_timeout_ms": 8_000})
         finally:
-            pw._WORKER_KEEP_ALIVE = orig_env
+            browser_lifecycle._WORKER_KEEP_ALIVE = orig_env
             WorkerCore._close_session = orig_session
         assert released == [True]
         assert timeouts == [pytest.approx(7.2 - 0.5)]
@@ -267,12 +255,12 @@ def test_close_browser_internal_timeout_yields_to_command_budget(monkeypatch):
         # 无预算（旧主程序）：保持 8s 固定兜底
         timeouts.clear()
         released.clear()
-        pw._WORKER_KEEP_ALIVE = True
+        browser_lifecycle._WORKER_KEEP_ALIVE = True
         WorkerCore._close_session = fake_session
         try:
             await core.handle_close_browser({})
         finally:
-            pw._WORKER_KEEP_ALIVE = orig_env
+            browser_lifecycle._WORKER_KEEP_ALIVE = orig_env
             WorkerCore._close_session = orig_session
         assert timeouts == [pw._WAIT_TIMEOUT_SECS]
 
@@ -339,7 +327,7 @@ def _feedback_core(monkeypatch, tmp_path: Path, page: _FeedbackPage) -> WorkerCo
     core = WorkerCore()
     core._page = page
     core._last_browser_settings = {"browser_channel": "chromium"}
-    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
     return core
 
 
@@ -601,16 +589,25 @@ def test_page_capture_cancelled_between_stages(monkeypatch, tmp_path):
 
     async def _run_case():
         core = WorkerCore()
-        core.ensure_browser = lambda config: _noop()
-        core._prepare_session_page = _noop
-        core._navigate = _noop
+        core._playwright = object()  # 复用既有连接：避免测试真实启动 Playwright
+
         class FakeContext:
-            async def clear_cookies(self):
-                pass
+            async def new_page(self):
+                return FakeCapturePage()
+
+            async def close(self):
+                closed.append("context")
 
         class FakeCapturePage:
             def __init__(self):
-                self.context = FakeContext()
+                self.context = None
+                self.url = "http://portal.example.com/"
+
+            def on(self, event, handler):
+                pass
+
+            async def goto(self, url, wait_until=None, timeout=None):
+                pass
 
             async def wait_for_load_state(self, state, timeout=None):
                 pass
@@ -623,20 +620,168 @@ def test_page_capture_cancelled_between_stages(monkeypatch, tmp_path):
             async def screenshot(self, full_page=True):
                 return b"png"
 
-        core._page = FakeCapturePage()
+        class FakeBrowser:
+            async def new_context(self, **opts):
+                return FakeContext()
+
+            async def close(self):
+                closed.append("browser")
+
+        closed: list[str] = []
+
+        async def fake_launch(playwright, channel, custom_path, headless, launch_args, bs):
+            return FakeBrowser()
+
+        core._launch_browser = fake_launch
         monkeypatch.setattr(
-            playwright_worker, "_capture_dir", lambda: tmp_path / "latest"
+            worker_paths, "_capture_dir", lambda: tmp_path / "latest"
         )
         # finally 会武装空闲回收：置 keep_alive 使其成为 no-op，避免悬挂任务
-        monkeypatch.setattr(playwright_worker, "_WORKER_KEEP_ALIVE", True)
+        monkeypatch.setattr(browser_lifecycle, "_WORKER_KEEP_ALIVE", True)
 
         with pytest.raises(StepCancelled):
             await core.handle_page_capture({"url": "http://portal.example.com/", "cancel_id": "pc-cancel"})
         assert "pc-cancel" not in cancel_registry._events
         assert "pc-cancel" not in cancel_registry._pending
+        # 取消路径同样回收临时浏览器：context → browser 依次关闭
+        assert closed == ["context", "browser"]
 
-    async def _noop(*args, **kwargs):
-        return None
+    _run(_run_case())
+
+
+# ── P1-1：page_capture 独立临时浏览器，不触碰 keep_alive 常驻会话 ──
+
+
+def test_page_capture_preserves_keep_alive_session(monkeypatch, tmp_path):
+    """page_capture 用独立非持久化临时浏览器：常驻 Cookie 与心跳页原样保留。
+
+    常驻 context 不被清 Cookie、旧页（心跳页）不被关、会话对象引用不变；
+    临时 browser / context 捕获完成后全部关闭丢弃（无泄漏）。
+    """
+
+    async def _run_case():
+        core = WorkerCore()
+        core._playwright = object()  # 复用既有连接：避免测试真实启动 Playwright
+
+        # ── 常驻会话（keep_alive preserve_state 保留态的等价物）──
+        class ResidentPage:
+            def __init__(self):
+                self.close_calls = 0
+
+            async def close(self):
+                self.close_calls += 1
+
+        class ResidentContext:
+            def __init__(self, page):
+                self.cookies = [{"name": "sid", "value": "keep-alive-session"}]
+                self.pages = [page]
+                self.clear_cookie_calls = 0
+
+            async def clear_cookies(self):
+                self.clear_cookie_calls += 1
+
+            async def close(self):
+                raise AssertionError("常驻 context 不得被 page_capture 关闭")
+
+        class ResidentBrowser:
+            def is_connected(self):
+                return True
+
+            async def close(self):
+                raise AssertionError("常驻浏览器不得被 page_capture 关闭")
+
+        resident_page = ResidentPage()
+        resident_context = ResidentContext(resident_page)
+        core._browser = ResidentBrowser()
+        core._context = resident_context
+        core._page = resident_page
+
+        # 常驻会话的两大破坏点（clear_cookies / 关全部旧页）必须在该路径上不可达
+        async def _forbidden_ensure(config):
+            raise AssertionError("page_capture 不得经 ensure_browser 触碰常驻浏览器")
+
+        async def _forbidden_prepare():
+            raise AssertionError("page_capture 不得经 _prepare_session_page 关常驻旧页")
+
+        core.ensure_browser = _forbidden_ensure
+        core._prepare_session_page = _forbidden_prepare
+
+        # ── 临时浏览器桩（与常驻对象完全独立）──
+        class TempPage:
+            def __init__(self):
+                self.context = None
+                self.url = "http://portal.example.com/login"
+
+            def on(self, event, handler):
+                pass
+
+            async def goto(self, url, wait_until=None, timeout=None):
+                pass
+
+            async def wait_for_load_state(self, state, timeout=None):
+                pass
+
+            async def content(self):
+                return "<html><form></form></html>"
+
+            async def screenshot(self, full_page=True):
+                return b"png"
+
+            async def title(self):
+                return "校园网认证"
+
+        class TempContext:
+            def __init__(self):
+                self.close_calls = 0
+
+            async def new_page(self):
+                page = TempPage()
+                page.context = self
+                return page
+
+            async def close(self):
+                self.close_calls += 1
+
+        class TempBrowser:
+            def __init__(self):
+                self.context = TempContext()
+                self.close_calls = 0
+
+            async def new_context(self, **opts):
+                return self.context
+
+            async def close(self):
+                self.close_calls += 1
+
+        temp_browser = TempBrowser()
+
+        async def fake_launch(playwright, channel, custom_path, headless, launch_args, bs):
+            return temp_browser
+
+        core._launch_browser = fake_launch
+        monkeypatch.setattr(
+            worker_paths, "_capture_dir", lambda: tmp_path / "latest"
+        )
+        # finally 会武装空闲回收：置 keep_alive 使其成为 no-op，避免悬挂任务
+        monkeypatch.setattr(browser_lifecycle, "_WORKER_KEEP_ALIVE", True)
+
+        result = await core.handle_page_capture({"url": "http://portal.example.com/"})
+
+        # 返回结构契约不变（Rust 侧零改动）
+        assert set(result) == {
+            "final_url", "title", "html_chars", "png_bytes",
+            "resources_count", "structure_summary", "note",
+        }
+        assert result["title"] == "校园网认证"
+        # 常驻会话原样保留：Cookie 未清、心跳页未关、引用未换、配置快照未污染
+        assert resident_context.clear_cookie_calls == 0
+        assert resident_page.close_calls == 0
+        assert core._context is resident_context
+        assert core._page is resident_page
+        assert core._last_browser_settings is None
+        # 临时浏览器完全关闭（无 context / page 泄漏）
+        assert temp_browser.context.close_calls == 1
+        assert temp_browser.close_calls == 1
 
     _run(_run_case())
 
@@ -705,3 +850,166 @@ def test_error_result_and_structured_result_sanitize():
     dumped = json.dumps(resp, ensure_ascii=False)
     assert "leak" not in dumped
     assert "http://portal.example.com/srun" in resp["error"]
+
+
+# ── P1-2：_dispatch 主信封脱敏收口 ──
+
+
+def _dispatch_once(monkeypatch, capsys, method: str, handler) -> dict:
+    """注册临时 handler 跑一次 _dispatch_guarded，返回写出的唯一响应信封。"""
+
+    async def _run():
+        worker_main.COMMANDS[method] = handler
+        try:
+            await worker_main._dispatch_guarded({"id": 900, "method": method, "params": {}})
+        finally:
+            del worker_main.COMMANDS[method]
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1
+        return json.loads(lines[0])
+
+    return asyncio.run(_run())
+
+
+def test_dispatch_success_envelope_sanitizes_data_message(monkeypatch, capsys):
+    """P1-2 主信封收口：success 信封 data.message 的 token URL 写出前被剥掉。
+
+    run_steps 的 StructuredResult 以 success 信封返回，message 此前未经
+    _sanitize_error 直达 Rust parse_ipc_response 进登录历史。
+    """
+
+    async def handler(params):
+        return {
+            "outcome": "success",
+            "message": "执行成功 at http://portal.example.com/srun?token=leak1&x=1",
+            "duration_ms": 1,
+            "screenshots": [],
+        }
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_success", handler)
+    assert envelope["result"]["success"] is True
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak1" not in dumped and "token" not in dumped
+    message = envelope["result"]["data"]["message"]
+    assert "http://portal.example.com/srun" in message
+    assert message.startswith("执行成功")
+
+
+def test_dispatch_debug_response_sanitizes_nested_results(monkeypatch, capsys):
+    """debug 路径（同一 _dispatch）：data.results[*].message 嵌套字段同样被脱敏。"""
+
+    async def handler(params):
+        return {
+            "running": False,
+            "task_id": "t1",
+            "current_step": 1,
+            "total_steps": 1,
+            "steps": [],
+            "results": [
+                {
+                    "step_index": 0,
+                    "success": False,
+                    "message": "执行异常: Timeout at http://portal.example.com/?token=leak2",
+                    "running": False,
+                }
+            ],
+            "screenshot_url": None,
+        }
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_debug", handler)
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak2" not in dumped and "token" not in dumped
+    assert "http://portal.example.com/" in envelope["result"]["data"]["results"][0]["message"]
+
+
+def test_dispatch_error_envelope_still_sanitized(monkeypatch, capsys):
+    """error 信封（WorkerError）回归：既有脱敏行为不变。"""
+
+    async def handler(params):
+        raise WorkerError(
+            "network_error",
+            "导航失败: http://portal.example.com/srun?token=leak3#login",
+        )
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_error", handler)
+    assert envelope["result"]["success"] is False
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak3" not in dumped and "#login" not in dumped
+    assert envelope["result"]["error"] == envelope["result"]["data"]["message"]
+    assert "http://portal.example.com/srun" in envelope["result"]["error"]
+
+
+def test_dispatch_envelope_keeps_plain_message_untouched(monkeypatch, capsys):
+    """无敏感模式的合法普通中文文案不被误改。"""
+    plain = "执行成功；1 个非必须步骤失败: #2"
+
+    async def handler(params):
+        return {"outcome": "success", "message": plain, "duration_ms": 1, "screenshots": []}
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_plain_message", handler)
+    assert envelope["result"]["success"] is True
+    assert envelope["result"]["data"]["message"] == plain
+    assert envelope["result"]["error"] is None
+
+
+# ── P3-7：dialogs 列表与 dialog 事件通道脱敏 ──
+
+
+def test_dispatch_dialogs_list_sanitized(monkeypatch, capsys):
+    """P3-7 响应信封：dialogs list 内裸 str 项的 token URL 写出前被剥掉。
+
+    门户 alert 文案（如「登录成功，正在跳转 …?token=xxx」）随 StructuredResult
+    的 data.dialogs 上报，此前键名白名单只覆盖 message/error 字段，list 里的
+    裸字符串原样直达 Rust 登录历史。
+    """
+
+    async def handler(params):
+        return {
+            "dialogs": [
+                "登录成功！跳转 http://portal.example.com/srun?token=leak9&x=1",
+                "账号或密码错误！",
+            ]
+        }
+
+    envelope = _dispatch_once(monkeypatch, capsys, "test_leak_dialogs", handler)
+    dumped = json.dumps(envelope, ensure_ascii=False)
+    assert "leak9" not in dumped and "token" not in dumped
+    dialogs = envelope["result"]["data"]["dialogs"]
+    assert dialogs[0].startswith("登录成功！跳转 http://portal.example.com/srun")
+    # 无 URL 的普通弹窗文案原样保留
+    assert dialogs[1] == "账号或密码错误！"
+
+
+def test_emit_event_dialog_message_sanitized(capsys):
+    """P3-7 事件通道：dialog 事件携带的 alert 原文（含带参 URL）写出前被剥洗。
+
+    事件不走 _dispatch 的响应信封闸口，emit_event 出口就地脱敏后写 stdout。
+    """
+    payload = {
+        "message": "请重新登录: http://portal.example.com/srun?token=leak10#frag",
+        "action": "accept",
+    }
+    worker_main.emit_event("dialog", payload)
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    assert event["event"] == "dialog"
+    dumped = json.dumps(event, ensure_ascii=False)
+    assert "leak10" not in dumped and "token" not in dumped and "#frag" not in dumped
+    assert event["data"]["message"].startswith("请重新登录: http://portal.example.com/srun")
+    # 非 message/error 字段不受影响
+    assert event["data"]["action"] == "accept"
+
+
+def test_emit_event_plain_payload_untouched(capsys):
+    """P3-7 边界：无 message/error 键与裸 str 列表的事件负载原样透传。"""
+    payload = {
+        "step_index": 0,
+        "description": "步骤 1: 打开 http://portal.example.com/裸地址",
+    }
+    worker_main.emit_event("step_progress", payload)
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    # description 不在键名白名单内，task 侧文案保持原样
+    assert event["data"] == payload

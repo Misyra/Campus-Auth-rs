@@ -1,17 +1,21 @@
 .about-container {
+  /* width:100% 保证块布局与 flex 布局（外壳契约把 .page-content 变为 flex column，
+     auto 外边距的子项不再 stretch）下同为「撑满 960px 上限后居中」——没有它，
+     flex 子项按 fit-content 收缩，窄内容会把容器缩窄。 */
+  width: 100%;
   max-width: 960px;
   margin: 0 auto;
   /* 技术徽章品牌色。与 AboutView.vue 的 tech-stack 清单**一一对应**：
      清单里出现的每个修饰类，这里必须有一条同名 token，否则徽标没有配色
      （`.rust` / `.tokio` / `.vue` 曾因此长期无配色，见下方 .tech-badge 注释）。 */
-  --tech-rust: #f74c00;
-  --tech-tokio: #7b6bff;
-  --tech-vue: #42b883;
-  --tech-playwright: #2eaa55;
-  --tech-websockets: #6495ed;
-  --tech-ddddocr: #a855f7;
+  --tech-rust: #f74c00; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-tokio: #7b6bff; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-vue: #42b883; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-playwright: #2eaa55; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-websockets: #6495ed; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
+  --tech-ddddocr: #a855f7; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
   --tech-uv: var(--accent);
-  --tech-python: #3776ab;
+  --tech-python: #3776ab; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
 }
 
 .about-hero {
@@ -112,7 +116,11 @@
   font-weight: 500;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   min-height: 36px;
+  /* 短名（uv 两字符）配 radius-full 会缩成近圆形气泡；统一最小宽度让所有
+     徽标保持胶囊读感，宽徽标不受影响 */
+  min-width: 72px;
   transition: transform var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
   /* color-mix 不支持时的兜底（旧浏览器显示半透明灰）：
      下方那条带 color-mix 的声明会整条失效，于是回落到这两行 */
@@ -139,8 +147,11 @@
 .tech-badge.uv,
 .tech-badge.python {
   background: color-mix(in srgb, var(--tech) 20%, transparent);
-  border-color: color-mix(in srgb, var(--tech) 30%, transparent);
-  color: var(--tech);
+  border-color: color-mix(in srgb, var(--tech) 40%, transparent);
+  /* 文字 = 品牌色 45% ⊕ 主题正文色：直接用品牌色当文字在浅色底上大面积不达 AA
+     （vue 1.8 / websockets 2.2 / playwright 2.2…），混入正文色后保色相且深浅两
+     主题实测均 ≥7.3:1；描边同步加浓到 40% 保住"品牌色描边"的辨识度 */
+  color: color-mix(in srgb, var(--tech) 45%, var(--text-primary));
 }
 
 .tech-badge.rust { --tech: var(--tech-rust); }
@@ -272,12 +283,7 @@
 
 /* B 站：官方粉，辨识来源 */
 .bilibili-link svg {
-  color: #fb7299;
-}
-
-.muted {
-  color: var(--text-muted);
-  margin-top: var(--space-sm);
+  color: #fb7299; /* stylelint-disable-line color-no-hex -- 品牌色不随主题 */
 }
 
 .qq-group {

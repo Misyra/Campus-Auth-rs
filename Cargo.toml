@@ -1,6 +1,6 @@
 [package]
 name = "campus-auth"
-version = "5.2.0-beta.1"
+version = "5.2.0-beta.2"
 edition = "2024"
 rust-version = "1.91"
 default-run = "campus-auth"
@@ -16,11 +16,17 @@ path = "src/main.rs"
 name = "campus-auth-helper"
 path = "src/helper_main.rs"
 
+[lib]
+# lib 保留供桌面单测与集成测试；cdylib 供安卓侧经 JNI 加载（cargo-ndk 产物）
+crate-type = ["lib", "cdylib"]
+
 [features]
 default = ["desktop"]
 # OpenWrt 使用 --no-default-features --features openwrt，避免链接 GTK 等桌面库。
+# 安卓使用 --no-default-features --features android，同样免桌面依赖（托盘/通知降级见各 cfg 门）。
 desktop = ["dep:tray-icon", "dep:image", "dep:gtk"]
 openwrt = []
+android = []
 no-embed = []
 
 [dependencies]
@@ -63,6 +69,11 @@ arc-swap = "1"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive", "alloc", "serde"] }
 rand = "0.8"
+# 发布清单 ed25519 离线签名（T6-4）：release 流水线签清单 + 客户端嵌公钥严格校验。
+# 纯 Rust 实现（无 C 依赖）；密钥生成直接用 rand 的 OsRng 填 32 字节种子，无需 rand_core 特性。
+# zeroize 显式声明防漂移：它是 2.x 的默认特性（SigningKey 的 ZeroizeOnDrop 私钥
+# drop 清零依赖它），上游若收缩默认特性集，隐式依赖会静默失去该保证
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 
 # CLI & 日志
 clap = { version = "4", features = ["derive", "env"] }
@@ -113,6 +124,15 @@ url = "2"
 # Trait
 async-trait = "0.1"
 
+# API 契约生成（阶段 5 T5-0）：`#[utoipa::path]` 注解 → OpenAPI 文档生成。
+# 版本选 5.x 线：axum_extras 特性在 5.5 要求 axum ^0.8，与本仓 axum 0.8 匹配
+# （6.0 为另一代大版本，本战役不追）。axum_extras 让 Query/Path 提取器
+# 参与参数 schema 推导
+utoipa = { version = "5.5", features = ["axum_extras"] }
+# 配置树 JSON Schema 导出（schemars 1.x 稳定线，MSRV 1.74 < 本仓 1.91）；
+# 仅用于 config 持久化树的契约快照，与 utoipa 的 ToSchema 体系互不复用
+schemars = "1.2"
+
 # 嵌入
 rust-embed = { version = "8", features = ["include-exclude"] }
 
@@ -156,6 +176,36 @@ windows-sys = { version = "0.61", features = [
 # 托盘/菜单事件经 glib 主循环分发（与 tray-icon 内部依赖同版本，共享 gtk 状态）
 gtk = { version = "0.18", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS 托盘启用（架构批）：主线程交还 AppKit 事件循环（NSApplication run loop），
+# 托盘/菜单构建与动态更新经 GCD 主队列投递。版本与 tray-icon 0.24 / muda 0.19
+# 内部的 objc2 依赖线严格同版（objc2 0.6 / 框架 crate 0.3），避免大范围 update。
+# dispatch2 即 objc2 生态的 dispatch 绑定（上游 crates.io 无 objc2-dispatch 包名，
+# 该项目内 crate 实名 dispatch2；0.3.1 已随 objc2-core-foundation 传入锁文件，
+# 显式声明不引入新版本解析）。AppKit 只启用本仓用到的三个模块特性，
+# NSResponder 是 generated 代码中 NSApplication impl 块的编译门槛
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+# MainThreadMarker（AppKit 主线程标记）经 objc2 直接暴露；与 tray-icon / muda
+# 各自声明的 objc2 0.6 同线，锁文件无新增解析
+objc2 = "0.6"
+dispatch2 = "0.3"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# 系统通知（os 通道）：Windows toast / macOS 通知中心 / Linux freedesktop 由它统一实现
+# 安卓端无桌面通知基础设施，不参与构建（os 通道发送恒失败静默，见 notification/sender.rs）
+# 默认特性仅 "z"——Linux 走纯 Rust zbus 客户端（无需 libdbus C 库）；显式关掉
+# default 并点名 "z"，防未来默认特性膨胀（如 images 会拉 rayon 与全套图像解码）
+notify-rust = { version = "4.19", default-features = false, features = ["z"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# 安卓端 JNI 绑定（P0 编译门）：启动层经 JNI 注入应用私有目录等环境信息
+jni = "0.21"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
@@ -164,6 +214,8 @@ predicates = "3"
 tower = { version = "0.5", features = ["util"] }
 # 集成测试构造真实发布包结构（上传路径会真的解压并校验 extracted exe 存在）
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 属性测试：NDJSON IPC 解析与登录抢占决策的高风险纯逻辑面（随机输入 + shrink）
+proptest = "1"
 
 [profile.release]
 strip = true
@@ -173,3 +225,8 @@ codegen-units = 1
 [build-dependencies]
 # 为 Windows 主程序和助手嵌入可被手动更新识别的版本资源。
 winresource = "0.1.31"
+# 构建期完整解析待嵌入的清单签名公钥（VerifyingKey::from_bytes 校验曲线点
+# 合法性）：形态检查拦不住"合法 base64 但非法公钥"的损坏文件，那类文件会在
+# 运行期解析失败而 fail-open 降级为不校验签名，必须在构建期 fail-closed
+ed25519-dalek = "2"
+base64 = "0.22"

@@ -4,6 +4,7 @@ use crate::environment::{
     EnvironmentError, EnvironmentManager, PLAYWRIGHT_INSTALL_MAX_RETRIES,
     PLAYWRIGHT_INSTALL_RETRY_DELAY, PLAYWRIGHT_INSTALL_TIMEOUT, uv_exe_path,
 };
+use crate::utils::io_human::io_error_reason;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -152,7 +153,7 @@ async fn quarantine_broken_venv(venv_path: &Path) -> Result<std::path::PathBuf, 
         .await
         .map_err(|source| EnvironmentError::VenvRebuildFailed {
             path: venv_path.to_path_buf(),
-            source,
+            source: io_error_reason(source),
         })?;
     Ok(backup)
 }

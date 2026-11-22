@@ -82,7 +82,7 @@ pub fn browser_cache_dir() -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(target_os = "macos")]
     let base = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"));
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let base = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"));
     base.map(|dir| dir.join("ms-playwright"))
 }

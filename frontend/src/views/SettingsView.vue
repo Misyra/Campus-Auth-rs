@@ -1,18 +1,25 @@
 <script setup lang="ts">
-/** 设置长页：分类目录定位连续表单，统一保留未保存内容与保存操作。 */
+/**
+ * 设置单页：顶部 sticky tab 条 + 8 分区连续表单，schema 驱动渲染（见 views/settings/schema.ts）。
+ *
+ * 结构：tab 条（图标+文字按钮，active 走 --accent-soft 浅底）+ 全分区连续挂载的表单。
+ * 分区内导航由 tab 承担——点击平滑滚动到分区锚点并同步 URL hash（/settings#<id>），
+ * 滚动时由 IntersectionObserver scrollspy 反向点亮 tab（F12：替代 getBoundingClientRect
+ * 逐帧实测方案）；旧 /settings/<name> 子路由在 router 里重定向到对应 hash。
+ * 搜索在顶栏（useSettingsSearch 单例），本页消费查询词并按 schema 匹配结果过滤分区。
+ */
 import IconApp from "@/components/common/IconApp.vue";
-import MonitorSettings from "@/views/settings/MonitorSettings.vue";
-import BrowserSettings from "@/views/settings/BrowserSettings.vue";
-import TaskEnvironmentSettings from "@/views/settings/TaskEnvironmentSettings.vue";
-import SystemSettings from "@/views/settings/SystemSettings.vue";
-import AppearanceView from "@/views/AppearanceView.vue";
+import SchemaRow from "@/views/settings/SchemaRow.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useConfig } from "@/composables/useConfig";
 import { useStatus } from "@/composables/useStatus";
 import { useToast } from "@/composables/useToast";
 import { useSettingsNavigation } from "@/composables/useSettingsNavigation";
-import { activeChildId, SETTINGS_NAV_CHILDREN } from "@/utils/navTree";
+import { useSettingsSearch } from "@/composables/useSettingsSearch";
+import { SETTINGS_SECTIONS } from "@/views/settings/schema";
+import { SETTINGS_PANEL_SLOTS } from "@/views/settings/panels";
+import { searchSettings, applySettingsSearch } from "@/utils/settingsSearch";
 
 const route = useRoute();
 const router = useRouter();
@@ -20,67 +27,233 @@ const config = useConfig();
 const { busy } = useStatus();
 const { toastOnly } = useToast();
 
+/** 分区导航条元素（P3-31：窄屏 active tab 滚入条内视野用） */
+const tabsNav = ref<HTMLElement | null>(null);
+
 const navigation = useSettingsNavigation();
+// 实际滚动容器是 App.vue 的 .content-wrapper（页面整体滚动），挂载后经 closest 解析
+// 赋值，不是模板 ref
 const scrollContainer = ref<HTMLElement | null>(null);
 const settingsForm = ref<HTMLElement | null>(null);
-const sectionComponents: Record<string, typeof MonitorSettings> = {
-  monitor: MonitorSettings, browser: BrowserSettings, tasks: TaskEnvironmentSettings,
-  system: SystemSettings, appearance: AppearanceView,
-};
-const sections = SETTINGS_NAV_CHILDREN.map((child) => ({ ...child, component: sectionComponents[child.id] }));
-let resizeObserver: ResizeObserver | null = null;
+const sections = SETTINGS_SECTIONS;
+
+// ===== 设置搜索（schema 数据驱动，见 utils/settingsSearch.ts） =====
+// 输入框在顶栏（useSettingsSearch 单例），本页只消费查询词并应用过滤
+const { query: searchQuery } = useSettingsSearch();
+/** 匹配是纯数据计算（schema 不含 DOM），随查询词即时重算；DOM 类名按帧应用 */
+const searchResult = computed(() => searchSettings(sections, searchQuery.value));
+/** 关键词非空且没有任何分区命中时提示空态 */
+const searchEmpty = computed(() => searchQuery.value.trim() !== "" && searchResult.value.matchedSections === 0);
+
+let searchFrame: number | null = null;
+watch(searchQuery, () => {
+  if (searchFrame !== null) cancelAnimationFrame(searchFrame);
+  searchFrame = requestAnimationFrame(() => {
+    searchFrame = null;
+    applySettingsSearch(settingsForm.value, searchResult.value);
+  });
+});
+
+// ===== 分区元素缓存与 scrollspy（IntersectionObserver） =====
+
+/** 分区元素缓存：分区列表静态且全程挂载，挂载后各查一次 */
+const sectionElements = new Map<string, HTMLElement>();
+/** 阅读带内可见的分区（id → 视口顶距离）：scrollspy 的活集 */
+const intersectingTops = new Map<string, number>();
+/** 当前 tab 高亮（点击与 spy 双向驱动） */
+const activeSection = ref(sections[0]?.id ?? "");
+
+function cacheSectionElements(): void {
+  sectionElements.clear();
+  const form = settingsForm.value;
+  if (!form) return;
+  for (const section of sections) {
+    const element = form.querySelector<HTMLElement>(`#settings-section-${section.id}`);
+    if (element) sectionElements.set(section.id, element);
+  }
+}
+
+function setActiveSection(id: string): void {
+  if (activeSection.value !== id) activeSection.value = id;
+}
+
+/**
+ * 程序性滚动的锚定分区（tab 点击 / hash 深链 / 命令面板定位时置位）：
+ * 非空 = 正在锚定滚动或刚落定未交给用户——期间 scrollspy 暂停写入高亮（P3-30），
+ * 任一用户滚动输入（wheel/touch/pointer/键盘，见 bindScrollContainer）解除
+ */
 let anchoredSection: string | null = null;
 
-/** 旧分类深链仍可定位；所有区域保持挂载，目录跳转不会重建输入框。 */
-async function scrollToSection(id: string): Promise<void> {
-  await nextTick();
+/** 阅读带内取 top 最大者：向下滚动时新分区进入带内即接管高亮，向上滚回时旧分区保留 */
+function pickBestIntersecting(): string | null {
+  let best: string | null = null;
+  let bestTop = -Infinity;
+  for (const [id, top] of intersectingTops) {
+    if (top > bestTop) { bestTop = top; best = id; }
+  }
+  return best;
+}
+
+/**
+ * scrollspy 判定线与锚定落点同源：tab 条高约 50px，分区 scroll-margin-top 76px +
+ * content-wrapper scroll-padding 20px = 96px 落点。阅读带取 [96px, 40% 高度]，
+ * 带内「最靠下」（最新进入阅读带）的分区即正在阅读的分区。
+ */
+const SPY_ROOT_MARGIN = "-96px 0px -60% 0px";
+let sectionObserver: IntersectionObserver | null = null;
+
+function handleIntersections(entries: IntersectionObserverEntry[]): void {
+  for (const entry of entries) {
+    const id = entry.target.id.slice("settings-section-".length);
+    if (entry.isIntersecting) intersectingTops.set(id, entry.boundingClientRect.top);
+    else intersectingTops.delete(id);
+  }
+  // 程序性滚动（tab 点击 / hash 定位 / 高度校准）期间暂停 spy 写入（P3-30）：
+  // 长距离平滑滚动会依次穿过中间分区的阅读带，高亮随之扫一遍再落到目标——
+  // 落点高亮已由 scrollToSection 先行置位，这里等用户重新接管滚动再按视口补正
+  if (anchoredSection) return;
+  const best = pickBestIntersecting();
+  if (best) setActiveSection(best);
+}
+
+/** 滚动到底时最后分区可能够不到阅读带：命中底部即选中最后一个可见分区（与旧版一致） */
+function handleScrollBottom(): void {
+  // 同 P3-30：锚定滚动期间不写高亮（短页面中途触底会把高亮抢到最后一个分区）
+  if (anchoredSection) return;
   const container = scrollContainer.value;
-  const section = settingsForm.value?.querySelector<HTMLElement>(`#settings-section-${id}`);
-  if (!container || !section) return;
+  if (!container) return;
+  if (container.scrollTop + container.clientHeight < container.scrollHeight - 2) return;
+  for (const section of [...sections].reverse()) {
+    const element = sectionElements.get(section.id);
+    if (element && element.offsetParent !== null) { setActiveSection(section.id); break; }
+  }
+}
+
+function setupScrollSpy(): void {
+  const container = scrollContainer.value;
+  if (!container || typeof IntersectionObserver === "undefined") return;
+  sectionObserver = new IntersectionObserver(handleIntersections, {
+    root: container,
+    rootMargin: SPY_ROOT_MARGIN,
+    threshold: 0,
+  });
+  for (const element of sectionElements.values()) sectionObserver.observe(element);
+  container.addEventListener("scroll", handleScrollBottom, { passive: true });
+}
+
+// ===== 分区定位（点击 tab / 旧深链 hash / 命令面板请求共用） =====
+
+let resizeObserver: ResizeObserver | null = null;
+
+/** 搜索隐藏的分区不参与定位（display:none 时 offsetParent 为 null） */
+function visibleSection(id: string): HTMLElement | null {
+  const element = sectionElements.get(id) ?? null;
+  return element && element.offsetParent === null ? null : element;
+}
+
+async function scrollToSection(id: string, behavior: ScrollBehavior = "smooth"): Promise<void> {
+  await nextTick();
+  const section = visibleSection(id);
+  if (!section) return;
   anchoredSection = id;
-  container.scrollTop += section.getBoundingClientRect().top - container.getBoundingClientRect().top - 16;
-  navigation.setActiveSection(id);
+  setActiveSection(id);
+  // 滚动容器是外层 .content-wrapper（页面整体滚动），不手工换算 scrollTop：
+  // 落点由分区的 scroll-margin-top（list.css）与容器 scroll-padding-block（layout.css）
+  // 经 scrollIntoView 对齐，容器与内边距改动无需回这里重调常数
+  section.scrollIntoView({ behavior, block: "start" });
 }
 
 function selectSection(id: string): void {
-  const child = sections.find((section) => section.id === id);
-  if (!child) return;
-  if (route.name === child.name) void scrollToSection(id);
-  else void router.push({ name: child.name });
+  void scrollToSection(id);
+  // 同步 URL 锚点：replace 不产生历史项；hash 已一致时无需动作
+  if (route.hash !== `#${id}`) void router.replace({ hash: `#${id}` });
 }
 
-/** 以视口顶部正在阅读的区域高亮目录，滚动到底时选中最后一类。 */
-function updateActiveSection(): void {
+/** 路由 hash（旧深链重定向 / 命令面板 / 站点内入口）驱动分区定位；vue-router 交付的 hash 已解码 */
+watch(() => route.hash, (hash) => {
+  const id = hash.replace(/^#/, "");
+  if (!id || !sections.some((section) => section.id === id)) return;
+  // tab 点击已先滚并 setActive，watch 里同一分区不再重复滚动
+  if (id !== activeSection.value) void scrollToSection(id, "auto");
+});
+
+watch(navigation.scrollRequest, (request) => { if (request) void scrollToSection(request.id); });
+
+// 窄屏 tab 条横向滚动（overflow-x: auto）：active 变化时把当前 tab 滚入条内视野
+// （P3-31，390px 下当前分区指示大概率停在条外）。block/inline 均 nearest——不做
+// 纵向滚动（条是 sticky 的恒在视口内），横向只滚最小必要距离
+watch(activeSection, () => {
+  void nextTick(() => {
+    tabsNav.value
+      ?.querySelector<HTMLElement>(".settings-tab.active")
+      ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  });
+});
+
+/** 用户开始阅读或编辑后，让浏览器自然保持滚动，不再校准目录定位。
+ *  解除锚定的同时按当前视口补正一次高亮：锚定期间 spy 写入被暂停（P3-30），
+ *  补正让 tab 立即归位，不必等下一次交叉变化事件。 */
+function releaseAnchor(): void {
+  if (!anchoredSection) return;
+  anchoredSection = null;
+  const best = pickBestIntersecting();
+  if (best) setActiveSection(best);
+}
+
+// 滚动容器在 App.vue（<main class="content-wrapper">），本组件无法用模板事件绑定，
+// 挂载后经 closest 解析再挂监听：wheel/touch/pointer/keyboard 任一用户输入即解除
+// 锚定。挂在外层容器而非本页根上，列外空白区的滚轮也计入。
+// passive 与旧模板修饰符一致（都不 preventDefault），卸载成对解绑。
+function bindScrollContainer(): void {
   const container = scrollContainer.value;
   if (!container) return;
-  const top = container.getBoundingClientRect().top + 32;
-  let active = sections[0].id;
-  for (const section of sections) {
-    const element = settingsForm.value?.querySelector<HTMLElement>(`#settings-section-${section.id}`);
-    if (element && element.getBoundingClientRect().top <= top) active = section.id;
-  }
-  if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) active = sections[sections.length - 1].id;
-  navigation.setActiveSection(active);
+  container.addEventListener("wheel", releaseAnchor, { passive: true });
+  container.addEventListener("touchstart", releaseAnchor, { passive: true });
+  container.addEventListener("pointerdown", releaseAnchor);
+  container.addEventListener("keydown", releaseAnchor);
 }
 
-/** 用户开始阅读或编辑后，让浏览器自然保持滚动，不再校准目录定位。 */
-function releaseAnchor(): void { anchoredSection = null; }
+function unbindScrollContainer(): void {
+  const container = scrollContainer.value;
+  if (!container) return;
+  container.removeEventListener("wheel", releaseAnchor);
+  container.removeEventListener("touchstart", releaseAnchor);
+  container.removeEventListener("pointerdown", releaseAnchor);
+  container.removeEventListener("keydown", releaseAnchor);
+}
 
-watch(() => route.name, (name) => {
-  void scrollToSection(activeChildId(SETTINGS_NAV_CHILDREN, String(name)) ?? "monitor");
-});
-watch(navigation.scrollRequest, (request) => { if (request) void scrollToSection(request.id); });
+function panelSlot(key: string | undefined) {
+  return key ? SETTINGS_PANEL_SLOTS[key] : undefined;
+}
+
 onMounted(() => {
-  void scrollToSection(activeChildId(SETTINGS_NAV_CHILDREN, String(route.name)) ?? "monitor");
+  // 解析真正的滚动容器（App.vue 的 content-wrapper）：从本页表单向上取最近命中，
+  // 不跨组件传 ref；解析必须先于首次定位与监听绑定
+  scrollContainer.value = settingsForm.value?.closest<HTMLElement>(".content-wrapper") ?? null;
+  bindScrollContainer();
+  cacheSectionElements();
+  applySettingsSearch(settingsForm.value, searchResult.value);
+  setupScrollSpy();
+  // 初始定位：URL hash（旧深链经 router 重定向）优先，否则落首个分区；即时滚动避免入场动画
+  const initialId = route.hash.replace(/^#/, "");
+  void scrollToSection(sections.some((section) => section.id === initialId) ? initialId : (sections[0]?.id ?? ""), "auto");
   // 环境状态和默认配置异步加载会改变前面区域的高度，首次定位随之校准。
   resizeObserver = new ResizeObserver(() => {
-    if (anchoredSection) void scrollToSection(anchoredSection);
-    else updateActiveSection();
+    if (anchoredSection) void scrollToSection(anchoredSection, "auto");
   });
   if (settingsForm.value) resizeObserver.observe(settingsForm.value);
   if (scrollContainer.value) resizeObserver.observe(scrollContainer.value);
 });
-onBeforeUnmount(() => { resizeObserver?.disconnect(); });
+
+onBeforeUnmount(() => {
+  unbindScrollContainer();
+  sectionObserver?.disconnect();
+  resizeObserver?.disconnect();
+  if (searchFrame !== null) cancelAnimationFrame(searchFrame);
+  // 离开设置页即清空共享查询词：顶栏输入框只在设置路由渲染，
+  // 残留过滤会让下次进入时表单缺分区且无输入框可清
+  searchQuery.value = "";
+});
 
 const saveFailed = computed(() => config.saveFailed.value);
 const configLoadFailed = computed(() => config.configLoadFailed.value);
@@ -99,16 +272,30 @@ function handleSave() {
 </script>
 
 <template>
-  <div class="page-content settings-page">
-    <div class="settings-mobile-jump form-group">
-      <label for="settings-jump">跳转到</label>
-      <select id="settings-jump" :value="navigation.activeSection.value"
-        @change="selectSection(($event.target as HTMLSelectElement).value)">
-        <option v-for="section in sections" :key="section.id" :value="section.id">{{ section.label }}</option>
-      </select>
-    </div>
-    <div ref="scrollContainer" class="settings-scroll" @scroll.passive="updateActiveSection"
-      @wheel.passive="releaseAnchor" @touchstart.passive="releaseAnchor" @pointerdown="releaseAnchor" @keydown="releaseAnchor">
+  <div class="page-content settings-page page-in">
+    <!-- 分区内导航：sticky 顶部 tab 条（窄屏横向滚动），替代旧 settings-mobile-jump select -->
+    <nav ref="tabsNav" class="settings-tabs" aria-label="设置分区导航">
+      <button
+        v-for="section in sections"
+        :key="section.id"
+        type="button"
+        class="settings-tab"
+        :class="{ active: activeSection === section.id }"
+        :disabled="searchResult.hiddenSectionIds.has(section.id)"
+        :aria-current="activeSection === section.id ? 'location' : undefined"
+        :title="section.title"
+        @click="selectSection(section.id)"
+      >
+        <IconApp :name="section.icon" class="settings-tab-icon" />
+        <span>{{ section.label }}</span>
+      </button>
+    </nav>
+    <!-- 搜索输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，见
+         useSettingsSearch）；本页只保留无命中的空态提示。 -->
+    <p v-if="searchEmpty" class="settings-search-empty" role="status">无匹配的设置项</p>
+    <!-- 仅为承载水平内缩与表单间距；滚动已交给外层 content-wrapper，
+         scroll/spy 监听在 onMounted 里挂到该容器（见 setupScrollSpy） -->
+    <div class="settings-scroll">
       <div v-if="configLoadFailed" class="settings-load-failed">
         <span>配置加载失败，当前显示的是默认值。为避免覆盖服务器配置，保存已禁用。</span>
         <button type="button" class="btn btn-sm" @click="handleRetryLoad">重试</button>
@@ -119,15 +306,40 @@ function handleSave() {
         规范默认 `type="submit"`，点击即触发表单提交 → 导航到当前 URL → 整个 SPA 重载
         （实测：token 查询串被 GET 表单覆盖掉，随即丢失鉴权上下文）。
 
-        子页按钮仍应显式写 `type="button"`（本文件守卫只是纵深防御）；本处拦截保证
+        子面板按钮仍应显式写 `type="button"`（本文件守卫只是纵深防御）；本处拦截保证
         即使漏写也只是不提交，而不会刷新页面。preventDefault 放在最前，避免任何
-        子页逻辑先跑再被导航打断。
+        子面板逻辑先跑再被导航打断。
       -->
       <form ref="settingsForm" autocomplete="on" class="settings-form" @submit.prevent>
-        <section v-for="section in sections" :key="section.id" :id="`settings-section-${section.id}`"
-          class="settings-category" :aria-labelledby="`settings-heading-${section.id}`">
+        <section
+          v-for="section in sections"
+          :key="section.id"
+          :id="`settings-section-${section.id}`"
+          class="settings-category"
+          :aria-labelledby="`settings-heading-${section.id}`"
+        >
           <h2 :id="`settings-heading-${section.id}`" class="settings-category-heading">{{ section.label }}</h2>
-          <component :is="section.component" />
+          <div class="settings-list-page" :class="section.bodyClass">
+            <template v-for="panel in section.panels" :key="panel.id">
+              <!-- chromeless 面板：槽位组件自绘整面板（折叠卡 / 动态卡头） -->
+              <component :is="panelSlot(panel.component)" v-if="panel.chromeless" />
+              <section v-else class="settings-panel">
+                <div class="settings-card-header">
+                  <h2>{{ panel.title }}</h2>
+                </div>
+                <div class="card-body">
+                  <template v-for="entry in panel.entries" :key="entry.id">
+                    <component
+                      v-if="'slot' in entry"
+                      :is="panelSlot(entry.slot)"
+                      :data-settings-unit="entry.id"
+                    />
+                    <SchemaRow v-else :row="entry" :data-settings-row="entry.id" />
+                  </template>
+                </div>
+              </section>
+            </template>
+          </div>
         </section>
       </form>
     </div>

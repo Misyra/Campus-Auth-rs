@@ -1,37 +1,27 @@
 /* responsive.css — 全站响应式断点层。
  *
- * ═══ 断点尺（全站只用这四个值，勿再新增中间值）═══
- *   640  手机窄屏（单列、满宽按钮、贴边弹窗）
- *   768  窄屏（底部导航、内边距收一档、表单行变单列）
- *   900  平板窄区（双列栅格降为单列、调试面板双栏改纵排、表格开始让列）
- *   1100 平板宽区 / 小笔记本（设置页签与面板栅格降为单列、看板栅格降列）
- * 反向（≥）只有 1100 一档，用于「够宽时才开双列」（settings/common.css、
- * environment.css）。
+ * 断点取值的权威出处是 index.css 文件头的「断点约定清单」（单一事实源）：
+ * 主轴 640 / 768 / 900 / 1100 四档，另有 360（max-width 极小屏）与 1800
+ * （min-width 超宽屏）两个特例档。归并散值的原则不变：就近落到清单某一档，
+ * 且**只允许让降级更早发生**（max-width 阈值上调 / min-width 阈值下调，
+ * 并集只多不少），避免把本已拥挤的区间放宽。
  *
  * 2026-09-24 收敛前的散值是 520 / 640 / 720 / 768 / 860 / 900 / 960 / 980 /
  * 1024 / 1100 / min-1080 —— 11 个取值、其中 5 个只出现在单个文件里，
- * 结果同一类「窄屏降级」在不同页面于不同宽度触发。映射规则：就近落到上表某一档，
- * 且**只允许让降级更早发生**（并集只多不少），避免把本已拥挤的区间放宽。
+ * 结果同一类「窄屏降级」在不同页面于不同宽度触发。
  */
 
 @media (max-width: 1100px) {
-  .settings-panel-grid {
-    grid-template-columns: 1fr;
-  }
-
-  /* 原 1024 档并入本档：看板栅格与设置页签同属「平板宽区装不下多列」 */
+  /* 原 1024 档并入本档：统计卡在平板宽区降为两列 */
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-    flex: none;
-  }
-
-  /* 单列看板按内容滚动，避免历史记录把下方实时日志挤出可见区域。 */
-  .content-wrapper > .page-content:has(.stats-grid) { height: auto; min-height: 100%; overflow: visible; }
-  .history-card .card-body { max-height: 300px; }
+  /* 单列看板按内容自然滚动：诊断/日志折单列后，历史卡已是页面末位全宽卡，
+     其列表限高由 dashboard.css 的 .history-list 统一承担，无需窄屏再加码。
+     （旧 :has(.stats-grid) 高度豁免的本档重申已随外壳契约化退役：
+     height:auto/overflow:visible 是 UA 默认值，min-height:100% 收口进
+     dashboard.css 的 .dashboard-page 差异声明，全宽窄屏下同样生效。） */
   .dashboard-page .log-card { height: 440px; min-height: 320px; }
 }
 
@@ -53,7 +43,7 @@
     padding: 6px 10px calc(6px + env(safe-area-inset-bottom, 0px));
     border-right: none;
     border-top: 1px solid var(--border);
-    box-shadow: 0 -2px 12px #00000006;
+    box-shadow: var(--shadow-sidebar-mobile);
   }
 
   .sidebar-header {
@@ -71,7 +61,7 @@
   .nav-item span { display: inline; font-size: var(--text-xs); }
   .nav-item.nav-task-mobile,
   .nav-item.nav-settings-mobile { display: flex; }
-  .nav-item { flex-direction: column; gap: 5px; text-align: center; min-height: 58px; }
+  .nav-item { flex-direction: column; justify-content: center; gap: 5px; text-align: center; min-height: 58px; padding: 8px 2px 5px; }
   .nav-item.active::before { top: 3px; bottom: auto; left: 50%; width: 16px; height: 2px; transform: translateX(-50%); }
   .btn.mobile-quit { display: inline-flex; }
 
@@ -85,11 +75,6 @@
 
   .status-badge .status-dot {
     font-size: var(--text-md);
-  }
-
-  .nav-item {
-    justify-content: center;
-    padding: 8px 2px 5px;
   }
 
   /* 底栏只保留一级导航，任务类别在页内导航中切换。 */
@@ -116,6 +101,14 @@
     gap: 4px;
   }
 
+  /* 设置路由的顶栏搜索是真输入框（≤1100px 下 min-width:180px），窄屏会把页面
+     标题挤没（390px 实测 .top-title-area 仅剩 16px，标题只露出半个字）：
+     改按视口宽度收缩，为紧凑标题（page-title-compact）留出可读宽度 */
+  .topbar-search--input {
+    min-width: 0;
+    width: clamp(110px, 30vw, 180px);
+  }
+
   .top-bar > .ws-reconnect-inline {
     grid-column: 1 / -1;
     grid-row: 2;
@@ -127,18 +120,9 @@
     flex: 1;
   }
 
+  /* E6 起通知面板由 AppPopover portal 到 body、floating-ui 定位（视口避让由库负责，
+     旧的 .top-bar 后代定位覆盖已随之失效删除），这里只保留窄屏的尺寸收窄。 */
   .notification-dropdown {
-    width: 280px;
-    right: 0;
-  }
-
-  /* 弹层相对顶栏定位，避免铃铛右侧的操作把弹层推到视口外。 */
-  .notification-wrapper { position: static; }
-  .notification-wrapper > .btn { position: relative; }
-  .top-bar .notification-dropdown {
-    right: 16px;
-    top: calc(100% + 4px);
-    margin-top: 0;
     width: min(360px, calc(100vw - 32px));
     max-height: min(400px, calc(100dvh - 160px));
   }
@@ -148,8 +132,10 @@
     scrollbar-gutter: auto;
   }
 
-  .form-row {
-    grid-template-columns: 1fr;
+  /* 任务表脚部的操作提示在窄屏折成两行（与计数挤在一起），只留计数一行 */
+  .tsk-foot > .tsk-spacer,
+  .tsk-foot > span:last-child {
+    display: none;
   }
 
   /* 日志行四列在窄屏下折为两行：时间+徽章一行，消息独占一行，避免挤出视口 */
@@ -185,13 +171,9 @@
 }
 
 @media (max-width: 640px) {
-  .field-help::after {
-    left: calc(100% + 8px);
-    /* 窄屏收一档但不低于 420px：本规则同时作用于 `--wide` 变体，写太小会把长说明
-       压成一条竖线；真正"放不下"的场景由组件按触发点两侧实测剩余空间写入的
-       `--tip-max` 收（见 FieldHelp.syncAutoFlip），必须一并尊重，否则本规则会把它覆盖掉 */
-    max-width: min(var(--tip-max, 420px), calc(100vw - 48px));
-  }
+  /* 帮助气泡（.field-help-tip）窄屏不再需要覆盖规则：Reka Tooltip 迁移后，
+     碰撞定位按视口实测收（collisionPadding 32px + --reka-tooltip-content-available-width），
+     旧 ::after 的 8px 间距 / 100vw-48px 上界已被库级取值取代（form.css 气泡段）。 */
 
   /* 通用弹窗窄屏：全幅贴边（复用向导的全幅模式），确认框同理 */
   .modal-overlay {

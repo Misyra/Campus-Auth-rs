@@ -20,12 +20,123 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::config::ConfigApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::state::AppState;
+
+// ---- 契约 DTO（T5-1c uninstall 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。检测/清理/卸载响应均为
+// handler 内 `json!` 组装形状的镜像 DTO（handler 仍返回 `Json<Value>`）。
+
+/// GET /api/uninstall/detect 的单项系统残留
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UninstallDetectItem {
+    /// 项标识：user_data / playwright / autostart
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 是否存在（自启动项为是否已注册）
+    pub exists: bool,
+    /// 补充说明（路径或状态描述）
+    pub description: String,
+}
+
+/// 程序目录 / 卸载助手条目
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UninstallEntryData {
+    /// 展示名称（"程序目录" / "卸载助手"）
+    pub label: String,
+    /// 完整路径
+    pub path: String,
+    /// 是否存在
+    pub exists: bool,
+}
+
+/// base_path 下的用户数据目录条目
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UninstallDataDirData {
+    /// 目录标识（`crate::uninstall::DATA_DIR_NAMES` 七项之一）
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 完整路径
+    pub path: String,
+    /// 是否存在（不存在的目录如实标注）
+    pub exists: bool,
+}
+
+/// GET /api/uninstall/detect 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UninstallDetectData {
+    /// base_path 之外的系统残留清单（用户数据目录 / Playwright 缓存 / 自启动）
+    pub items: Vec<UninstallDetectItem>,
+    /// 程序目录（保留数据时只移除程序文件）
+    pub program: UninstallEntryData,
+    /// 卸载助手是否在位（不在位时 purge 必失败，界面据此先拦下）
+    pub helper: UninstallEntryData,
+    /// base_path 下的用户数据目录（勾选「保留配置与任务」则保留）
+    pub data: Vec<UninstallDataDirData>,
+    /// 非 null 表示拒绝卸载及原因（源码仓库 / cargo 构建输出等守卫）
+    pub blocked: Option<String>,
+    /// 「保留数据」变体的拒绝原因；`blocked` 非 null 时恒为 null
+    pub keep_data_blocked: Option<String>,
+}
+
+/// POST /api/uninstall 单步结果
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UninstallStepData {
+    /// 步骤标识：autostart / user_data / playwright
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 该步是否成功
+    pub success: bool,
+    /// 结果说明
+    pub message: String,
+}
+
+/// POST /api/uninstall 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UninstallCleanupData {
+    /// 三步执行结果（互不阻断，逐项返回）
+    pub results: Vec<UninstallStepData>,
+    /// 汇总提示（全部成功 / 部分失败）
+    pub message: String,
+}
+
+/// POST /api/uninstall/purge 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PurgeUninstallData {
+    /// 汇总提示（按需追加「待应用更新未能取消」与「加密密钥尚未清理」警示）
+    pub message: String,
+    /// 是否勾选了保留用户数据
+    pub kept_user_data: bool,
+    /// 实际删除的程序目录
+    pub install_dir: String,
+    /// 计划删除的用户数据目录（勾选保留时为空数组）
+    pub data_dirs: Vec<UninstallPurgeDirData>,
+    /// 待应用更新是否已成功取消
+    pub cancelled_pending_update: bool,
+    /// 取消失败时为 true（退出后更新助手仍可能把程序装回来）
+    pub pending_update_left: bool,
+}
+
+/// POST /api/uninstall/purge 计划删除的用户数据目录条目
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UninstallPurgeDirData {
+    /// 目录标识（`crate::uninstall::DATA_DIR_NAMES` 之一）
+    pub key: String,
+    /// 展示名称
+    pub label: String,
+    /// 完整路径
+    pub path: String,
+}
 
 /// 用户数据目录（密码加密密钥等）：`~/.campus_network_auth`
 fn user_data_dir() -> Option<PathBuf> {
@@ -172,6 +283,16 @@ fn current_install_dir() -> Result<PathBuf, ApiError> {
 /// - `data`：`base_path` 下的用户数据目录（勾选「保留配置与任务」则保留）；
 /// - `blocked`：非 `null` 表示**拒绝卸载**及原因（如该目录是源码仓库、cargo 构建输出）。
 ///   界面据此禁用卸载按钮并显示原因——守卫在这里先跑一次，用户还在界面上能看到。
+#[utoipa::path(
+    get,
+    path = "/api/uninstall/detect",
+    operation_id = "get_api_uninstall_detect",
+    tag = "uninstall",
+    responses(
+        (status = 200, description = "卸载将清理的全部内容清单（不执行任何删除）", body = DataEnvelope<UninstallDetectData>),
+        (status = 500, description = "无法确定程序所在目录", body = ErrorResponse),
+    )
+)]
 pub async fn detect_uninstall(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -242,7 +363,7 @@ pub async fn detect_uninstall(
 /// 每一步尽力而为、互不阻断，逐项返回结果。
 ///
 /// POST /api/uninstall 的请求体（可选：不带 body 时按"不保留"处理，老调用方不受影响）
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, ToSchema)]
 pub struct CleanupRequest {
     /// 与 [`PurgeRequest::keep_user_data`] 同一个开关
     ///
@@ -261,15 +382,31 @@ pub struct CleanupRequest {
 /// **不删程序本身**（那需要主进程先退出，见 [`purge_uninstall`]）。保留这个只清残留的
 /// 端点是有意的：它同时是"重置环境"的入口——清掉浏览器缓存与自启动注册后程序照常可用，
 /// 不必卸载。前端「卸载」流程会紧接着调用 `purge`。
+#[utoipa::path(
+    post,
+    path = "/api/uninstall",
+    operation_id = "post_api_uninstall",
+    tag = "uninstall",
+    request_body = Option<CleanupRequest>,
+    responses(
+        (status = 200, description = "三步清理结果（关闭自启动 → 用户数据目录 → Playwright 缓存，互不阻断；部分失败仍为 200，见各步 success）", body = DataEnvelope<UninstallCleanupData>),
+        (status = 400, description = "OpenWrt 版不支持本端点", body = ErrorResponse),
+    )
+)]
 pub async fn uninstall(
     State(config): State<Arc<dyn ConfigApi>>,
     body: Option<Json<CleanupRequest>>,
 ) -> Result<Json<Value>, ApiError> {
     let keep_user_data = body.map(|b| b.0.keep_user_data).unwrap_or(false);
-    if cfg!(feature = "openwrt") {
-        return Err(ApiError::BadRequest(
-            "OpenWrt 版请通过 SSH 停止并禁用 campus-auth 服务后卸载".into(),
-        ));
+    // OpenWrt / 安卓端无端内卸载形态：安卓 APK 由系统应用管理卸载
+    if cfg!(any(feature = "openwrt", feature = "android")) {
+        return Err(ApiError::BadRequest(String::from(
+            if cfg!(feature = "android") {
+                "安卓端请通过系统应用管理卸载 APK"
+            } else {
+                "OpenWrt 版请通过 SSH 停止并禁用 campus-auth 服务后卸载"
+            },
+        )));
     }
     // 卸载为破坏性操作（删用户数据/加密密钥/浏览器缓存/自启动注册），info 留痕各步骤
     tracing::info!(
@@ -355,7 +492,11 @@ pub async fn uninstall(
 }
 
 /// POST /api/uninstall/purge 的请求体
-#[derive(Debug, Deserialize)]
+///
+/// **本端点不处理用户数据目录（加密密钥 `~/.campus_network_auth`）**——那由第一步
+/// `POST /api/uninstall` 负责；完整卸载须先调 `POST /api/uninstall` 且两步的
+/// `keep_user_data` 传同一个值。
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PurgeRequest {
     /// 保留用户数据（`config` / `tasks` / `logs` / `environment` / `update`）
     ///
@@ -363,6 +504,24 @@ pub struct PurgeRequest {
     /// 程序文件照样删掉，但方案/任务/日志留着，重装后直接可用。
     #[serde(default)]
     pub keep_user_data: bool,
+}
+
+/// 组装 purge 响应的 message：基础文案 + 按需追加提示（抽成纯函数便于单测）
+fn purge_message(pending_update_left: bool, user_data_left: bool) -> String {
+    let mut message = if pending_update_left {
+        "正在卸载，程序即将退出（注意：待应用的更新未能取消，程序可能被重新安装）".to_string()
+    } else {
+        "正在卸载，程序即将退出".to_string()
+    };
+    if user_data_left {
+        // 本端点只删程序本身；base_path 之外的加密密钥目录归第一步 /api/uninstall 管，
+        // keep_user_data=false 单独调 purge 时它会留在盘上——出声提示，别让用户
+        // 以为卸载已"片甲不留"，也别误导他手动去删（保留配置场景下删了就解不开密文）
+        message.push_str(
+            "；注意：用户数据目录（加密密钥）尚未清理，完整卸载须先调 POST /api/uninstall 且 keep_user_data 同值",
+        );
+    }
+    message
 }
 
 /// POST /api/uninstall/purge — 删除程序本身并退出（卸载第二步）
@@ -379,14 +538,31 @@ pub struct PurgeRequest {
 ///
 /// 响应在关闭信号发出前构造：watch 的 `send` 只做通知，Axum 的优雅关闭会把这一个
 /// 响应发完再停（与 `restart_app` 同一模式）。
+#[utoipa::path(
+    post,
+    path = "/api/uninstall/purge",
+    operation_id = "post_api_uninstall_purge",
+    tag = "uninstall",
+    request_body = PurgeRequest,
+    responses(
+        (status = 200, description = "卸载助手已启动，本进程即将退出以放行删除", body = DataEnvelope<PurgeUninstallData>),
+        (status = 400, description = "OpenWrt 版不支持、目录守卫拒绝（源码仓库 / cargo 构建输出）或卸载助手缺失", body = ErrorResponse),
+        (status = 500, description = "卸载助手启动失败（程序文件未被删除，更新入口已恢复）", body = ErrorResponse),
+    )
+)]
 pub async fn purge_uninstall(
     State(state): State<AppState>,
     Json(body): Json<PurgeRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    if cfg!(feature = "openwrt") {
-        return Err(ApiError::BadRequest(
-            "OpenWrt 版请通过 SSH 停止并禁用 campus-auth 服务后卸载".into(),
-        ));
+    // OpenWrt / 安卓端无端内卸载形态：安卓 APK 由系统应用管理卸载
+    if cfg!(any(feature = "openwrt", feature = "android")) {
+        return Err(ApiError::BadRequest(String::from(
+            if cfg!(feature = "android") {
+                "安卓端请通过系统应用管理卸载 APK"
+            } else {
+                "OpenWrt 版请通过 SSH 停止并禁用 campus-auth 服务后卸载"
+            },
+        )));
     }
     let base_path = state.config.base_path();
     let install_dir = current_install_dir()?;
@@ -434,12 +610,12 @@ pub async fn purge_uninstall(
     let _ = state.shutdown_tx.send(());
     crate::launcher::spawn_exit_watchdog(30);
 
+    // keep_user_data=false 单独调 purge（未先走第一步 /api/uninstall）时，加密密钥
+    // 目录会留在盘上：存在即追加 message 提示；勾选保留的场景属刻意保留，不提示
+    let user_data_left = !body.keep_user_data && user_data_dir().is_some_and(|p| p.exists());
+
     Ok(data(serde_json::json!({
-        "message": if pending_update_left {
-            "正在卸载，程序即将退出（注意：待应用的更新未能取消，程序可能被重新安装）"
-        } else {
-            "正在卸载，程序即将退出"
-        },
+        "message": purge_message(pending_update_left, user_data_left),
         "kept_user_data": body.keep_user_data,
         "install_dir": plan.install_dir.to_string_lossy(),
         "data_dirs": plan
@@ -558,7 +734,30 @@ mod tests {
         assert_eq!(v["message"], "ok");
     }
 
-    /// 卸载清单：程序目录 + 五个数据目录，逐项给出路径与存在性
+    /// purge 响应 message：仅在密钥目录未清理时追加提示
+    ///
+    /// 回归：purge 单独调用不删 `~/.campus_network_auth`（刻意设计），但静默
+    /// 留下密钥目录会让用户误以为卸载已彻底完成。
+    #[test]
+    fn purge_message_appends_user_data_hint_only_when_left() {
+        assert_eq!(purge_message(false, false), "正在卸载，程序即将退出");
+        let pending = purge_message(true, false);
+        assert!(pending.contains("更新未能取消"), "更新未取消的警示不得丢失");
+        assert!(
+            !pending.contains("加密密钥"),
+            "密钥不残留时不得出现未清理提示"
+        );
+        let hint = purge_message(false, true);
+        assert!(hint.contains("用户数据目录（加密密钥）尚未清理"));
+        assert!(
+            hint.contains("POST /api/uninstall"),
+            "提示须给出补做第一步的路径"
+        );
+        let both = purge_message(true, true);
+        assert!(both.contains("更新未能取消") && both.contains("尚未清理"));
+    }
+
+    /// 卸载清单：程序目录 + 七个数据目录，逐项给出路径与存在性
     ///
     /// 「删除时必须明确列出会删哪些内容」是用户拍板的口径，故清单必须逐项可读；
     /// 存在性也要真实（不存在的目录不该被列成"将删除"）。
@@ -578,7 +777,7 @@ mod tests {
         assert_eq!(inv["program"]["label"], "程序目录");
 
         let data = inv["data"].as_array().unwrap();
-        assert_eq!(data.len(), 5, "五个用户数据目录都要列出");
+        assert_eq!(data.len(), 7, "七个用户数据目录都要列出");
         let by_key = |k: &str| {
             data.iter()
                 .find(|d| d["key"] == k)
@@ -588,6 +787,8 @@ mod tests {
         assert_eq!(by_key("config")["label"], "配置与方案");
         assert_eq!(by_key("config")["exists"], true);
         assert_eq!(by_key("tasks")["label"], "任务与脚本");
+        assert_eq!(by_key("events")["label"], "事件流");
+        assert_eq!(by_key("browser_profiles")["label"], "持久浏览器会话");
         assert_eq!(by_key("logs")["exists"], false, "不存在的目录如实标注");
         assert_eq!(
             by_key("config")["path"],

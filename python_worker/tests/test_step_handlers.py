@@ -561,6 +561,158 @@ def test_frame_scoped_locators_use_frame_locator():
 
     asyncio.run(run())
 
+
+# ── 嵌套 frame 链（' >> ' 分隔，录制器 iframe 契约）──
+
+
+def test_split_frame_chain_variants():
+    """链拆解：' >> ' 分段并去空白；链外规格原样单元素（历史行为零变化）。"""
+    assert step_handlers._split_frame_chain("iframe#a >> iframe#b >> #c") == [
+        "iframe#a", "iframe#b", "#c",
+    ]
+    assert step_handlers._split_frame_chain("  iframe#a   >>   iframe#b ") == [
+        "iframe#a", "iframe#b",
+    ]
+    assert step_handlers._split_frame_chain("#single-frame") == ["#single-frame"]
+    # 病态全空段：回退原串单元素，绝不产出空选择器段
+    assert step_handlers._split_frame_chain(" >> ") == [" >> "]
+
+
+def test_looks_like_frame_css_detects_chain():
+    """含 ' >> ' 即按 CSS 链处理：结构段（iframe:nth-child）不再误判成帧名。"""
+    assert step_handlers._looks_like_frame_css("iframe:nth-child(2) >> iframe#b")
+    assert step_handlers._looks_like_frame_css("div:nth-child(2) >> #inner")
+    assert step_handlers._looks_like_frame_css("#outer >> #inner")
+    assert not step_handlers._looks_like_frame_css("plain-frame-name")
+
+
+def test_match_frame_chain_walks_nested_frame_locators():
+    """嵌套链逐层 frame_locator 下钻；单层规格直传（历史行为零变化）。"""
+    calls: list = []
+
+    class ChainScope:
+        def frame_locator(self, spec):
+            calls.append(spec)
+            return ChainScope()
+
+    class ChainPage:
+        def frame_locator(self, spec):
+            calls.append(spec)
+            return ChainScope()
+
+    page = ChainPage()
+    scope = step_handlers._match_frame(
+        page, "iframe#outer >> iframe#inner", allow_css_fallback=True
+    )
+    assert calls == ["iframe#outer", "iframe#inner"]
+    assert isinstance(scope, ChainScope)
+
+    calls.clear()
+    step_handlers._match_frame(page, "#single-frame", allow_css_fallback=True)
+    assert calls == ["#single-frame"], "单层规格一次调用原样直传"
+
+
+def test_match_frame_chain_rejected_for_script_steps():
+    """脚本/URL 类步骤对 CSS 链显式报错（FrameLocator 无法执行脚本）。"""
+    class NoFramesPage:
+        def frame_locator(self, spec):  # pragma: no cover - 不应触达
+            raise AssertionError("allow_css_fallback=False 不得走 frame_locator")
+
+    with pytest.raises(WorkerError) as ei:
+        step_handlers._match_frame(
+            NoFramesPage(), "iframe#a >> iframe#b", allow_css_fallback=False
+        )
+    assert "不支持 CSS 选择器" in ei.value.message
+
+
+def test_resolve_frame_scope_chain_immediate_and_rejected_for_scripts():
+    """_resolve_frame_scope 对 CSS 链即时逐层解析（不进 name 轮询等待）。"""
+    import asyncio
+
+    calls: list = []
+
+    class ChainScope:
+        def frame_locator(self, spec):
+            calls.append(spec)
+            return ChainScope()
+
+    class ChainPage:
+        def frame_locator(self, spec):
+            calls.append(spec)
+            return ChainScope()
+
+    ctx = StepContext(page=ChainPage())
+    scope = asyncio.run(step_handlers._resolve_frame_scope(
+        ctx, "iframe#outer >> iframe#inner", allow_css_fallback=True
+    ))
+    assert calls == ["iframe#outer", "iframe#inner"]
+    assert isinstance(scope, ChainScope)
+    with pytest.raises(WorkerError):
+        asyncio.run(step_handlers._resolve_frame_scope(
+            ctx, "iframe#outer >> iframe#inner", allow_css_fallback=False
+        ))
+
+
+def test_frame_scoped_locator_chain_walks_levels():
+    """端到端：步骤 frame 为 ' >> ' 嵌套链时 click 在最内层 frame 作用域执行。"""
+    import asyncio
+
+    from step_handlers import run_step_async
+
+    class FakeScopedLocator:
+        def __init__(self, page):
+            self._page = page
+
+        @property
+        def first(self):
+            return self
+
+        async def click(self, timeout=None):
+            self._page.clicks.append("click")
+            return None
+
+        async def evaluate(self, script, arg=None, timeout=None):
+            self._page.evaluates.append((script, arg))
+
+        async def wait_for(self, state=None, timeout=None):
+            return None
+
+    class FakeChainScope:
+        def __init__(self, page):
+            self._page = page
+
+        def frame_locator(self, spec):
+            self._page.frame_calls.append(spec)
+            return self
+
+        def locator(self, selector):
+            self._page.locator_calls.append(selector)
+            return FakeScopedLocator(self._page)
+
+    class FakeChainPage:
+        def __init__(self):
+            self.frame_calls = []
+            self.locator_calls = []
+            self.clicks = []
+            self.evaluates = []
+
+        def frame_locator(self, spec):
+            self.frame_calls.append(spec)
+            return FakeChainScope(self)
+
+    async def run():
+        page = FakeChainPage()
+        step = StepConfig.from_dict(
+            {"id": "c1", "type": "click", "selector": "#btn",
+             "frame": "iframe#outer >> iframe#inner"}
+        )
+        await run_step_async(page, step, StepContext(page=page))
+        assert page.frame_calls == ["iframe#outer", "iframe#inner"], "逐层下钻"
+        assert page.locator_calls == ["#btn"]
+        assert page.clicks, "点击在最内层 frame 作用域执行"
+
+    asyncio.run(run())
+
 def test_assert_text_scopes_text_to_selected_element():
     """assert_text 必须在 selector 指定的元素内等待文本。"""
     import asyncio

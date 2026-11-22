@@ -8,7 +8,7 @@
   position: fixed;
   inset: 0;
   z-index: var(--z-top);
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -24,7 +24,7 @@
 
 /* 沉浸预览修饰：截图放大/背景预览等大图场景加深遮罩（与普通 0.6 区分） */
 .modal-overlay--preview {
-  background: rgba(0, 0, 0, 0.85);
+  background: var(--overlay-heavy);
 }
 
 .modal-container {
@@ -37,7 +37,9 @@
   border-radius: var(--radius-xl);
   width: 90%;
   max-width: 560px;
+  /* 移动端浏览器工具栏收放会吃掉 vh 高度，dvh 兜底（vh 在前作回退），下同 */
   max-height: 85vh;
+  max-height: 85dvh;
   display: flex;
   flex-direction: column;
   box-shadow: var(--shadow-xl);
@@ -59,6 +61,7 @@
   max-width: 1200px;
   width: 96%;
   max-height: 92vh;
+  max-height: 92dvh;
 }
 
 .modal-header {
@@ -78,19 +81,8 @@
 .modal-body {
   padding: var(--space-lg);
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1;
-}
-
-/* 弹窗内的"玻璃"改指比弹窗面**更深**一档（浅色主题限定）。
-   弹窗面已抬到近白（`--bg-modal: #fbfcfe`），控件若仍用 `--bg-glass`（70% 白）
-   与底色只差两个色阶，"这是个输入框"就只剩边框在传达；深色主题本来就是"字段比弹窗深"
-   （rgba(15,23,42,.5) vs rgba(30,41,59,.97)），浅色主题对齐同一口径。
-   改的是作用域内的令牌而不是逐个控件选择器：input / textarea / CustomSelect 触发器
-   都读这两个令牌，一处生效、后续新增控件自动跟随。 */
-[data-theme="light"] .modal-container,
-[data-theme="light"] .confirm-dialog {
-  --bg-glass: rgba(var(--slate-rgb), 0.1);
-  --bg-glass-heavy: rgba(var(--slate-rgb), 0.17);
 }
 
 .modal-footer {
@@ -110,6 +102,19 @@
   max-width: 440px;
   padding: var(--space-lg);
   box-shadow: var(--shadow-xl);
+}
+
+/* 弹窗内的"玻璃"改指比弹窗面**更深**一档（浅色主题限定）。
+   弹窗面已抬到近白（`--bg-modal: #fbfcfe`），控件若仍用 `--bg-glass`（70% 白）
+   与底色只差两个色阶，"这是个输入框"就只剩边框在传达；深色主题本来就是"字段比弹窗深"
+   （rgba(15,23,42,.5) vs rgba(30,41,59,.97)），浅色主题对齐同一口径。
+   改的是作用域内的令牌而不是逐个控件选择器：input / textarea / CustomSelect 触发器
+   都读这两个令牌，一处生效、后续新增控件自动跟随。
+   （按 no-descending-specificity 排在 .confirm-dialog 基础规则之后。） */
+[data-theme="light"] .modal-container,
+[data-theme="light"] .confirm-dialog {
+  --bg-glass: rgba(var(--slate-rgb), 0.1);
+  --bg-glass-heavy: rgba(var(--slate-rgb), 0.17);
 }
 
 /* 确认框随 modal-fade 过渡进出（旧 modalFadeIn keyframes 已退役，见文件尾过渡定义） */
@@ -133,7 +138,7 @@
 .confirm-section + .confirm-section { border-top: 1px solid var(--border); }
 .confirm-section h4 { margin: 0 0 4px; font-size: var(--text-base); font-weight: 500; color: var(--text-primary); }
 .confirm-section p { margin: 0; color: var(--text-secondary); font-size: var(--text-md); line-height: 1.6; overflow-wrap: anywhere; white-space: pre-line; }
-.confirm-dialog:has(.confirm-sections) { max-height: 85vh; overflow-y: auto; }
+.confirm-dialog:has(.confirm-sections) { max-height: 85vh; max-height: 85dvh; overflow-y: auto; }
 
 .confirm-message {
   font-size: var(--text-base);

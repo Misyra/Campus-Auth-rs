@@ -3,7 +3,10 @@
  * 首次启动配置向导（此前仅协议确认，现扩为五步）：
  * 使用协议 → 登录方式 → 环境准备（仅浏览器渠道）→ 学校与任务匹配 → 完成。
  *
- * - 全屏阻断例外：无 Teleport/关闭入口，打开期间锁定背景滚动（沿用原协议向导口径）。
+ * - 弹层语义走 Reka Dialog（与 Modal/ConfirmDialog 同范式）：焦点陷阱、初始焦点、
+ *   关闭后焦点归还、body 滚动锁全由库承担；外观类（.wizard-overlay/.wizard-container）
+ *   经 as-child 保留。全屏阻断：Esc/遮罩等 dismiss 路径一律否决，唯一退出路径是
+ *   「跳过向导」的确认流程与完成步的「进入认证喵」。
  * - 显隐门槛仍是 init-status 的 `agreed`（仅全新安装显示；同意即写标记，中途退出不再续显）。
  * - 登录方式：浏览器渠道无绑定校验，选定即写 `login_channel`；直连渠道受
  *   `validate_login_task_binding` 约束——必须与已存在的HTTP 登录任务绑定同一次提交，
@@ -15,6 +18,7 @@
  * - 完成步自动应用「调试模式」预设，引导用户完成方案配置后到「设置 · 系统」切回。
  */
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { DialogContent, DialogOverlay, DialogPortal, DialogRoot, DialogTitle } from "reka-ui";
 import IconApp from "./IconApp.vue";
 import { IS_OPENWRT } from "../../utils/platform";
 import BrowserIcon from "./BrowserIcon.vue";
@@ -31,7 +35,6 @@ import { frontendLogger } from "../../utils/logger";
 import { DOCS, type TaskRepoKind, type TaskRepoSourceId } from "../../utils/constants";
 import { measureRepoSources, pickFastestSource, type RepoSourceTiming } from "../../utils/repoSpeed";
 import type { BrowserInfo, EnvironmentStatus, RepoTask } from "../../api/types";
-import { lockBodyScroll, unlockBodyScroll } from "../../composables/useBodyScrollLock";
 
 const { state, agreeWizardTerms, closeWizard } = useUi();
 const { busy } = useStatus();
@@ -41,16 +44,22 @@ const { applyRunMode } = useRunMode();
 const { showRepoImport } = useRepoImport();
 const configStore = useConfig();
 
-// 向导展示期间锁定背景滚动（全屏阻断，无其他关闭路径）
-// FE2-3：滚动锁走全局计数，与 Modal/ConfirmDialog 协调
-watch(
-  () => state.showWizard,
-  (val) => {
-    if (val) lockBodyScroll();
-    else unlockBodyScroll();
-  },
-  { immediate: true },
-);
+// reka 的各 dismiss 路径（Esc / 遮罩点击 / 焦点离开）在受控模式下统一汇为
+// update:open(false)。向导是全屏阻断，唯一退出路径是「跳过向导」确认流程与
+// 完成步的显式按钮，这里一律否决关闭请求。
+function onOpenChange(value: boolean): void {
+  if (!value) return;
+}
+
+function onEscapeKeyDown(event: Event): void {
+  // Esc 不关闭：误触代价高（向导只出现一次，中途退出需显式确认）
+  event.preventDefault();
+}
+
+function onPointerDownOutside(event: Event): void {
+  // 全屏遮罩没有「面板外」，防御性否决（上层确认框/导入弹窗经自身 Portal 打开）
+  event.preventDefault();
+}
 
 /* ============ 步骤定义与导航 ============ */
 
@@ -80,7 +89,7 @@ const STEP_HEADER: Record<StepKey, { title: string; sub: string }> = {
   },
   school: {
     title: "匹配你学校的登录任务",
-    sub: "输入学校名称，自动为两个任务仓库测速、择优获取索引并查找匹配的社区任务",
+    sub: "输入学校名称，自动测速并从社区任务仓库查找匹配任务",
   },
   done: {
     title: "初始配置完成",
@@ -502,13 +511,23 @@ async function skipWizard() {
 </script>
 
 <template>
-  <div v-if="state.showWizard" class="wizard-overlay" role="dialog" aria-modal="true" aria-label="首次启动配置向导">
-    <div class="wizard-container">
-      <div class="wizard-header">
-        <span class="wizard-logo logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
-        <h1>{{ STEP_HEADER[currentKey].title }}</h1>
-        <p>{{ STEP_HEADER[currentKey].sub }}</p>
-      </div>
+  <DialogRoot :open="state.showWizard" @update:open="onOpenChange">
+    <DialogPortal>
+      <DialogOverlay as-child>
+        <div class="wizard-overlay">
+          <DialogContent
+            as-child
+            aria-modal="true"
+            :aria-describedby="undefined"
+            @escape-key-down="onEscapeKeyDown"
+            @pointer-down-outside="onPointerDownOutside"
+          >
+            <div class="wizard-container">
+              <div class="wizard-header">
+                <span class="wizard-logo logo-mark" role="img" aria-label="认证喵 Campus-Auth"></span>
+                <DialogTitle as="h1">{{ STEP_HEADER[currentKey].title }}</DialogTitle>
+                <p>{{ STEP_HEADER[currentKey].sub }}</p>
+              </div>
 
       <!-- 步骤条：已到达步骤可点回看，未到达禁用。 -->
       <ol class="wizard-steps">
@@ -605,21 +624,24 @@ async function skipWizard() {
                 <span class="wizard-env-state">{{ item.ready ? "就绪" : "未就绪" }}</span>
               </li>
             </ul>
-            <div v-if="envPreparing" class="wizard-note">
+            <!-- 三个互斥状态分支共用同一 id，安装按钮经 aria-describedby 读到
+                 当前环境结论（失败原因 / 未就绪说明），不必另开焦点位 -->
+            <div v-if="envPreparing" id="wizard-env-note" class="wizard-note">
               <IconApp name="refresh" class="icon-sm spin" />
               正在初始化环境（{{ envStageLabel }}）{{ bootstrapProgressText }}，可能需要几分钟，请保持网络可用。
             </div>
-            <div v-else-if="envError" class="wizard-note wizard-note--error">
+            <div v-else-if="envError" id="wizard-env-note" class="wizard-note wizard-note--error">
               <IconApp name="alert-triangle" class="icon-sm" />
               {{ envError }}
             </div>
-            <div v-else-if="envStatus && !envStatus.capability_ready" class="wizard-note wizard-note--warn">
+            <div v-else-if="envStatus && !envStatus.capability_ready" id="wizard-env-note" class="wizard-note wizard-note--warn">
               环境尚未就绪。可点击下方按钮自动下载并安装（首次安装耗时数分钟，取决于网络）。
             </div>
             <button
               v-if="!envPreparing"
               class="btn btn-secondary btn-sm"
               :disabled="!!envStatus?.capability_ready"
+              aria-describedby="wizard-env-note"
               @click="startBootstrap"
             >
               <IconApp name="download" class="icon-sm" />
@@ -629,7 +651,7 @@ async function skipWizard() {
 
           <div class="wizard-section">
             <h3>选择浏览器</h3>
-            <p class="wizard-section-sub">自动探测系统中已安装的浏览器，也可安装 Playwright 托管引擎；随后可在此修改。</p>
+            <p class="wizard-section-sub">自动探测已安装的浏览器，也可安装 Playwright 托管引擎。</p>
             <div v-if="browsersLoading" class="wizard-note"><IconApp name="refresh" class="icon-sm spin" /> 正在检测浏览器…</div>
             <div v-else-if="browsers.length === 0" class="wizard-note wizard-note--warn">未检测到任何可用浏览器。</div>
             <div v-else class="wizard-browser-list" role="radiogroup" aria-label="浏览器选择">
@@ -670,7 +692,7 @@ async function skipWizard() {
               <IconApp name="alert-triangle" class="icon-sm" />
               {{ browserError }}
             </div>
-            <p class="wizard-note wizard-note--muted">环境与浏览器也可以稍后在「设置 · 任务与环境 / 浏览器」中配置，不阻塞继续。</p>
+            <p class="wizard-note wizard-note--muted">环境与浏览器也可稍后在「设置」中配置，不阻塞继续。</p>
           </div>
         </div>
 
@@ -772,9 +794,8 @@ async function skipWizard() {
             <div v-else-if="debugState === 'applied'" class="wizard-mode-note">
               <strong>当前已切换至调试模式</strong>
               <p>
-                浏览器窗口可见、日志记录 DEBUG 级别、启动后不自动登录，便于你完成剩余配置并验证登录。
-                请到「方案」页填写校园网账号、密码与认证地址，确认能正常登录后，
-                到「设置 · 系统」把运行模式切换回<strong>默认模式</strong>即可日常使用。
+                浏览器窗口可见、启动后不自动登录，便于完成剩余配置并验证登录。
+                请先到「方案」页填写账号并确认能正常登录，再到「设置 · 系统」切回<strong>默认模式</strong>。
               </p>
             </div>
             <div v-else class="wizard-note wizard-note--warn">
@@ -808,6 +829,10 @@ async function skipWizard() {
         <!-- 第 5 步：完成 -->
         <button v-else-if="currentKey === 'done'" class="btn btn-primary" @click="closeWizard">进入认证喵</button>
       </div>
-    </div>
-  </div>
+            </div>
+          </DialogContent>
+        </div>
+      </DialogOverlay>
+    </DialogPortal>
+  </DialogRoot>
 </template>

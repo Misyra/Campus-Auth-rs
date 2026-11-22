@@ -15,6 +15,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::tasks::TaskError;
+use crate::tasks::io_error_at;
 use crate::tasks::models::*;
 /// 任务排序记录（`.order.json`）
 ///
@@ -149,8 +150,15 @@ impl TaskManager {
                 "初始化默认 .order.json 失败，后续任务排序可能异常"
             );
         }
-        // 首启播种：缺内置默认任务则写入（新装开箱即用；启用状态由各方案绑定）
-        mgr.ensure_default_task();
+        // 首启播种：缺内置默认任务则写入、损坏则重播自愈（新装开箱即用；启用
+        // 状态由各方案绑定）。播种/自愈失败不阻断启动（best-effort），在此统一告警
+        if let Err(e) = mgr.ensure_default_task() {
+            tracing::warn!(
+                path = %mgr.browser_dir.join(format!("{DEFAULT_TASK_ID}.json")).display(),
+                error = %e,
+                "写入内置默认登录任务失败，登录前需手动检查 tasks/browser/default.json"
+            );
+        }
         Arc::new(mgr)
     }
 
@@ -183,6 +191,14 @@ impl TaskManager {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) != Some("py") {
+                        continue;
+                    }
+                    // 点开头不会是任务条目（与 scan_json_bucket 同口径）：合法任务
+                    // id 与旧版脚本名均不以点开头，外部落进来的残留不得进列表
+                    let Some(file_name) = path.file_name().and_then(|f| f.to_str()) else {
+                        continue;
+                    };
+                    if file_name.starts_with('.') {
                         continue;
                     }
                     let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -233,7 +249,7 @@ impl TaskManager {
         };
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(TaskError::IoError)?;
+            .map_err(|e| TaskError::IoError(io_error_at("读取任务文件", &path, e)))?;
         let task: TaskKind =
             serde_json::from_str(&strip_bom(content)).map_err(TaskError::JsonError)?;
         // 「保存强校验、加载宽校验 + 告警」（G8）：磁盘上被外部工具改坏的任务仍尽量
@@ -257,7 +273,7 @@ impl TaskManager {
             .ok_or_else(|| TaskError::TaskNotFound(task_id.to_string()))?;
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(TaskError::IoError)?;
+            .map_err(|e| TaskError::IoError(io_error_at("读取旧版脚本文件", &path, e)))?;
         Ok(TaskKind::Script(ScriptTaskConfig {
             common: CommonFields {
                 task_id: task_id.to_string(),
@@ -335,30 +351,46 @@ impl TaskManager {
         // 将 task_id 写回 common（避免 JSON 中遗漏）
         task.common_mut().task_id = task_id.to_string();
 
-        atomic_write_json(&path, &task)?;
-        for stale in stale_paths {
-            if stale.exists() {
-                // 删掉是必须的（同一 id 留两份定义时，加载会按桶优先级取到过时的那份），
-                // 但**必须留痕**：这条路径正常来自"用户主动改了任务类型"，也可能是前端
-                // 两个面板各自取了同一个自动 id（`untitled_N`）——后者意味着另一个列表里
-                // 的一条任务无声消失，日志是唯一的追查线索（前端已按三类 id 并集取号）。
-                match std::fs::remove_file(&stale) {
-                    Ok(()) => tracing::warn!(
-                        "任务 {task_id} 的 id 也存在于其它任务桶，已删除残留文件 {}",
-                        stale.display()
-                    ),
-                    Err(e) => tracing::warn!(
-                        "任务 {task_id} 的其它桶残留文件删除失败 {}: {e}",
-                        stale.display()
-                    ),
+        // 原子写（含 fsync）与残留删除均为阻塞 I/O，放入 spawn_blocking 执行，
+        // 避免持锁阻塞 tokio worker 线程（与 scheduler 历史遗留 #12 同口径收敛）
+        let task_id_owned = task_id.to_string();
+        let path_for_blocking = path.clone();
+        let task_for_blocking = task.clone();
+        let stale_for_blocking = stale_paths;
+        tokio::task::spawn_blocking(move || -> Result<(), TaskError> {
+            atomic_write_json("保存任务文件", &path_for_blocking, &task_for_blocking)?;
+            for stale in &stale_for_blocking {
+                if stale.exists() {
+                    // 删掉是必须的（同一 id 留两份定义时，加载会按桶优先级取到过时的那份），
+                    // 但**必须留痕**：这条路径正常来自"用户主动改了任务类型"，也可能是前端
+                    // 两个面板各自取了同一个自动 id（`untitled_N`）——后者意味着另一个列表里
+                    // 的一条任务无声消失，日志是唯一的追查线索（前端已按三类 id 并集取号）。
+                    match std::fs::remove_file(stale) {
+                        Ok(()) => tracing::warn!(
+                            "任务 {task_id_owned} 的 id 也存在于其它任务桶，已删除残留文件 {}",
+                            stale.display()
+                        ),
+                        Err(e) => tracing::warn!(
+                            "任务 {task_id_owned} 的其它桶残留文件删除失败 {}: {e}",
+                            stale.display()
+                        ),
+                    }
                 }
             }
-        }
+            Ok(())
+        })
+        .await
+        .map_err(|e| {
+            // JoinError：后台写入任务 panic 或被取消，原始信息保留在括号里供日志
+            TaskError::IoError(std::io::Error::other(format!(
+                "保存任务文件失败：后台写入任务异常中断（{e}）"
+            )))
+        })??;
         // 追加到 order（如不存在）
-        let mut order = self.read_order();
+        let mut order = self.read_order_blocking().await;
         if !order.order.contains(&task_id.to_string()) {
             order.order.push(task_id.to_string());
-            self.write_order(&order)?;
+            self.write_order_blocking(&order).await?;
         }
         Ok(())
     }
@@ -370,16 +402,16 @@ impl TaskManager {
             let path = self.scripts_dir.join(format!("{task_id}.py"));
             tokio::fs::remove_file(&path)
                 .await
-                .map_err(TaskError::IoError)?;
+                .map_err(|e| TaskError::IoError(io_error_at("删除旧版脚本文件", &path, e)))?;
             let meta = self.scripts_dir.join(format!("{task_id}.meta.json"));
             if meta.exists() {
                 tokio::fs::remove_file(&meta)
                     .await
-                    .map_err(TaskError::IoError)?;
+                    .map_err(|e| TaskError::IoError(io_error_at("删除脚本元数据文件", &meta, e)))?;
             }
-            let mut order = self.read_order();
+            let mut order = self.read_order_blocking().await;
             order.order.retain(|id| id != task_id);
-            self.write_order(&order)?;
+            self.write_order_blocking(&order).await?;
             return Ok(());
         }
         if !is_valid_task_id(task_id) {
@@ -397,7 +429,7 @@ impl TaskManager {
             if path.exists() {
                 tokio::fs::remove_file(&path)
                     .await
-                    .map_err(TaskError::IoError)?;
+                    .map_err(|e| TaskError::IoError(io_error_at("删除任务文件", &path, e)))?;
                 found = true;
             }
         }
@@ -421,9 +453,9 @@ impl TaskManager {
             return Err(TaskError::TaskNotFound(task_id.to_string()));
         }
 
-        let mut order = self.read_order();
+        let mut order = self.read_order_blocking().await;
         order.order.retain(|id| id != task_id);
-        self.write_order(&order)?;
+        self.write_order_blocking(&order).await?;
         Ok(())
     }
 
@@ -449,7 +481,7 @@ impl TaskManager {
 
     /// 读取 `.order.json`
     pub async fn load_order(&self) -> OrderData {
-        self.read_order()
+        self.read_order_blocking().await
     }
 
     /// 保存 `.order.json`
@@ -458,7 +490,7 @@ impl TaskManager {
             return Err(TaskError::InvalidTaskId(invalid.clone()));
         }
         let _guard = self.lock.lock().await;
-        self.write_order(order)
+        self.write_order_blocking(order).await
     }
 
     /// 返回脚本任务的文件路径（供执行器定位）
@@ -562,306 +594,16 @@ impl TaskManager {
             errors.push(reserved_default_id_error());
         }
 
+        // 类型专属校验按类别拆为纯函数（T7-5）：只读 config、向 errors 追加文案；
+        // 错误顺序 = name / 保留 ID → 类型内各规则遍历顺序，供前端一次性整体展示
         match kind {
-            "browser" => {
-                // 浏览器任务 timeout 钳制：与脚本任务 clamp_timeout 口径对齐。
-                // 无校验时导入的第三方 JSON 可传 0（执行时 max(1) 变 1ms 永远
-                // 秒超时）或超大值（会话槽位被占一天，期间所有浏览器任务/登录被拒）
-                let timeout = config
-                    .get("timeout")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(crate::tasks::DEFAULT_TASK_TIMEOUT_MS);
-                if !(MIN_TASK_TIMEOUT_MS..=MAX_TASK_TIMEOUT_MS).contains(&timeout) {
-                    errors.push(format!(
-                        "timeout 需在 {MIN_TASK_TIMEOUT_MS}-{MAX_TASK_TIMEOUT_MS} 毫秒之间（当前 {timeout}）"
-                    ));
-                }
-                let steps = config.get("steps").and_then(|s| s.as_array());
-                match steps {
-                    None => errors.push("steps 必须为数组".to_string()),
-                    Some(arr) => {
-                        if arr.is_empty() {
-                            errors.push("steps 不能为空".to_string());
-                        }
-                        let mut ids = std::collections::HashSet::new();
-                        for (i, step) in arr.iter().enumerate() {
-                            let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                            if id.is_empty() {
-                                errors.push(format!("步骤[{i}] 缺少 id"));
-                            } else if !is_valid_task_id(id) {
-                                errors.push(format!("步骤[{i}] id 非法: {id}"));
-                            } else if !ids.insert(id.to_string()) {
-                                errors.push(format!("步骤 id 重复: {id}"));
-                            }
-                            let stype = step.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            if !VALID_STEP_TYPES.contains(&stype) {
-                                errors.push(format!("步骤[{i}] 未知类型: {stype}"));
-                                continue;
-                            }
-                            // H5：步型字段约束表驱动（STEP_FIELD_RULES）——替代
-                            // 逐臂手写校验；wait 的"selector 或 duration>0"双语义
-                            // 无法用纯字段表表达，保留特判（口径对齐 Python 执行器
-                            // handle_wait，与 AI 提示词 prompt.rs 一致）
-                            for (types, required, any_of, any_msg) in Self::STEP_FIELD_RULES {
-                                if !types.contains(&stype) {
-                                    continue;
-                                }
-                                for field in required.iter() {
-                                    if Self::is_blank_field(step, field) {
-                                        errors.push(format!("步骤[{i}] 需要 {field}"));
-                                    }
-                                }
-                                if !any_of.is_empty()
-                                    && any_of.iter().all(|f| Self::is_blank_field(step, f))
-                                {
-                                    errors.push(format!("步骤[{i}] {any_msg}"));
-                                }
-                            }
-                            if stype == "wait" {
-                                let has_selector = !step
-                                    .get("selector")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .is_empty();
-                                // as_f64 兼容合法浮点（如 1.5s）：as_u64 对小数返回
-                                // None 会被误判为「未配置 duration」
-                                let has_duration =
-                                    step.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0)
-                                        > 0.0;
-                                if !has_selector && !has_duration {
-                                    errors.push(format!("步骤[{i}] 需要 selector 或 duration"));
-                                }
-                            }
-                            if stype == "manual_check"
-                                && Self::is_blank_field(step, "selector")
-                                && Self::is_blank_field(step, "value")
-                            {
-                                errors.push(format!("步骤[{i}] 需要 selector 或 value"));
-                            }
-                        }
-                    }
-                }
-            }
-            "script" => {
-                let has_content = config
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| !s.is_empty());
-                let has_path = config
-                    .get("script_path")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| !s.is_empty());
-                if !has_content && !has_path {
-                    errors.push("script 任务需提供 content 或 script_path".to_string());
-                }
-                // 统一拦截 PowerShell：与 `web/routes/scripts.rs:check_supported_binary`
-                // + `executor::is_supported_ext` 同口径，避免经 `POST /api/tasks`
-                // 创建 script 任务绕过 PUT /api/scripts/{id} 的拦截
-                if let Some(bp) = config.get("binary_path").and_then(|v| v.as_str()) {
-                    let lower = bp.to_lowercase();
-                    if lower.contains("powershell")
-                        || lower.contains("pwsh")
-                        || lower.ends_with(".ps1")
-                    {
-                        errors.push(
-                            "不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本"
-                                .to_string(),
-                        );
-                    }
-                }
-                if let Some(sp) = config.get("script_path").and_then(|v| v.as_str()) {
-                    if sp.to_lowercase().ends_with(".ps1") {
-                        errors.push(
-                            "不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".to_string(),
-                        );
-                    }
-                    // 显式含 `..` 的穿越写法提前拦截（与 executor::resolve_script_source 同口径）
-                    if std::path::Path::new(sp)
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                    {
-                        errors.push(format!("script_path 含非法穿越: {sp}"));
-                    }
-                }
-                if let Some(wd) = config.get("work_dir").and_then(|v| v.as_str())
-                    && std::path::Path::new(wd)
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
-                    errors.push(format!("work_dir 含非法穿越: {wd}"));
-                }
-            }
+            "browser" => Self::validate_browser_task(config, &mut errors),
+            "script" => Self::validate_script_task(config, &mut errors),
             // Shell 任务已移除：历史存量 type=shell 明确拒绝，提示改用 script
             "shell" => {
                 errors.push("任务类型 shell 已移除，请改用 script 类型".to_string());
             }
-            "http" => {
-                let flow_task = config.get("steps").is_some_and(|steps| {
-                    !steps.is_null() && !steps.as_array().is_some_and(Vec::is_empty)
-                }) || config
-                    .get("schema_version")
-                    .is_some_and(|version| !version.is_null() && version.as_u64() != Some(1));
-                if flow_task {
-                    match serde_json::from_value::<HttpTaskConfig>(config.clone()) {
-                        Ok(task) => {
-                            if let Err(error) = task.validate_flow() {
-                                errors.push(error);
-                            }
-                            let auth_url = task.auth_url.trim();
-                            if !auth_url.is_empty() {
-                                let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
-                                let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-                                if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
-                                    || host.is_empty()
-                                {
-                                    errors.push(
-                                        "HTTP 登录任务的认证地址需为带主机名的 http/https URL"
-                                            .into(),
-                                    );
-                                }
-                            }
-                            for (field, bytes, limit) in [
-                                ("auth_url", task.auth_url.len(), MAX_HTTP_URL_BYTES),
-                                (
-                                    "success_pattern",
-                                    task.success_pattern.len(),
-                                    MAX_HTTP_URL_BYTES,
-                                ),
-                                (
-                                    "failure_pattern",
-                                    task.failure_pattern.len(),
-                                    MAX_HTTP_URL_BYTES,
-                                ),
-                            ] {
-                                if bytes > limit {
-                                    errors.push(format!(
-                                        "{field} 超过 {limit} 字节上限（当前 {bytes}）"
-                                    ));
-                                }
-                            }
-                        }
-                        Err(error) => errors.push(format!("HTTP 流程字段类型不正确: {error}")),
-                    }
-                } else {
-                    // 直连任务没有可内置的通用门户地址，地址缺失时执行层连请求都拼不出来，
-                    // 属于"存得下但必然失败"的配置，必须在保存/导入闸口就拒绝
-                    let url = config.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    if url.trim().is_empty() {
-                        errors.push("直连任务缺少请求地址".to_string());
-                    }
-                    // 认证页地址允许为空（运行时回退方案的 auth_url，老配置因此照旧可用）；
-                    // 非空时只要求「协议 http/https + 有主机名」，口径对齐
-                    // `login::http_login::HttpLoginRequest::validate_url`——但在此手写判断而
-                    // 不调用它，避免 tasks → login 的反向依赖
-                    let auth_url = config
-                        .get("auth_url")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .trim();
-                    if !auth_url.is_empty() {
-                        let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
-                        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-                        if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
-                            errors.push("直连任务的认证地址仅支持 http/https".to_string());
-                        } else if host.is_empty() {
-                            errors.push("直连任务的认证地址缺少主机名".to_string());
-                        }
-                    }
-                    // 与 src/login/http_login.rs 的 MAX_SCRIPT_BYTES 同口径：任务里的
-                    // crypto_script 与方案里的 http_crypto_script 由同一套脚本引擎执行，
-                    // 任务侧放行更大体积会造成「保存通过、登录必然失败」的错位
-                    let script_bytes = config
-                        .get("crypto_script")
-                        .and_then(|v| v.as_str())
-                        .map_or(0, str::len);
-                    if script_bytes > MAX_HTTP_SCRIPT_BYTES {
-                        errors.push(format!(
-                        "crypto_script 超过 {MAX_HTTP_SCRIPT_BYTES} 字节上限（当前 {script_bytes}）"
-                    ));
-                    }
-                    // 请求头/请求体/URL 的上限是防呆（拦住误粘贴的大段内容），不表达安全边界
-                    for (field, limit) in [
-                        ("url", MAX_HTTP_URL_BYTES),
-                        ("headers", MAX_HTTP_HEADERS_BYTES),
-                        ("body", MAX_HTTP_BODY_BYTES),
-                    ] {
-                        let bytes = config
-                            .get(field)
-                            .and_then(|v| v.as_str())
-                            .map_or(0, str::len);
-                        if bytes > limit {
-                            errors.push(format!("{field} 超过 {limit} 字节上限（当前 {bytes}）"));
-                        }
-                    }
-                    // 前置请求（可选）：形状校验委托给 `HttpPreRequest::validate`，
-                    // 与执行层同一份判据（取值方式写错属于"保存通过、登录必然失败"）。
-                    // 体积上限另按本文件常量把关，与该分支对 headers/body 的口径一致。
-                    if let Some(raw) = config.get("pre_request").filter(|v| !v.is_null()) {
-                        match serde_json::from_value::<HttpPreRequest>(raw.clone()) {
-                            Ok(pre) => {
-                                if let Err(e) = pre.validate() {
-                                    errors.push(e);
-                                }
-                                for (field, value, limit) in [
-                                    ("pre_request.url", pre.url.as_str(), MAX_HTTP_URL_BYTES),
-                                    (
-                                        "pre_request.headers",
-                                        pre.headers.as_str(),
-                                        MAX_HTTP_HEADERS_BYTES,
-                                    ),
-                                    ("pre_request.body", pre.body.as_str(), MAX_HTTP_BODY_BYTES),
-                                ] {
-                                    if value.len() > limit {
-                                        errors.push(format!(
-                                            "{field} 超过 {limit} 字节上限（当前 {}）",
-                                            value.len()
-                                        ));
-                                    }
-                                }
-                            }
-                            Err(e) => errors.push(format!("pre_request 字段类型不正确: {e}")),
-                        }
-                    }
-                    // 退出登录请求（可选）：与前置请求同一套"形状 + 体积"双闸。
-                    // 形状判据在 `HttpActionRequest::validate`（保存与执行同源）；体积按
-                    // 本文件常量把关，与该分支对 headers/body 的口径一致。
-                    if let Some(raw) = config.get("logout_request").filter(|v| !v.is_null()) {
-                        match serde_json::from_value::<crate::tasks::HttpActionRequest>(raw.clone())
-                        {
-                            Ok(logout) => {
-                                if let Err(e) = logout.validate() {
-                                    errors.push(e);
-                                }
-                                for (field, value, limit) in [
-                                    (
-                                        "logout_request.url",
-                                        logout.url.as_str(),
-                                        MAX_HTTP_URL_BYTES,
-                                    ),
-                                    (
-                                        "logout_request.headers",
-                                        logout.headers.as_str(),
-                                        MAX_HTTP_HEADERS_BYTES,
-                                    ),
-                                    (
-                                        "logout_request.body",
-                                        logout.body.as_str(),
-                                        MAX_HTTP_BODY_BYTES,
-                                    ),
-                                ] {
-                                    if value.len() > limit {
-                                        errors.push(format!(
-                                            "{field} 超过 {limit} 字节上限（当前 {}）",
-                                            value.len()
-                                        ));
-                                    }
-                                }
-                            }
-                            Err(e) => errors.push(format!("logout_request 字段类型不正确: {e}")),
-                        }
-                    }
-                }
-            }
+            "http" => Self::validate_http_task(config, &mut errors),
             other => errors.push(format!("未知任务类型: {other}")),
         }
 
@@ -873,6 +615,322 @@ impl TaskManager {
     }
 
     // ---------------- 私有辅助 ----------------
+
+    // ---------------- 任务校验（validate_task 按类别拆分的纯函数，T7-5） ----------------
+
+    /// 浏览器任务校验：timeout 区间钳制 + steps 步型字段约束
+    fn validate_browser_task(config: &Value, errors: &mut Vec<String>) {
+        // 浏览器任务 timeout 钳制：与脚本任务 clamp_timeout 口径对齐。
+        // 无校验时导入的第三方 JSON 可传 0（执行时 max(1) 变 1ms 永远
+        // 秒超时）或超大值（会话槽位被占一天，期间所有浏览器任务/登录被拒）
+        let timeout = config
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(crate::tasks::DEFAULT_TASK_TIMEOUT_MS);
+        if !(MIN_TASK_TIMEOUT_MS..=MAX_TASK_TIMEOUT_MS).contains(&timeout) {
+            errors.push(format!(
+                "timeout 需在 {MIN_TASK_TIMEOUT_MS}-{MAX_TASK_TIMEOUT_MS} 毫秒之间（当前 {timeout}）"
+            ));
+        }
+        let steps = config.get("steps").and_then(|s| s.as_array());
+        match steps {
+            None => errors.push("steps 必须为数组".to_string()),
+            Some(arr) => Self::validate_browser_steps(arr, errors),
+        }
+    }
+
+    /// steps 数组整体校验：非空 + 逐步骤字段约束（去重 id 集合贯穿整轮）
+    fn validate_browser_steps(steps: &[Value], errors: &mut Vec<String>) {
+        if steps.is_empty() {
+            errors.push("steps 不能为空".to_string());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for (i, step) in steps.iter().enumerate() {
+            Self::validate_browser_step(step, i, &mut ids, errors);
+        }
+    }
+
+    /// 单个步骤的字段约束：id 合法性与唯一性 / 类型合法性 / 表驱动必填
+    /// （STEP_FIELD_RULES）/ wait 与 manual_check 的双语义特判
+    fn validate_browser_step(
+        step: &Value,
+        index: usize,
+        ids: &mut std::collections::HashSet<String>,
+        errors: &mut Vec<String>,
+    ) {
+        let id = step.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            errors.push(format!("步骤[{index}] 缺少 id"));
+        } else if !is_valid_task_id(id) {
+            errors.push(format!("步骤[{index}] id 非法: {id}"));
+        } else if !ids.insert(id.to_string()) {
+            errors.push(format!("步骤 id 重复: {id}"));
+        }
+        let stype = step.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if !VALID_STEP_TYPES.contains(&stype) {
+            errors.push(format!("步骤[{index}] 未知类型: {stype}"));
+            return;
+        }
+        // H5：步型字段约束表驱动（STEP_FIELD_RULES）——替代
+        // 逐臂手写校验；wait 的"selector 或 duration>0"双语义
+        // 无法用纯字段表表达，保留特判（口径对齐 Python 执行器
+        // handle_wait，与 AI 提示词 prompt.rs 一致）
+        for (types, required, any_of, any_msg) in Self::STEP_FIELD_RULES {
+            if !types.contains(&stype) {
+                continue;
+            }
+            for field in required.iter() {
+                if Self::is_blank_field(step, field) {
+                    errors.push(format!("步骤[{index}] 需要 {field}"));
+                }
+            }
+            if !any_of.is_empty() && any_of.iter().all(|f| Self::is_blank_field(step, f)) {
+                errors.push(format!("步骤[{index}] {any_msg}"));
+            }
+        }
+        if stype == "wait" {
+            let has_selector = !step
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty();
+            // as_f64 兼容合法浮点（如 1.5s）：as_u64 对小数返回
+            // None 会被误判为「未配置 duration」
+            let has_duration = step.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0;
+            if !has_selector && !has_duration {
+                errors.push(format!("步骤[{index}] 需要 selector 或 duration"));
+            }
+        }
+        if stype == "manual_check"
+            && Self::is_blank_field(step, "selector")
+            && Self::is_blank_field(step, "value")
+        {
+            errors.push(format!("步骤[{index}] 需要 selector 或 value"));
+        }
+    }
+
+    /// 脚本任务校验：正文/路径二选一 + PowerShell 与路径穿越拦截
+    fn validate_script_task(config: &Value, errors: &mut Vec<String>) {
+        let has_content = config
+            .get("content")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        let has_path = config
+            .get("script_path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if !has_content && !has_path {
+            errors.push("script 任务需提供 content 或 script_path".to_string());
+        }
+        // 统一拦截 PowerShell：与 `web/routes/scripts.rs:check_supported_binary`
+        // + `executor::is_supported_ext` 同口径，避免经 `POST /api/tasks`
+        // 创建 script 任务绕过 PUT /api/scripts/{id} 的拦截
+        if let Some(bp) = config.get("binary_path").and_then(|v| v.as_str()) {
+            let lower = bp.to_lowercase();
+            if lower.contains("powershell") || lower.contains("pwsh") || lower.ends_with(".ps1") {
+                errors.push(
+                    "不支持 PowerShell，仅支持 shell / bat / python / exe 四类脚本".to_string(),
+                );
+            }
+        }
+        if let Some(sp) = config.get("script_path").and_then(|v| v.as_str()) {
+            if sp.to_lowercase().ends_with(".ps1") {
+                errors.push("不支持 .ps1 脚本，仅支持 shell / bat / python / exe 四类".to_string());
+            }
+            // 显式含 `..` 的穿越写法提前拦截（与 executor::resolve_script_source 同口径）
+            if std::path::Path::new(sp)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                errors.push(format!("script_path 含非法穿越: {sp}"));
+            }
+        }
+        if let Some(wd) = config.get("work_dir").and_then(|v| v.as_str())
+            && std::path::Path::new(wd)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            errors.push(format!("work_dir 含非法穿越: {wd}"));
+        }
+    }
+
+    /// 直连任务分派：按形状判定是否为流程任务（steps 非空数组或
+    /// schema_version 显式非 1），分别走两代校验
+    fn validate_http_task(config: &Value, errors: &mut Vec<String>) {
+        let flow_task = config
+            .get("steps")
+            .is_some_and(|steps| !steps.is_null() && !steps.as_array().is_some_and(Vec::is_empty))
+            || config
+                .get("schema_version")
+                .is_some_and(|version| !version.is_null() && version.as_u64() != Some(1));
+        if flow_task {
+            Self::validate_http_flow_task(config, errors);
+        } else {
+            Self::validate_http_direct_task(config, errors);
+        }
+    }
+
+    /// HTTP 流程任务校验：结构反序列化 + validate_flow + 认证地址协议/主机 +
+    /// 字段体积上限
+    fn validate_http_flow_task(config: &Value, errors: &mut Vec<String>) {
+        match serde_json::from_value::<HttpTaskConfig>(config.clone()) {
+            Ok(task) => {
+                if let Err(error) = task.validate_flow() {
+                    errors.push(error);
+                }
+                let auth_url = task.auth_url.trim();
+                if !auth_url.is_empty() {
+                    let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
+                    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+                    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+                        || host.is_empty()
+                    {
+                        errors.push("HTTP 登录任务的认证地址需为带主机名的 http/https URL".into());
+                    }
+                }
+                for (field, bytes, limit) in [
+                    ("auth_url", task.auth_url.len(), MAX_HTTP_URL_BYTES),
+                    (
+                        "success_pattern",
+                        task.success_pattern.len(),
+                        MAX_HTTP_URL_BYTES,
+                    ),
+                    (
+                        "failure_pattern",
+                        task.failure_pattern.len(),
+                        MAX_HTTP_URL_BYTES,
+                    ),
+                ] {
+                    Self::push_over_limit(errors, field, bytes, limit);
+                }
+            }
+            Err(error) => errors.push(format!("HTTP 流程字段类型不正确: {error}")),
+        }
+    }
+
+    /// 传统直连任务校验：请求地址 + 认证地址协议/主机 + 加密脚本与请求各段
+    /// 体积上限 + 前置/退出登录请求
+    fn validate_http_direct_task(config: &Value, errors: &mut Vec<String>) {
+        // 直连任务没有可内置的通用门户地址，地址缺失时执行层连请求都拼不出来，
+        // 属于"存得下但必然失败"的配置，必须在保存/导入闸口就拒绝
+        let url = config.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        if url.trim().is_empty() {
+            errors.push("直连任务缺少请求地址".to_string());
+        }
+        // 认证页地址允许为空（运行时回退方案的 auth_url，老配置因此照旧可用）；
+        // 非空时只要求「协议 http/https + 有主机名」，口径对齐
+        // `login::http_login::HttpLoginRequest::validate_url`——但在此手写判断而
+        // 不调用它，避免 tasks → login 的反向依赖
+        let auth_url = config
+            .get("auth_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if !auth_url.is_empty() {
+            let (scheme, rest) = auth_url.split_once("://").unwrap_or(("", ""));
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+                errors.push("直连任务的认证地址仅支持 http/https".to_string());
+            } else if host.is_empty() {
+                errors.push("直连任务的认证地址缺少主机名".to_string());
+            }
+        }
+        // 与 src/login/http_login.rs 的 MAX_SCRIPT_BYTES 同口径：任务里的
+        // crypto_script 与方案里的 http_crypto_script 由同一套脚本引擎执行，
+        // 任务侧放行更大体积会造成「保存通过、登录必然失败」的错位
+        let script_bytes = config
+            .get("crypto_script")
+            .and_then(|v| v.as_str())
+            .map_or(0, str::len);
+        if script_bytes > MAX_HTTP_SCRIPT_BYTES {
+            errors.push(format!(
+                "crypto_script 超过 {MAX_HTTP_SCRIPT_BYTES} 字节上限（当前 {script_bytes}）"
+            ));
+        }
+        // 请求头/请求体/URL 的上限是防呆（拦住误粘贴的大段内容），不表达安全边界
+        for (field, limit) in [
+            ("url", MAX_HTTP_URL_BYTES),
+            ("headers", MAX_HTTP_HEADERS_BYTES),
+            ("body", MAX_HTTP_BODY_BYTES),
+        ] {
+            let bytes = config
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map_or(0, str::len);
+            Self::push_over_limit(errors, field, bytes, limit);
+        }
+        Self::validate_http_pre_request(config, errors);
+        Self::validate_http_logout_request(config, errors);
+    }
+
+    /// 前置请求（可选）校验：形状校验委托给 `HttpPreRequest::validate`，
+    /// 与执行层同一份判据（取值方式写错属于"保存通过、登录必然失败"）。
+    /// 体积上限另按本文件常量把关，与直连对 headers/body 的口径一致。
+    fn validate_http_pre_request(config: &Value, errors: &mut Vec<String>) {
+        if let Some(raw) = config.get("pre_request").filter(|v| !v.is_null()) {
+            match serde_json::from_value::<HttpPreRequest>(raw.clone()) {
+                Ok(pre) => {
+                    if let Err(e) = pre.validate() {
+                        errors.push(e);
+                    }
+                    for (field, value, limit) in [
+                        ("pre_request.url", pre.url.as_str(), MAX_HTTP_URL_BYTES),
+                        (
+                            "pre_request.headers",
+                            pre.headers.as_str(),
+                            MAX_HTTP_HEADERS_BYTES,
+                        ),
+                        ("pre_request.body", pre.body.as_str(), MAX_HTTP_BODY_BYTES),
+                    ] {
+                        Self::push_over_limit(errors, field, value.len(), limit);
+                    }
+                }
+                Err(e) => errors.push(format!("pre_request 字段类型不正确: {e}")),
+            }
+        }
+    }
+
+    /// 退出登录请求（可选）校验：与前置请求同一套"形状 + 体积"双闸。
+    /// 形状判据在 `HttpActionRequest::validate`（保存与执行同源）；体积按
+    /// 本文件常量把关，与直连对 headers/body 的口径一致。
+    fn validate_http_logout_request(config: &Value, errors: &mut Vec<String>) {
+        if let Some(raw) = config.get("logout_request").filter(|v| !v.is_null()) {
+            match serde_json::from_value::<crate::tasks::HttpActionRequest>(raw.clone()) {
+                Ok(logout) => {
+                    if let Err(e) = logout.validate() {
+                        errors.push(e);
+                    }
+                    for (field, value, limit) in [
+                        (
+                            "logout_request.url",
+                            logout.url.as_str(),
+                            MAX_HTTP_URL_BYTES,
+                        ),
+                        (
+                            "logout_request.headers",
+                            logout.headers.as_str(),
+                            MAX_HTTP_HEADERS_BYTES,
+                        ),
+                        (
+                            "logout_request.body",
+                            logout.body.as_str(),
+                            MAX_HTTP_BODY_BYTES,
+                        ),
+                    ] {
+                        Self::push_over_limit(errors, field, value.len(), limit);
+                    }
+                }
+                Err(e) => errors.push(format!("logout_request 字段类型不正确: {e}")),
+            }
+        }
+    }
+
+    /// 单字段体积上限防呆：超过即追加统一文案
+    fn push_over_limit(errors: &mut Vec<String>, field: &str, bytes: usize, limit: usize) {
+        if bytes > limit {
+            errors.push(format!("{field} 超过 {limit} 字节上限（当前 {bytes}）"));
+        }
+    }
 
     /// 按任务类型选存储桶（三类任务目录分派的唯一出口）
     ///
@@ -914,9 +972,15 @@ impl TaskManager {
         self.tasks_dir.join(".order.json")
     }
 
-    /// 同步读取 `.order.json`（缺失或损坏时返回默认）
-    fn read_order(&self) -> OrderData {
-        Self::read_order_at(&self.order_path())
+    /// `.order.json` 异步读（阻塞 I/O 入 spawn_blocking）
+    async fn read_order_blocking(&self) -> OrderData {
+        let path = self.order_path();
+        tokio::task::spawn_blocking(move || Self::read_order_at(&path))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("读取 .order.json 的阻塞任务失败: {e}");
+                OrderData::default()
+            })
     }
 
     /// 按路径同步读取 `.order.json`（供 spawn_blocking 闭包内使用，无需 &self）
@@ -939,9 +1003,23 @@ impl TaskManager {
         }
     }
 
-    /// 同步写入 `.order.json`（原子）
+    /// 同步写入 `.order.json`（原子；仅供构造器 `TaskManager::new` 在 runtime 之外使用）
     fn write_order(&self, order: &OrderData) -> Result<(), TaskError> {
-        atomic_write_json(&self.order_path(), order)
+        atomic_write_json("保存任务排序", &self.order_path(), order)
+    }
+
+    /// `.order.json` 异步原子写（阻塞 I/O 入 spawn_blocking）
+    async fn write_order_blocking(&self, order: &OrderData) -> Result<(), TaskError> {
+        let path = self.order_path();
+        let order = order.clone();
+        tokio::task::spawn_blocking(move || atomic_write_json("保存任务排序", &path, &order))
+            .await
+            .map_err(|e| {
+                // JoinError：后台写入任务 panic 或被取消，原始信息保留在括号里供日志
+                TaskError::IoError(std::io::Error::other(format!(
+                    "保存任务排序失败：后台写入任务异常中断（{e}）"
+                )))
+            })?
     }
 
     /// 查找任务文件（按桶优先级 browser → script → http）
@@ -961,29 +1039,43 @@ impl TaskManager {
         None
     }
 
-    /// 首启播种内置默认任务（幂等）。
+    /// 首启播种内置默认任务（幂等），写入结果经 `Result` 上抛供调用方留痕。
     ///
-    /// 仅当 `browser/default.json` 缺失时写入种子（用户删改过的不碰——`default`
-    /// 本就不可删除，能缺失只会是新装/手工清目录）。
-    /// 任务的启用状态不在本层：它属于各方案的 `ProfileData::active_task`，
-    /// 未绑定的方案由登录解析回退到本内置任务，从而保证新装开箱可用。
-    fn ensure_default_task(&self) {
+    /// - `browser/default.json` 缺失：写入种子（`default` 本就不可删除，能缺失
+    ///   只会是新装/手工清目录）；
+    /// - 已存在但 JSON 解析失败（截断/写坏）：重播种子自愈——损坏文件会被列表
+    ///   扫描与登录解析永久跳过，`default` 又不可删除，用户没有任何 UI 手段
+    ///   修复，此处不再让截断文件永久固化；
+    /// - 已存在且 JSON 合法（含用户定制）：不碰（读取失败视为状态未知，同样不碰）。
+    ///
+    /// 写入统一走原子替换：播种/自愈中途崩溃不得留下截断文件。任务的启用状态
+    /// 不在本层：它属于各方案的 `ProfileData::active_task`，未绑定的方案由登录
+    /// 解析回退到本内置任务，从而保证新装开箱可用。
+    fn ensure_default_task(&self) -> std::io::Result<()> {
         let seed_path = self.browser_dir.join(format!("{DEFAULT_TASK_ID}.json"));
-        if !seed_path.exists() {
-            match std::fs::write(&seed_path, DEFAULT_TASK_SEED) {
-                Ok(()) => tracing::info!(
-                    path = %seed_path.display(),
-                    "已内置默认登录任务 default（通用登录），新装开箱即用"
-                ),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %seed_path.display(),
-                        error = %e,
-                        "写入内置默认登录任务失败，登录前需手动创建任务"
-                    );
-                }
+        if seed_path.exists() {
+            // 自愈检测只看 JSON 能否解析（对齐列表扫描的宽口径）：schema 校验
+            // 交给加载路径，避免把合法但精简的定制任务误判为损坏
+            let corrupted = std::fs::read_to_string(&seed_path)
+                .map(|content| serde_json::from_str::<Value>(&strip_bom(content)).is_err())
+                .unwrap_or(false);
+            if !corrupted {
+                return Ok(());
             }
+            // 成功才算自愈完成，留痕放在写入成功之后；失败经 Err 交调用方告警
+            crate::utils::io::atomic_write_bytes(&seed_path, DEFAULT_TASK_SEED.as_bytes())?;
+            tracing::warn!(
+                path = %seed_path.display(),
+                "内置默认任务文件已损坏，已重播内置默认任务"
+            );
+            return Ok(());
         }
+        crate::utils::io::atomic_write_bytes(&seed_path, DEFAULT_TASK_SEED.as_bytes())?;
+        tracing::info!(
+            path = %seed_path.display(),
+            "已内置默认登录任务 default（通用登录），新装开箱即用"
+        );
+        Ok(())
     }
 
     /// 读取任务 JSON 的 `type` 字段并构造摘要（单次读盘，A 组小尾巴）
@@ -1028,11 +1120,14 @@ impl TaskManager {
 
     /// 扫描单个任务桶，把其中的 JSON 任务摘要追加到 `out`
     ///
-    /// 跳过 `.order.json`（排序文件，不在任何桶里，历史上曾混放）与 `.meta.json`
-    /// （脚本附属元数据，不是任务本身）。`dir_type` 为 `Some` 时按桶语义固定标注任务
-    /// 类型，为 `None` 时从文件 `type` 字段推导（缺省 `script`）——`scripts/` 桶混放
-    /// 裸 `.py` 与历史 `.meta.json`，其中 JSON 任务的类型以文件内声明为准，与
-    /// [`TaskManager::load_task`] 的读取口径保持一致。
+    /// 跳过点开头文件与 `.meta.json`（脚本附属元数据，不是任务本身）：点开头的
+    /// `.order.json` 是排序文件（不在任何桶里，历史上曾混放），`.tmp_xxx.json`
+    /// 是原子写（`utils::io::atomic_write_bytes`）崩溃残留——合法任务文件永不以
+    /// 点开头（`is_valid_task_id` 不收点号；与 `scheduler::cron_loop` 的扫描口径
+    /// 一致），放过去会把崩溃残留读成幽灵任务。`dir_type` 为 `Some` 时按桶语义
+    /// 固定标注任务类型，为 `None` 时从文件 `type` 字段推导（缺省 `script`）——
+    /// `scripts/` 桶混放裸 `.py` 与历史 `.meta.json`，其中 JSON 任务的类型以文件内
+    /// 声明为准，与 [`TaskManager::load_task`] 的读取口径保持一致。
     fn scan_json_bucket(dir: &Path, dir_type: Option<&str>, out: &mut Vec<TaskSummary>) {
         // 目录不存在（未预建 / 被外部删除）时静默跳过：其余桶仍应正常列出
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1048,7 +1143,7 @@ impl TaskManager {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            if name == ".order.json" || name.ends_with(".meta.json") {
+            if name.starts_with('.') || name.ends_with(".meta.json") {
                 continue;
             }
             // 单次读盘同时取 type 与摘要（原 read_type + read_summary 各读一次）
@@ -1244,8 +1339,12 @@ fn strip_bom(content: String) -> String {
 }
 
 /// 原子写入 JSON（委托给 utils::io::atomic_write_json）
-fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), TaskError> {
-    crate::utils::atomic_write_json(path, value).map_err(TaskError::IoError)
+///
+/// `action` 说明写入的是哪一类文件（任务文件 / 任务排序），失败文案据此区分
+/// 动作与路径，底层 `std::io` 原文仍保留在文案末尾。
+fn atomic_write_json<T: Serialize>(action: &str, path: &Path, value: &T) -> Result<(), TaskError> {
+    crate::utils::atomic_write_json(path, value)
+        .map_err(|e| TaskError::IoError(io_error_at(action, path, e)))
 }
 
 #[cfg(test)]
@@ -1321,6 +1420,44 @@ mod tests {
     fn test_is_valid_task_id_chinese_rejected() {
         // 中文字符的 ID 无效
         assert!(!is_valid_task_id("任务ID"));
+    }
+
+    // ============ 任务扫描点开头过滤 ============
+
+    /// 崩溃残留的原子写临时文件（`.tmp_xxx.json`）与历史上混放的 `.order.json`
+    /// 不得被当成任务条目读出幽灵任务（与 `scheduler::cron_loop` 扫描口径一致）
+    #[test]
+    fn test_scan_json_bucket_skips_dot_prefixed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("login_probe.json"),
+            r#"{"type":"browser","name":"登录探测"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(".tmp_ab12cd.json"),
+            r#"{"type":"browser","name":"幽灵任务"}"#,
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join(".order.json"), r#"{"order":[]}"#).unwrap();
+
+        let mut out = Vec::new();
+        TaskManager::scan_json_bucket(tmp.path(), Some("browser"), &mut out);
+        assert_eq!(out.len(), 1, "点开头文件不得进入任务条目");
+        assert_eq!(out[0].id, "login_probe");
+        assert_eq!(out[0].name, "登录探测");
+    }
+
+    /// 旧版裸 `.py` 扫描同样跳过点开头文件（合法任务 id 与旧脚本名均不以点开头）
+    #[tokio::test]
+    async fn test_list_tasks_skips_dot_prefixed_py() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::write(tmp.path().join(".hidden.py"), "# name: 隐藏脚本\n").unwrap();
+        let summaries = mgr.list_all_tasks().await;
+        assert!(
+            summaries.iter().all(|s| s.id != ".hidden"),
+            "点开头的 .py 文件不得成为任务条目"
+        );
     }
 
     // ============ TaskKind 访问器（经 TaskManager 写回路径间接覆盖） ============
@@ -2435,5 +2572,227 @@ mod tests {
             mgr.browser_dir.join("default.json").exists(),
             "缺失的种子仍应补上"
         );
+    }
+
+    #[tokio::test]
+    async fn test_seed_self_heals_corrupted_default_task() {
+        // 截断/损坏的 default.json：default 不可删除、损坏文件又被列表与登录
+        // 解析永久跳过，构造管理器时应重播内置种子自愈
+        let tmp = tempfile::tempdir().unwrap();
+        let browser = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        std::fs::write(browser.join("default.json"), r#"{"type":"browser","na"#).unwrap();
+
+        let mgr = TaskManager::new(tmp.path());
+
+        let healed = std::fs::read_to_string(browser.join("default.json")).unwrap();
+        assert_eq!(healed, DEFAULT_TASK_SEED, "损坏文件应被内置种子覆盖");
+        let kind = mgr
+            .load_task("default")
+            .await
+            .expect("自愈后的种子应为合法任务");
+        assert!(matches!(kind, TaskKind::Browser(_)));
+    }
+
+    #[tokio::test]
+    async fn test_seed_leaves_no_tmp_residue() {
+        // 首启播种走原子写（tmp + rename）：完成后任何任务目录内都不得有
+        // `.tmp_` 前缀的临时文件残留
+        let (_tmp, mgr) = make_task_manager().await;
+        for dir in [&mgr.browser_dir, &mgr.scripts_dir, &mgr.http_dir] {
+            let residue: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+                .collect();
+            assert!(residue.is_empty(), "播种后不得残留临时文件: {residue:?}");
+        }
+        let order_residue: Vec<String> = std::fs::read_dir(&mgr.tasks_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+            .collect();
+        assert!(
+            order_residue.is_empty(),
+            "初始化 .order.json 后不得残留临时文件: {order_residue:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_seed_failure_propagates_without_partial_file() {
+        // 注入播种失败：Unix 让 browser 目录只读（建临时文件即失败）；Windows 让
+        // 损坏的目标文件只读（rename 覆盖被拒绝）。失败必须以 io::Error 上抛
+        // （经 ? 传播，按现有错误类型收敛，不扩枚举），且不留下半截文件
+        let tmp = tempfile::tempdir().unwrap();
+        let browser = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&browser).unwrap().permissions();
+            perm.set_mode(0o555);
+            std::fs::set_permissions(&browser, perm).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let seed = browser.join("default.json");
+            std::fs::write(&seed, "{\"type\":\"browser\",\"na").unwrap();
+            let mut perm = std::fs::metadata(&seed).unwrap().permissions();
+            perm.set_readonly(true);
+            std::fs::set_permissions(&seed, perm).unwrap();
+        }
+
+        let mgr = TaskManager::new(tmp.path());
+        let result = mgr.ensure_default_task();
+
+        // 立即恢复权限，保证临时目录能被清理
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&browser).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&browser, perm).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let seed = browser.join("default.json");
+            let mut perm = std::fs::metadata(&seed).unwrap().permissions();
+            // Windows 上 set_readonly(false) 是恢复可写的正确 API（clippy 按 Unix
+            // 语义跨平台开火，仅 Windows 编译的测试恢复块显式豁免）
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            std::fs::set_permissions(&seed, perm).unwrap();
+        }
+
+        assert!(result.is_err(), "播种失败应以 io::Error 上抛");
+        #[cfg(unix)]
+        assert!(
+            !browser.join("default.json").exists(),
+            "失败不得产生半截文件"
+        );
+        let residue: Vec<String> = std::fs::read_dir(&browser)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+            .collect();
+        assert!(residue.is_empty(), "失败不得残留临时文件: {residue:?}");
+    }
+
+    // ============ TaskError::IoError 人话化（动作 + 路径 + 失败类别） ============
+
+    /// 助手文案形状：动作 + 路径 + 类别 + 原始错误；`ErrorKind` 必须原样保留。
+    #[test]
+    fn test_io_error_helpers_produce_human_readable_messages() {
+        // ErrorKind 构造出的原始文案跨平台一致（与具体 OS 无关）
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let wrapped = crate::tasks::io_error_at("读取任务文件", Path::new("/data/tasks/a.json"), e);
+        let msg = wrapped.to_string();
+        assert!(
+            msg.starts_with("读取任务文件失败（/data/tasks/a.json）："),
+            "应说明动作与路径: {msg}"
+        );
+        assert!(msg.contains("没有访问权限"), "应含失败类别: {msg}");
+        assert!(
+            msg.contains("permission denied"),
+            "应保留 std::io 原文供日志比对: {msg}"
+        );
+        // 按类别分支的调用方不受人话化影响
+        assert_eq!(wrapped.kind(), std::io::ErrorKind::PermissionDenied);
+
+        // 无路径场景（临时文件/管道）同样保留类别与原文
+        let e2 = std::io::Error::other("pipe closed");
+        let msg2 = crate::tasks::io_error("写入脚本临时文件", e2).to_string();
+        assert!(msg2.starts_with("写入脚本临时文件失败："), "{msg2}");
+        assert!(msg2.contains("pipe closed"), "应保留原始错误: {msg2}");
+    }
+
+    #[test]
+    fn test_io_kind_label_covers_common_file_kinds() {
+        use std::io::ErrorKind;
+        // io_kind_label 已下沉至 utils::io_human（T9-1），标签全集在此钉住
+        assert_eq!(
+            crate::utils::io_human::io_kind_label(ErrorKind::NotFound),
+            "文件或目录不存在"
+        );
+        assert_eq!(
+            crate::utils::io_human::io_kind_label(ErrorKind::PermissionDenied),
+            "没有访问权限"
+        );
+        assert_eq!(
+            crate::utils::io_human::io_kind_label(ErrorKind::IsADirectory),
+            "目标是目录而非文件"
+        );
+        // 未逐一列出的类别走兜底
+        assert_eq!(
+            crate::utils::io_human::io_kind_label(ErrorKind::Other),
+            "系统 IO 异常"
+        );
+    }
+
+    /// 任务文件位置被目录占位（外部工具/同步盘的典型坏现场）：读失败必须报
+    /// 「读取任务文件失败 + 具体路径」，不得把裸 `std::io` 原文直接抛给用户。
+    ///
+    /// 用目录替身触发（`read_to_string` 对目录跨平台必失败），避开依赖
+    /// chmod 的权限拒绝——Windows 上权限位形同虚设，那种写法不可移植。
+    #[tokio::test]
+    async fn test_load_task_io_failure_message_is_human_readable() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::create_dir_all(tmp.path().join("tasks").join("browser").join("ghost.json"))
+            .unwrap();
+        let err = mgr.load_task("ghost").await.unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("读取任务文件失败"), "应说明失败动作: {msg}");
+        assert!(msg.contains("ghost.json"), "应带上具体文件路径: {msg}");
+        assert!(!msg.contains("IO 错误"), "不得再出现裸 IO 前缀: {msg}");
+    }
+
+    /// 删除任务失败（文件被目录占位）必须报「删除任务文件失败 + 路径」。
+    #[tokio::test]
+    async fn test_delete_task_io_failure_message_is_human_readable() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::create_dir_all(tmp.path().join("tasks").join("browser").join("locked.json"))
+            .unwrap();
+        let err = mgr.delete_task("locked").await.unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("删除任务文件失败"), "应说明失败动作: {msg}");
+        assert!(msg.contains("locked.json"), "应带上具体文件路径: {msg}");
+    }
+
+    /// 旧版裸 .py 的删除失败同样要说清动作与文件。
+    #[tokio::test]
+    async fn test_delete_legacy_py_io_failure_message_is_human_readable() {
+        let (tmp, mgr) = make_task_manager().await;
+        std::fs::create_dir_all(tmp.path().join("tasks").join("scripts").join("old.task.py"))
+            .unwrap();
+        let err = mgr.delete_task("old.task").await.unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("删除旧版脚本文件失败"),
+            "应说明失败动作: {msg}"
+        );
+        assert!(msg.contains("old.task.py"), "应带上具体文件路径: {msg}");
+    }
+
+    /// 保存落盘失败必须报「保存任务文件失败 + 路径」。
+    ///
+    /// `tasks/browser` 的位置被一个普通文件占住：原子写的临时文件落在该路径
+    /// 下必然失败（父路径不是目录），且该现场跨平台稳定。
+    #[tokio::test]
+    async fn test_save_task_io_failure_message_is_human_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+        std::fs::write(tmp.path().join("tasks").join("browser"), "not a dir").unwrap();
+        let mgr = TaskManager::new(tmp.path());
+        let err = mgr
+            .save_task("stubborn", &browser_task("存不进"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TaskError::IoError(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("保存任务文件失败"), "应说明失败动作: {msg}");
+        assert!(msg.contains("stubborn.json"), "应带上具体文件路径: {msg}");
     }
 }

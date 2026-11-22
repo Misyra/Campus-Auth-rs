@@ -12,14 +12,19 @@
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组：三个面板此前各复制一份
  * 约 350 行的 scoped 样式，改一处漏一处就漂移。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
+import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
 import CustomSelect from "@/components/common/CustomSelect.vue";
 import type { SelectOption } from "@/components/common/CustomSelect.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useScripts } from "@/composables/useScripts";
 import { useTasks } from "@/composables/useTasks";
 import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useDragSort } from "@/utils/drag";
 import { autosaveLabel } from "@/utils/autosave";
 import { formatMtime } from "@/utils/formatters";
@@ -56,16 +61,9 @@ const { tasks: browserTasks } = useTasks();
 const { httpTasks } = useHttpTasks();
 const drag = useDragSort(scripts, { tasks: browserTasks, scripts, http: httpTasks });
 
-/**
- * 行下标 → 拖拽用的**全量**下标。
- *
- * 模板里 `v-for` 走的是搜索过滤后的 `visibleScripts`，而 `useDragSort` 按传入
- * 列表（全量 `scripts`）的 id 做 splice 与持久化：直接把过滤后的下标喂给它，
- * 搜索状态下拖一行会挪动另一个脚本，并把错的顺序写进后端（刷新才暴露）。
- */
-function dragIndex(scriptId: string): number {
-  return scripts.value.findIndex((s) => s.id === scriptId);
-}
+// 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无自定义脚本」）
+const directory = useTaskDirectory();
+const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
 
 // ===== 列表态 / 编辑态：两态由「草稿是否为空」表达，`?task=<id>` 只是意图 =====
 const currentId = computed(() => editingTask.value?.id ?? "");
@@ -119,48 +117,8 @@ const visibleScripts = computed(() => {
   );
 });
 
-// ===== 行尾 ⋯ 菜单（对齐另两个面板）：同一时刻只开一个 =====
-const openMenuId = ref("");
-
-function toggleRowMenu(scriptId: string): void {
-  openMenuId.value = openMenuId.value === scriptId ? "" : scriptId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-/** 全局监听只在菜单打开期间挂载 */
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
-// 必须在 onBeforeUnmount 里直接摘掉 document 监听
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-  closeRowMenu();
-});
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
 /**
  * 导入脚本文件：内容进编辑器交给自动保存落盘，并把 `?task=` 写上。
@@ -218,6 +176,7 @@ onMounted(async () => {
         placeholder="搜索名称 / 脚本 ID / 描述"
         aria-label="搜索脚本"
       />
+      <CommunityTasksEntry />
       <button type="button" class="btn btn-sm" title="从文件导入脚本（.py / .sh / .bat / .cmd / .txt）" @click="onImportScript">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
@@ -240,61 +199,82 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th class="tsk-drag-cell"></th>
-            <th>名称</th>
-            <th class="tsk-cell-id">脚本 ID</th>
-            <th class="tsk-cell-binary">执行程序</th>
-            <th class="tsk-cell-mtime">最近修改</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col" class="tsk-drag-cell"></th>
+            <th scope="col">名称</th>
+            <th scope="col" class="tsk-cell-id">脚本 ID</th>
+            <th scope="col" class="tsk-cell-binary">执行程序</th>
+            <th scope="col" class="tsk-cell-mtime">最近修改</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!scripts.length">
+          <tr v-if="listLoading">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="code" :stroke-width="1.5" />
-                <span>暂无自定义脚本</span>
-                <span class="empty-desc">
-                  脚本用于定时执行的辅助动作（打卡、签到等），也可以作为方案「登录方式 · 自定义脚本」
-                  的登录逻辑；支持 Python、Shell 或任意可执行程序
-                </span>
-                <div class="empty-actions">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载脚本…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!scripts.length">
+            <td colspan="6">
+              <EmptyState icon="code" :stroke-width="1.5" title="暂无自定义脚本" description="脚本用于定时执行的辅助动作（打卡、签到等），也可以作为方案「登录方式 · 自定义脚本」的登录逻辑；支持 Python、Shell 或任意可执行程序">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewScript">
                     <IconApp name="plus" />新建脚本
                   </button>
                   <button type="button" class="btn btn-sm" @click="onImportScript">
                     <IconApp name="upload" class="icon-sm" />从文件导入
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr v-else-if="!visibleScripts.length">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的脚本</span>
-              </div>
+              <EmptyState icon="search" :stroke-width="1.5" :title="`没有匹配「${searchQuery}」的脚本`" />
             </td>
           </tr>
           <tr
             v-for="script in visibleScripts"
             :key="script.id"
             data-draggable-list
-            @dragstart="drag.handleDragStart($event, dragIndex(script.id))"
-            @dragover="drag.onDragOver($event, dragIndex(script.id))"
-            @drop="drag.onDrop($event, dragIndex(script.id))"
+            @dragstart="drag.handleDragStart($event, drag.indexOf(script.id))"
+            @dragover="drag.onDragOver($event, drag.indexOf(script.id))"
+            @drop="drag.onDrop($event, drag.indexOf(script.id))"
             @dragend="drag.onDragEnd($event)"
             @click="openEditor(script.id)"
           >
             <td class="tsk-drag-cell" @click.stop>
-              <div
-                class="task-drag-handle"
-                title="拖拽排序"
-                @mousedown="drag.onHandleMouseDown($event)"
-                @mouseup="drag.onHandleMouseUp($event)"
-              >
-                <IconApp name="list" class="icon-sm" />
+              <div class="tsk-order-group">
+                <!-- 拖拽把手是指针专用装饰：键盘排序走旁边「上移 / 下移」按钮，
+                     屏读器不播报避免与按钮重复（no-static 由此豁免） -->
+                <div
+                  class="task-drag-handle"
+                  title="拖拽排序"
+                  aria-hidden="true"
+                  @mousedown="drag.onHandleMouseDown($event)"
+                  @mouseup="drag.onHandleMouseUp($event)"
+                >
+                  <IconApp name="list" class="icon-sm" />
+                </div>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`上移：${script.name || script.id}`"
+                  :aria-label="`上移：${script.name || script.id}`"
+                  :disabled="drag.indexOf(script.id) === 0"
+                  @click="drag.moveBy(script.id, -1)"
+                >
+                  <IconApp name="chevron-up" class="icon-sm" />
+                </button>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`下移：${script.name || script.id}`"
+                  :aria-label="`下移：${script.name || script.id}`"
+                  :disabled="drag.indexOf(script.id) === scripts.length - 1"
+                  @click="drag.moveBy(script.id, 1)"
+                >
+                  <IconApp name="chevron-down" class="icon-sm" />
+                </button>
               </div>
             </td>
             <td>
@@ -310,30 +290,21 @@ onMounted(async () => {
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(script.modified_at) }}</span></td>
             <td class="tsk-actions" @click.stop>
-              <button type="button" class="btn btn-sm btn-icon-only" :title="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" @click="openEditor(script.id)">
+              <button type="button" class="btn btn-sm btn-icon-only" :title="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" :aria-label="script.id.includes('.') ? '迁移为新 ID' : `编辑：${script.name || script.id}`" @click="openEditor(script.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${script.name || script.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === script.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(script.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === script.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button
-                  type="button"
-                  role="menuitem"
-                  :disabled="runningIds.has(script.id)"
-                  @click="runRowAction(() => runScript(script.id))"
-                >{{ runningIds.has(script.id) ? '运行中…' : '立即运行' }}</button>
-                <button type="button" role="menuitem" :disabled="exportingIds.has(script.id)" @click="runRowAction(() => exportScript(script.id))">导出脚本文件</button>
-                <button type="button" role="menuitem" class="tsk-menu-danger" @click="runRowAction(() => deleteScript(script.id))">删除</button>
-              </div>
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${script.name || script.id}`" :aria-label="`更多操作：${script.name || script.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="runningIds.has(script.id)" @select="runScript(script.id)">
+                  {{ runningIds.has(script.id) ? '运行中…' : '立即运行' }}
+                </AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="exportingIds.has(script.id)" @select="exportScript(script.id)">导出脚本文件</AppDropdownMenuItem>
+                <AppDropdownMenuItem class="tsk-menu-danger" @select="deleteScript(script.id)">删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>
@@ -342,7 +313,7 @@ onMounted(async () => {
         <span>共 {{ scripts.length }} 个脚本</span>
         <span v-if="searchQuery.trim()">· {{ visibleScripts.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
@@ -428,8 +399,7 @@ onMounted(async () => {
                   <!-- 允许字符写全：与 SCRIPT_ID_PATTERN / 后端 is_valid_task_id 同口径
                        （历史上这里写着"字母开头、只能用下划线"，比后端严，导致一类 ID 存不上） -->
                   <template v-if="editingTask._isNew">
-                    1~64 位字母、数字、下划线或连字符；它同时是文件名，创建后不可修改。
-                    打完名字按回车（或点输入框外）即创建，输入途中不会落盘
+                    1~64 位字母、数字、下划线或连字符；即文件名，回车或失焦后创建（输入途中不落盘），创建后不可修改
                   </template>
                   <template v-else>脚本文件名，创建后不可修改</template>
                 </span>
@@ -447,11 +417,12 @@ onMounted(async () => {
             <div class="form-group">
               <label for="script-binary">执行程序</label>
               <div class="binary-input-group">
-                <CustomSelect v-model="editingTask.binary_path" :options="binaryOptions" @change="onBinarySelectChange" />
+                <CustomSelect v-model="editingTask.binary_path" :options="binaryOptions" trigger-id="script-binary" @change="onBinarySelectChange" />
                 <input
                   v-if="editingTask.binary_path === '__custom__'"
                   v-model="editingTask._customBinary"
                   type="text"
+                  aria-label="自定义执行程序路径"
                   placeholder="输入可执行文件的完整路径（.exe）"
                   class="mt-2"
                 />
@@ -485,7 +456,7 @@ onMounted(async () => {
                 placeholder="#!/usr/bin/env python3&#10;from urllib.request import urlopen&#10;&#10;..."
               ></textarea>
               <span class="hint">
-                脚本可直接硬编码账号密码等参数；stdout 与 stderr 作为执行结果就地显示（不进日志页），按退出码判定成败（0 = 成功）
+                stdout/stderr 在「立即运行」结果里就地显示（不进日志页），按退出码判定成败（0 = 成功）
               </span>
             </div>
           </div>
@@ -507,12 +478,10 @@ onMounted(async () => {
               <IconApp :name="runningIds.has(currentId) ? 'refresh' : 'play'" class="icon-sm" :class="{ spin: runningIds.has(currentId) }" />
               {{ runningIds.has(currentId) ? '运行中…' : '立即运行' }}
             </button>
-            <p class="tsk-side-hint">「立即运行」只测试脚本进程，不注入登录方案的 CAMPUS_* 凭据，也不做登录后网络验证。登录效果请在「方案」页测试。</p>
+            <p class="tsk-side-hint">「立即运行」不注入登录方案的 CAMPUS_* 凭据，也不做登录后网络验证；登录效果请在「方案」页测试。</p>
             <dl class="tsk-kv">
               <dt>调度</dt>
               <dd><span class="tsk-side-hint">在「定时任务」里引用本脚本才会自动执行</span></dd>
-              <dt>输出</dt>
-              <dd><span class="tsk-side-hint">stdout 与 stderr 在「立即运行」的结果里就地显示（不进日志页）</span></dd>
             </dl>
             <!-- 最近一次「立即运行」的结果：脚本输出不进日志页，不留下来就无处可查 -->
             <div
@@ -538,18 +507,12 @@ onMounted(async () => {
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
             <p class="tsk-side-hint">
-              脚本既能做辅助动作（打卡、签到等），也能当登录脚本：到「方案」把登录方式设为
+              脚本可作打卡、签到等辅助动作，也可作登录脚本：到「方案」把登录方式设为
               <strong>自定义脚本</strong>并选中本脚本，凭据以 <code>CAMPUS_*</code> 环境变量传入。
             </p>
             <p class="tsk-side-hint">
-              登录脚本按<strong>退出码</strong>判定成败：0 = 本次尝试成功，程序随后仍做一次网络验证；
-              非 0 = 按方案的重试策略重发（次数见「设置 · 检测」的「最大重试次数」）。
+              登录成败按<strong>退出码</strong>判定：0 = 成功（程序仍会做网络验证），非 0 按方案重试。
             </p>
-            <p class="tsk-side-hint">
-              可从文件或仓库导入。仓库脚本会在确认前显示完整代码；导入后请检查方案绑定与目标地址。
-            </p>
-            <p class="tsk-side-hint">默认超时 60 秒，退出码 0 视为成功；stderr 输出不影响判定。</p>
-            <p class="tsk-side-hint">脚本内容上限 100 KB。</p>
           </div>
         </div>
       </div>
@@ -569,8 +532,9 @@ onMounted(async () => {
    Python 是默认项故弱化显示，其余（自定义程序）按默认主色提示。 */
 
 /* 描述并入名称格后本表没有独立的弹性列，让名称列吃剩余宽度
-   （fixed 布局下 auto 列分得剩余空间） */
-.tsk-table col.tsk-col-name {
-  width: auto;
+   （fixed 布局下 auto 列分得剩余空间）。列宽分叉走共享类的 --tsk-col-name-w
+   变量口，不在 scoped 直改共享类声明值。 */
+.tsk-table-card .tsk-table {
+  --tsk-col-name-w: auto;
 }
 </style>

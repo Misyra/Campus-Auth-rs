@@ -5,16 +5,6 @@
 
 use std::collections::HashSet;
 
-use thiserror::Error;
-
-/// 状态模块错误（极少产生，仅系统通知发送失败时）
-#[derive(Debug, Error)]
-pub enum StatusError {
-    /// 系统通知发送失败
-    #[error("系统通知发送失败: {0}")]
-    NotifySendFailed(String),
-}
-
 /// 登录失败通知去重器
 ///
 /// 由 Engine 持有，在调用 `StatusManager::merge(Login{...})` 后决定是否发送系统通知。

@@ -12,6 +12,8 @@ use serde::Serialize;
 use tokio::net::TcpStream;
 use tracing::instrument;
 
+use crate::utils::io_human::io_error;
+
 /// 解析 "host:port" 为 (host, port)；非法格式返回 None
 ///
 /// 裸 IPv6 字面量（未加方括号、含 ≥2 个冒号）无法与 `host:port` 区分，
@@ -112,7 +114,10 @@ async fn tcp_connect(
         if let Some(route) = egress {
             route.connect(host, port).await
         } else {
-            TcpStream::connect((host, port)).await
+            // 出口未启用时走直连；统一经同款包装层维持分支同型
+            TcpStream::connect((host, port))
+                .await
+                .map(crate::network::egress::HeadBufferedReader::new)
         }
     })
     .await
@@ -121,7 +126,7 @@ async fn tcp_connect(
         Ok(Err(e)) => Err(e),
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            "tcp connect timeout",
+            "TCP 连接超时",
         )),
     }
 }
@@ -158,7 +163,8 @@ impl TcpProbe {
                         Some((host, port)) => {
                             match tcp_connect(&host, port, timeout, egress.as_deref()).await {
                                 Ok(()) => (true, None),
-                                Err(e) => (false, Some(e.to_string())),
+                                // 人话化：动作 + 失败类别 + std::io 原文（排障仍可比对）
+                                Err(e) => (false, Some(io_error("TCP 连接", e).to_string())),
                             }
                         }
                         None => (false, Some("非法地址格式".to_string())),
@@ -183,13 +189,17 @@ impl TcpProbe {
         let (outcome, details) = match select_ok(futs).await {
             Ok((ok_detail, remaining)) => {
                 // Race 已赢：首个成功即视为通过，不再等待慢速剩余 future
-                // 以免整体耗时退化为 max(单目标超时)。剩余 pending 的 future
-                // 仅给 50ms 宽限用于收集已快速失败的明细，超时则丢弃
+                // 以免整体耗时退化为 max(单目标超时)。剩余 future 以 50ms
+                // **总**宽限并行收集已快速失败/完成的明细（此前逐个 50ms 串行，
+                // N 目标最坏多等 (N-1)×50ms）；总宽限耗尽整体丢弃——结果判定
+                // 恒为 Pass，明细仅为诊断
                 let mut details: Vec<PerProbeDetail> = Vec::with_capacity(remaining.len() + 1);
-                for f in remaining {
-                    if let Ok(detail) = tokio::time::timeout(Duration::from_millis(50), f).await {
-                        details.push(detail.unwrap_or_else(|d| d));
-                    }
+                if let Ok(results) =
+                    tokio::time::timeout(Duration::from_millis(50), join_all(remaining)).await
+                {
+                    details.extend(results.into_iter().map(|r| match r {
+                        Ok(detail) | Err(detail) => detail,
+                    }));
                 }
                 details.push(ok_detail);
                 (ProbeOutcome::Pass, details)
@@ -262,7 +272,14 @@ async fn probe_http_one(
         }
         Err(e) => (
             ProbeOutcome::Fail,
-            PerProbeDetail::new(url.to_string(), false, start, None, Some(e.to_string())),
+            // 人话化：中文动作 + reqwest 原文（不吞掉原始错误信息）
+            PerProbeDetail::new(
+                url.to_string(),
+                false,
+                start,
+                None,
+                Some(format!("请求探测目标失败：{e}")),
+            ),
         ),
     }
 }
@@ -366,7 +383,14 @@ async fn probe_url_one(
         }
         Err(e) => (
             ProbeOutcome::Fail,
-            PerProbeDetail::new(url.to_string(), false, start, None, Some(e.to_string())),
+            // 人话化：中文动作 + reqwest 原文（不吞掉原始错误信息）
+            PerProbeDetail::new(
+                url.to_string(),
+                false,
+                start,
+                None,
+                Some(format!("请求探测目标失败：{e}")),
+            ),
         ),
     }
 }
@@ -674,5 +698,54 @@ mod tests {
         // 裸 IPv6 无端口：拒绝而非误拆（怪癖修正）
         assert_eq!(parse_host_port("::1"), None);
         assert_eq!(parse_host_port("[::1]:53"), Some(("::1".to_string(), 53)));
+    }
+
+    /// TCP 竞速成功后，剩余 future 以 50ms **总**宽限并行回收：快速失败目标的
+    /// 明细必须进 details，且总耗时不得因逐个串行等待而放大（回归 A16）。
+    ///
+    /// 慢 runner（PR #33 CI windows 矩阵）上「连接被拒」的完成事件偶发落在
+    /// 50ms 总宽限之外，明细少收一条属调度抖动而非实现回归——整场景最多
+    /// 重试 3 轮、任一轮收齐两条即过，3 轮全缺才按回归判失败。windows
+    /// runner 对已关闭回环端口不快速回 RST、3 轮重试仍全部落空（实测），
+    /// 该平台跳过本用例，macOS / Linux 矩阵保持全量验证。
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "windows runner 对已关闭回环端口的连接不快速回 RST，快速失败者前提不成立（PR #33）"
+    )]
+    #[tokio::test]
+    async fn test_tcp_race_collects_fast_losers_within_grace() {
+        let mut last_summary = String::new();
+        for _attempt in 0..3 {
+            // 立即成功 listener：loopback 连接完成握手，竞速赢家（每轮全新端口）
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let ok_target = listener.local_addr().unwrap().to_string();
+
+            // 占用后立即释放端口，得到确定已关闭的本地地址（连接立即被拒，快速失败）
+            let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let closed_target = closed.local_addr().unwrap().to_string();
+            drop(closed);
+
+            let targets = vec![ok_target.clone(), closed_target];
+            let start = Instant::now();
+            let (outcome, details) = TcpProbe::run(&targets, Duration::from_secs(2)).await;
+            let elapsed = start.elapsed();
+            last_summary = format!("{details:?}");
+
+            assert_eq!(outcome, ProbeOutcome::Pass, "赢家必须胜出: {details:?}");
+            assert!(
+                details.iter().any(|d| d.target == ok_target && d.success),
+                "赢家明细必须存在且成功: {details:?}"
+            );
+            assert!(
+                elapsed < Duration::from_millis(200),
+                "剩余 future 必须以 50ms 总宽限并行回收，不得退化为逐个 50ms 串行等待（实际 {elapsed:?}）"
+            );
+            if details.len() == 2 {
+                return; // 快速失败者在宽限内被收集，守卫通过
+            }
+        }
+        panic!(
+            "竞速成功后快速失败目标的明细必须被收集（3 轮重试均未收齐，慢 runner 时序抖动已排除）: {last_summary}"
+        );
     }
 }

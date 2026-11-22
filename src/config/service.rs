@@ -29,13 +29,19 @@ use crate::config::migration::run_migrations;
 use crate::config::runtime::{ConfigReloadSignal, RuntimeConfig, build_runtime_config};
 use crate::config::schema::{ProfileData, SettingsData};
 use crate::config::{ProfileMergeFn, SettingsMergeFn};
+use crate::utils::io_human::io_error_at;
 use crate::utils::recover_lock;
 
 /// 配置错误类型
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// 文件 IO 错误
-    #[error("文件 IO 错误: {0}")]
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（由
+    /// `utils::io_human::io_error_at` 构造，对齐 tasks 域范式），Display 直接
+    /// 面向用户；原始 `std::io` 错误文本保留在文案末尾供日志比对，`ErrorKind`
+    /// 原样保留供程序化分支。
+    #[error("{0}")]
     Io(#[from] std::io::Error),
     /// JSON 解析/序列化错误
     #[error("JSON 错误: {0}")]
@@ -237,44 +243,51 @@ impl ConfigService {
         let key_path = crate::config::crypto::default_key_path();
         let crypto = PasswordCrypto::new(key_path.clone());
 
-        std::fs::create_dir_all(&config_dir)?;
-        std::fs::create_dir_all(&profiles_dir)?;
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| io_error_at("创建配置目录", &config_dir, e))?;
+        std::fs::create_dir_all(&profiles_dir)
+            .map_err(|e| io_error_at("创建方案目录", &profiles_dir, e))?;
         if let Some(p) = key_path.parent()
             && let Err(e) = std::fs::create_dir_all(p)
         {
             tracing::debug!(path = %p.display(), error = %e, "创建密钥目录失败");
         }
 
-        // 清理上次崩溃残留的临时文件：原子写入（utils::io::atomic_write_bytes）
-        // 生成的前缀为 `.tmp_` 的随机名中间产物（后缀仍是 .json），历史实现按
-        // extension=="tmp" 匹配永远不命中；且 profiles 目录同样会产生残留，
-        // 一并覆盖（F8）
-        for dir in [&config_dir, &profiles_dir] {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.starts_with(crate::config::TMP_PREFIX)
-                        && let Err(e) = std::fs::remove_file(entry.path())
-                    {
-                        tracing::debug!(
-                            path = %entry.path().display(),
-                            error = %e,
-                            "清理崩溃残留的临时配置文件失败"
-                        );
-                    }
-                }
-            }
+        // 清理上次崩溃残留的临时文件（F8）：原子写入（utils::io::atomic_write_bytes
+        // / atomic_copy_file）生成的 `.tmp_` 前缀随机名中间产物会残留在目标目录。
+        // 覆盖面从 config/profiles 两桶扩展到任务域（tasks 根 + browser/scripts/http
+        // 三桶：保存任务与 `.order.json` 均为原子写）与环境目录（uv 下载残留
+        // uv-archive.tmp / uv.tmp，此前仅在下次下载前删除，装好 uv 后便无人清理）。
+        // ConfigService 是容器拓扑中最先构造的服务，启动清扫挂在此处一次完成。
+        let atomic_tmp = |name: &str| name.starts_with(crate::config::TMP_PREFIX);
+        for dir in [
+            &config_dir,
+            &profiles_dir,
+            &crate::utils::paths::tasks_dir(&base_path),
+            &crate::utils::paths::browser_tasks_dir(&base_path),
+            &crate::utils::paths::scripts_dir(&base_path),
+            &crate::utils::paths::http_tasks_dir(&base_path),
+        ] {
+            sweep_tmp_residue(dir, &atomic_tmp);
         }
+        // 环境目录：原子写残留之外另有 uv 下载/解压的固定名临时文件
+        sweep_tmp_residue(&crate::utils::paths::env_dir(&base_path), &|name: &str| {
+            name.starts_with(crate::config::TMP_PREFIX)
+                || name == "uv-archive.tmp"
+                || name == "uv.tmp"
+        });
 
         // 读取并（必要时）迁移 settings
         let settings = Self::load_or_init_settings(&settings_path, &config_dir)?;
 
-        // 确保 default profile 存在
+        // 确保 default profile 存在（原子写：首建瞬间崩溃不得留下截断文件——
+        // 截断的 default.json 会被 load_all_profiles 永久跳过，活跃凭据静默回退）
         let default_path = profiles_dir.join("default.json");
         if !default_path.exists() {
             let default = ProfileData::default();
             let json = serde_json::to_string_pretty(&default)?;
-            std::fs::write(&default_path, json)?;
+            crate::utils::io::atomic_write_bytes(&default_path, json.as_bytes())
+                .map_err(|e| io_error_at("写入默认方案文件", &default_path, e))?;
         }
 
         // 解析活跃 Profile（缺失则 fallback 到 default）
@@ -407,14 +420,14 @@ impl ConfigService {
                 s
             }
             Err(e) => {
-                // 损坏时绝不静默用默认值覆盖：有缓存则沿用旧快照（正常路径恒命中，
+                // 损坏/缺失时绝不静默用默认值覆盖：有缓存则沿用旧快照（正常路径恒命中，
                 // new_sync 起缓存即为 Some 且无置空写点）；无缓存分支仅防御性保留。
                 let c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 if let Some(prev) = c.data.clone() {
-                    tracing::warn!("settings.json 解析失败，沿用内存缓存: {e}");
+                    tracing::warn!("settings.json 读取失败，沿用内存缓存: {e}");
                     return prev;
                 }
-                tracing::error!("settings.json 解析失败且无缓存可用，回退默认配置: {e}");
+                tracing::error!("settings.json 读取失败且无缓存可用，回退默认配置: {e}");
                 SettingsData::default()
             }
         }
@@ -448,6 +461,59 @@ impl ConfigService {
                 // JoinError 仅内部 panic 可达：不直接回默认，走缓存/隔离降级
                 tracing::error!("load_settings 阻塞任务失败: {e}");
                 fallback_cached()
+            }
+        }
+    }
+
+    /// 加载单个 Profile 的异步版本（供 async 调用方使用）
+    ///
+    /// 与 [`Self::load_settings_async`] 同模式：[`Self::load_profile`] 内含
+    /// `std::fs::metadata` + 文件读取同步 IO（未命中 mtime 缓存时还有凭据
+    /// 相关字段待后续解密），async 上下文直接调用会阻塞 tokio worker；经
+    /// `self_weak` 升级自身 Arc 后把同步实现移入 `spawn_blocking`。
+    /// profile_cache 为 `std::sync::Mutex`，临界区极短（mtime 比对与缓存
+    /// 替换），在阻塞线程中短暂持锁是安全的。
+    pub async fn load_profile_async(&self, id: &str) -> Result<ProfileData, ConfigError> {
+        let Some(this) = self.self_weak.upgrade() else {
+            // 与 load_settings_async 同款防御分支：容器存活期内不可达
+            tracing::error!("ConfigService 已释放，无法加载 Profile {id}");
+            return Err(ConfigError::ProfileNotFound { id: id.to_string() });
+        };
+        let id = id.to_string();
+        match tokio::task::spawn_blocking(move || this.load_profile(&id)).await {
+            Ok(v) => v,
+            Err(e) => {
+                // JoinError 仅内部 panic 可达：按读取失败上报，调用方已有降级路径
+                tracing::error!("load_profile 阻塞任务失败: {e}");
+                Err(ConfigError::Io(std::io::Error::other(format!(
+                    "加载 Profile 阻塞任务失败: {e}"
+                ))))
+            }
+        }
+    }
+
+    /// 为指定 Profile 构建运行时快照的异步版本（含解密后的密码）
+    ///
+    /// 同 [`Self::load_profile_async`] 口径：同步版内部串联 `load_profile` +
+    /// `load_settings` + `build_runtime_config`（含解密），均为阻塞 IO，整体
+    /// 移入 `spawn_blocking`。多 Profile 定时浏览器任务与登录提交段的 async
+    /// 调用方使用；Web 路由等同步调用方继续用同步版。
+    pub async fn runtime_config_for_profile_async(
+        &self,
+        id: &str,
+    ) -> Result<RuntimeConfig, ConfigError> {
+        let Some(this) = self.self_weak.upgrade() else {
+            tracing::error!("ConfigService 已释放，无法构建 Profile {id} 运行时快照");
+            return Err(ConfigError::ProfileNotFound { id: id.to_string() });
+        };
+        let id = id.to_string();
+        match tokio::task::spawn_blocking(move || this.runtime_config_for_profile(&id)).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!("runtime_config_for_profile 阻塞任务失败: {e}");
+                Err(ConfigError::Io(std::io::Error::other(format!(
+                    "构建 Profile 运行时快照阻塞任务失败: {e}"
+                ))))
             }
         }
     }
@@ -795,13 +861,28 @@ impl ConfigService {
                 .await?;
         }
         let trash_dir = self.config_dir.join(crate::config::TRASH_DIR);
-        std::fs::create_dir_all(&trash_dir)?;
+        std::fs::create_dir_all(&trash_dir)
+            .map_err(|e| io_error_at("创建方案回收目录", &trash_dir, e))?;
         let trash_path = trash_dir.join(format!("{id}.json.{}", timestamp()));
-        std::fs::rename(&path, &trash_path)?;
+        std::fs::rename(&path, &trash_path)
+            .map_err(|e| io_error_at("将待删除方案移入回收目录", &path, e))?;
         self.profile_cache
             .lock()
             .unwrap_or_else(recover_lock)
             .remove(id);
+        // 删除方案联动清理持久浏览器会话目录（best-effort）：目录不存在视为
+        // 已清理；失败仅告警不使删除失败——方案删除本身已成功，残留目录只含
+        // 浏览器持久上下文数据（cookie/localStorage），不影响正确性
+        let profile_data_dir = crate::utils::paths::browser_profile_dir(&self.base_path, id);
+        if profile_data_dir.exists()
+            && let Err(e) = std::fs::remove_dir_all(&profile_data_dir)
+        {
+            tracing::warn!(
+                dir = %profile_data_dir.display(),
+                error = %e,
+                "清理方案持久浏览器目录失败（best-effort，忽略）"
+            );
+        }
         // active 已变更：重载使 RuntimeConfig 同步切换到 default 凭证，
         // 避免快照继续暴露已删除 Profile 的凭据；重载失败不回滚删除
         //（文件已移入 .trash，重试 reload 即可恢复一致），仅告警
@@ -855,7 +936,7 @@ impl ConfigService {
         .await
         .map_err(|e| ConfigError::Io(std::io::Error::other(format!("配置重读任务失败: {e}"))))?;
         let (settings_res, mtime) = disk;
-        // 与 load_settings 的解析失败处理一致：有缓存沿用旧快照；无缓存（防御性
+        // 与 load_settings 的读取失败处理一致：有缓存沿用旧快照；无缓存（防御性
         // 保留的分支）中止 reload——绝不用默认值替换运行时，否则端口 /
         // active_profile 等关键字段全部回退默认，污染正在运行的服务
         let settings = match settings_res {
@@ -868,15 +949,15 @@ impl ConfigService {
             Err(e) => {
                 let c = self.settings_cache.lock().unwrap_or_else(recover_lock);
                 if let Some(prev) = c.data.clone() {
-                    tracing::warn!("settings.json 解析失败，reload 沿用内存缓存: {e}");
+                    tracing::warn!("settings.json 读取失败，reload 沿用内存缓存: {e}");
                     prev
                 } else {
                     tracing::error!(
-                        "settings.json 解析失败且无缓存可用，reload 中止并拒绝保存: {e}"
+                        "settings.json 读取失败且无缓存可用，reload 中止并拒绝保存: {e}"
                     );
                     return Err(ConfigError::ConfigWriteError {
                         reason: format!(
-                            "settings.json 解析失败，已保留当前运行时配置并拒绝保存: {e}"
+                            "settings.json 读取失败，已保留当前运行时配置并拒绝保存: {e}"
                         ),
                     });
                 }
@@ -971,7 +1052,11 @@ impl ConfigService {
             let default = SettingsData::default();
             match serde_json::to_string_pretty(&default) {
                 Ok(json) => {
-                    if let Err(e) = std::fs::write(settings_path, json) {
+                    // 原子写：首建瞬间崩溃不得留下截断的 settings.json（截断文件
+                    // 在下次启动会走「解析失败隔离」路径，平白多一次告警）
+                    if let Err(e) =
+                        crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())
+                    {
                         tracing::debug!(
                             path = %settings_path.display(),
                             error = %e,
@@ -990,7 +1075,8 @@ impl ConfigService {
             }
             return Ok(default);
         }
-        let raw = std::fs::read_to_string(settings_path)?;
+        let raw = std::fs::read_to_string(settings_path)
+            .map_err(|e| io_error_at("读取配置文件", settings_path, e))?;
         let mut value: Value = match serde_json::from_str(&raw) {
             Ok(v) => v,
             Err(e) => {
@@ -1048,7 +1134,8 @@ impl ConfigService {
             })?;
             // 校验通过后落盘（同步 fsync，防止掉电导致版本回退重跑迁移）
             let json = serde_json::to_string_pretty(&value)?;
-            crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())?;
+            crate::utils::io::atomic_write_bytes(settings_path, json.as_bytes())
+                .map_err(|e| io_error_at("写入配置文件", settings_path, e))?;
             return Ok(migrated);
         }
 
@@ -1061,10 +1148,15 @@ impl ConfigService {
 
     /// 从磁盘直接读取 settings.json（不做迁移，假设为当前版本）
     fn read_settings_from_disk(path: &Path) -> Result<SettingsData, ConfigError> {
+        // 运行期缺失按错误处理（调用方沿用内存缓存），不得静默换成默认值：
+        // 否则文件被删/瞬时不可见时端口、活跃 Profile、updater 配置整体回退
         if !path.exists() {
-            return Ok(SettingsData::default());
+            return Err(ConfigError::ConfigNotFound {
+                path: path.to_string_lossy().into_owned(),
+            });
         }
-        let raw = std::fs::read_to_string(path)?;
+        let raw =
+            std::fs::read_to_string(path).map_err(|e| io_error_at("读取配置文件", path, e))?;
         serde_json::from_str(&raw).map_err(|e| ConfigError::ConfigParseError {
             path: path.to_string_lossy().to_string(),
             reason: e.to_string(),
@@ -1082,7 +1174,8 @@ impl ConfigService {
                     .unwrap_or_default(),
             });
         }
-        let raw = std::fs::read_to_string(path)?;
+        let raw =
+            std::fs::read_to_string(path).map_err(|e| io_error_at("读取方案文件", path, e))?;
         serde_json::from_str(&raw).map_err(|e| ConfigError::ConfigParseError {
             path: path.to_string_lossy().to_string(),
             reason: e.to_string(),
@@ -1096,16 +1189,107 @@ impl ConfigService {
         let path = path.to_path_buf();
         // 阻塞式落盘（fsync 等）移入阻塞线程池，避免占用 tokio worker（对齐 A2）；
         // 底层统一走 utils::io::atomic_write_bytes（含 fsync_full 持久化保证，C3）
-        tokio::task::spawn_blocking(move || crate::utils::io::atomic_write_bytes(&path, &json))
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))??;
+        tokio::task::spawn_blocking(move || {
+            crate::utils::io::atomic_write_bytes(&path, &json)
+                .map_err(|e| io_error_at("写入配置文件", &path, e))
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("配置写入后台任务执行失败: {e}")))??;
         Ok(())
     }
+}
+
+/// `.trash` 回滚区条目保留天数
+///
+/// 删除方案移入 `config/.trash/` 后此前无任何清理点（含 ENC: 密文方案文件，
+/// 长驻实例无限累积）；由每日 housekeeping 按 mtime 轮转 30 天，与登录历史 /
+/// 事件流的 30 天保留口径一致。
+pub const TRASH_RETENTION_DAYS: u64 = 30;
+
+/// 清理 `.trash` 回滚区中超过保留期的条目，返回删除数量
+///
+/// 过期判定按文件 mtime 墙钟：`now - retention_days` 之前修改的条目删除；
+/// `now` 由调用方注入，测试可构造新旧条目断言「旧的清、新的留」。全部条目
+/// 清空后连空目录一并移除（非空时 `remove_dir` 自然失败，忽略即可）。
+/// mtime 不可读的条目按未过期保守保留，留给下一轮；子目录一律跳过。
+///
+/// 卸载口径：`.trash` 位于 `config/` 内——purge 随 `config/` 整目录删除、
+/// `keep_user_data` 时随 `config/` 保留，卸载清单按目录粒度继承，无需单列条目。
+pub fn cleanup_expired_trash_entries(
+    trash_dir: &Path,
+    retention_days: u64,
+    now: SystemTime,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(trash_dir) else {
+        return 0;
+    };
+    let cutoff = now
+        .checked_sub(std::time::Duration::from_secs(
+            retention_days.saturating_mul(86_400),
+        ))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let expired = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime <= cutoff)
+            .unwrap_or(false);
+        if expired {
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "清理 .trash 过期回滚条目失败"
+                    );
+                }
+            }
+        }
+    }
+    // 全清后移除空目录，不留壳
+    let _ = std::fs::remove_dir(trash_dir);
+    removed
 }
 
 /// 生成紧凑时间戳字符串（用于备份/垃圾文件名）
 fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
+}
+
+/// 清理单个目录内崩溃残留的临时文件，返回删除数量
+///
+/// `is_residue` 为文件名残留判定闭包，由调用方按桶口径给出：配置 / 任务域各桶
+/// 是原子写（`utils::io::atomic_write_bytes` / `atomic_copy_file`）的 `.tmp_`
+/// 前缀（含 `.tmp_copy_` 变体），环境目录另有 uv 下载/解压的固定名
+/// `uv-archive.tmp` / `uv.tmp`。只处理文件——子目录（`.trash`、`.venv` 等）
+/// 不进入判定；目录不存在时静默返回 0（未预建 / 被外部删除均属常态）。
+fn sweep_tmp_residue(dir: &Path, is_residue: &impl Fn(&str) -> bool) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !entry.path().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_residue(&name) {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(e) => tracing::debug!(
+                    path = %entry.path().display(),
+                    error = %e,
+                    "清理崩溃残留的临时文件失败"
+                ),
+            }
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -1167,6 +1351,132 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("10"));
         assert!(display.contains("6"));
+    }
+
+    // ============ 启动临时文件清扫（F8 扩展面） ============
+
+    /// 清扫按残留口径删文件：`.tmp_` 前缀（含 `.tmp_copy_` 变体）与 uv 固定名
+    /// 残留被清，正常文件与子目录不动；环境目录口径之外的 uv 固定名不清
+    #[test]
+    fn test_sweep_tmp_residue_removes_matched_files_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join(".tmp_ab12.json"), b"{}").unwrap();
+        std::fs::write(dir.join(".tmp_copy_xy.json"), b"{}").unwrap();
+        std::fs::write(dir.join("uv-archive.tmp"), b"{}").unwrap();
+        std::fs::write(dir.join("uv.tmp"), b"{}").unwrap();
+        std::fs::write(dir.join("uv"), b"real").unwrap();
+        std::fs::write(dir.join("settings.json"), b"{}").unwrap();
+        std::fs::create_dir(dir.join(".trash")).unwrap();
+
+        // 环境目录口径：`.tmp_` 前缀 + uv 下载/解压固定名
+        let env_residue = |name: &str| {
+            name.starts_with(crate::config::TMP_PREFIX)
+                || name == "uv-archive.tmp"
+                || name == "uv.tmp"
+        };
+        assert_eq!(sweep_tmp_residue(dir, &env_residue), 4);
+        assert!(!dir.join(".tmp_ab12.json").exists());
+        assert!(!dir.join(".tmp_copy_xy.json").exists());
+        assert!(!dir.join("uv-archive.tmp").exists());
+        assert!(!dir.join("uv.tmp").exists());
+        assert!(dir.join("uv").exists(), "真正的 uv 可执行文件不得误删");
+        assert!(dir.join("settings.json").exists());
+        assert!(dir.join(".trash").exists(), "子目录不进入清扫");
+
+        // 配置/任务桶口径：仅 `.tmp_` 前缀，uv 固定名不匹配
+        std::fs::write(dir.join("uv-archive.tmp"), b"{}").unwrap();
+        assert_eq!(
+            sweep_tmp_residue(dir, &|name: &str| name
+                .starts_with(crate::config::TMP_PREFIX)),
+            0
+        );
+        assert!(dir.join("uv-archive.tmp").exists());
+    }
+
+    /// ConfigService::new 的启动清扫应覆盖任务域各桶与环境目录（接线验证）
+    #[tokio::test]
+    async fn test_config_service_new_sweeps_task_and_env_tmp_residues() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 任务桶与环境目录由各自服务构造，本测试手动预建并放置残留
+        let browser = crate::utils::paths::browser_tasks_dir(tmp.path());
+        let scripts = crate::utils::paths::scripts_dir(tmp.path());
+        let http = crate::utils::paths::http_tasks_dir(tmp.path());
+        let env = crate::utils::paths::env_dir(tmp.path());
+        for dir in [&browser, &scripts, &http, &env] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(browser.join(".tmp_ghost.json"), b"{}").unwrap();
+        std::fs::write(scripts.join(".tmp_ghost.json"), b"{}").unwrap();
+        std::fs::write(http.join(".tmp_ghost.json"), b"{}").unwrap();
+        std::fs::write(env.join("uv-archive.tmp"), b"{}").unwrap();
+        std::fs::write(env.join("uv.tmp"), b"{}").unwrap();
+        // 正常文件不得被清扫波及
+        std::fs::write(browser.join("real.json"), b"{}").unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+
+        assert!(!browser.join(".tmp_ghost.json").exists());
+        assert!(!scripts.join(".tmp_ghost.json").exists());
+        assert!(!http.join(".tmp_ghost.json").exists());
+        assert!(!env.join("uv-archive.tmp").exists());
+        assert!(!env.join("uv.tmp").exists());
+        assert!(browser.join("real.json").exists(), "正常任务文件不得被清扫");
+    }
+
+    // ============ .trash 回滚区轮转清理 ============
+
+    /// 旧条目（mtime 31 天前）清、新条目留；仍有留存时目录保留，全清后空目录一并移除
+    #[test]
+    fn test_cleanup_expired_trash_entries_rotates_by_mtime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let trash = tmp.path().join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let old = trash.join("old.json.20260101000000");
+        let fresh = trash.join("fresh.json.20261113000000");
+        std::fs::write(&old, b"{}").unwrap();
+        std::fs::write(&fresh, b"{}").unwrap();
+        // 旧条目 mtime 拨回 31 天前（跨平台：std::fs::File::set_modified）
+        let old_mtime = SystemTime::now() - std::time::Duration::from_secs(31 * 86_400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(old_mtime)
+            .unwrap();
+
+        let removed =
+            cleanup_expired_trash_entries(&trash, TRASH_RETENTION_DAYS, SystemTime::now());
+        assert_eq!(removed, 1, "仅超过 30 天保留期的旧条目应被清理");
+        assert!(!old.exists());
+        assert!(fresh.exists(), "保留期内的新条目必须留存");
+        assert!(trash.exists(), "仍有留存条目时目录不得移除");
+
+        // 全清后空目录一并消失
+        std::fs::remove_file(&fresh).unwrap();
+        let removed =
+            cleanup_expired_trash_entries(&trash, TRASH_RETENTION_DAYS, SystemTime::now());
+        assert_eq!(removed, 0);
+        assert!(!trash.exists(), "全清后空目录应一并移除");
+    }
+
+    /// 过期判定完全由 (mtime, retention_days, now) 决定：注入的 now 推进 40 天
+    /// 即可让 mtime 为"现在"的条目过期（纯函数可测性）
+    #[test]
+    fn test_cleanup_expired_trash_entries_uses_injected_now() {
+        let tmp = tempfile::tempdir().unwrap();
+        let trash = tmp.path().join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let entry = trash.join("gone.json.x");
+        std::fs::write(&entry, b"{}").unwrap();
+        let future = SystemTime::now() + std::time::Duration::from_secs(40 * 86_400);
+        let removed = cleanup_expired_trash_entries(&trash, TRASH_RETENTION_DAYS, future);
+        assert_eq!(removed, 1);
+        assert!(!entry.exists());
+        assert!(!trash.exists());
     }
 
     // ============ settings.json 读写往返测试 ============
@@ -1500,6 +1810,59 @@ mod tests {
         assert_eq!(svc.runtime().load().monitor.check_interval, 222);
     }
 
+    /// 运行期 settings.json 被删：load/reload 沿用内存缓存，绝不静默回退默认值
+    ///
+    /// （区别于首启动的文件不存在——后者由 load_or_init_settings 生成默认文件，
+    /// 不经过本路径。）
+    #[tokio::test]
+    async fn deleted_settings_falls_back_to_cached_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        svc.modify_settings(|s| s.global.monitor.check_interval = 77)
+            .await
+            .unwrap();
+
+        std::fs::remove_file(&svc.settings_path).unwrap();
+
+        // mtime 缓存失配 → 重读盘 → ConfigNotFound → Err 分支沿用缓存值
+        assert_eq!(svc.load_settings().global.monitor.check_interval, 77);
+
+        svc.reload().await.unwrap();
+        assert_eq!(svc.runtime().load().monitor.check_interval, 77);
+    }
+
+    /// 被删的 settings.json 恢复后：mtime 失配触发重读，配置回到磁盘最新值
+    #[tokio::test]
+    async fn deleted_settings_recovers_when_file_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        svc.modify_settings(|s| s.global.monitor.check_interval = 77)
+            .await
+            .unwrap();
+        std::fs::remove_file(&svc.settings_path).unwrap();
+        assert_eq!(svc.load_settings().global.monitor.check_interval, 77);
+
+        // 绕过 save_settings 直接落盘 222：确保断言的是 reload 的磁盘重读，
+        // 而非缓存写入路径
+        let mut restored = svc.load_settings();
+        restored.global.monitor.check_interval = 222;
+        std::fs::write(
+            &svc.settings_path,
+            serde_json::to_string_pretty(&restored).unwrap(),
+        )
+        .unwrap();
+
+        svc.reload().await.unwrap();
+        assert_eq!(svc.load_settings().global.monitor.check_interval, 222);
+        assert_eq!(svc.runtime().load().monitor.check_interval, 222);
+    }
+
     // ============ modify_settings_tx 提交事务 ============
 
     /// 闭包校验失败：不落盘（设置保持原值），返回内层 Err
@@ -1696,6 +2059,42 @@ mod tests {
             .unwrap();
         svc.delete_profile("other").await.unwrap();
         assert_eq!(svc.load_settings().active_profile_id, "home");
+    }
+
+    // ============ 删除方案联动清理持久浏览器目录（T3-3b） ============
+
+    /// 删除方案时 best-effort 清理 browser_profiles/<id>/：有数据则删净，
+    /// 目录不存在（未启用过持久会话）的删除路径同样成功
+    #[tokio::test]
+    async fn test_delete_profile_cleans_browser_profile_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let svc = ConfigService::new(tmp.path().to_path_buf(), tx)
+            .await
+            .unwrap();
+        let profiles = ProfileService::new(svc.clone());
+
+        // 预置启用过持久会话的方案：持久目录含浏览器数据文件
+        profiles
+            .create_profile("dorm", ProfileData::default())
+            .await
+            .unwrap();
+        let data_dir = crate::utils::paths::browser_profile_dir(tmp.path(), "dorm");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("Cookies"), "persistent").unwrap();
+
+        svc.delete_profile("dorm").await.unwrap();
+        assert!(
+            !data_dir.exists(),
+            "删除方案必须联动清理持久浏览器目录（best-effort）"
+        );
+
+        // 目录不存在的方案删除（未启用过持久会话）同样成功：不存在视为已清理
+        profiles
+            .create_profile("plain", ProfileData::default())
+            .await
+            .unwrap();
+        svc.delete_profile("plain").await.unwrap();
     }
 
     // ============ G4：迁移 commit 顺序 ============

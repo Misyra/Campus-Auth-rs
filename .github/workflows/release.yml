@@ -4,6 +4,8 @@ name: Release
 #
 # 产物与 build.ps1 口径一致（解压即用）：
 #   campus-auth(-helper)(.exe)  # 主程序（前端已嵌入）+ 更新替换助手
+#   campus-auth.version         # 版本 marker（一行 Cargo.toml 版本号；非 Windows
+#                               #   更新器经它提取包内版本，Windows 仅随包保持一致）
 #   resources/                  # 托盘图标 / task-recorder 等静态资源
 #   src/ + frontend/ + Cargo 清单 # Dockerfile 的最小源码构建上下文
 #   python_worker/              # Python Worker 源码（运行时按需引导 uv 环境）
@@ -15,6 +17,13 @@ name: Release
 # Linux x64（ubuntu-22.04，较旧 glibc 兼容更多发行版）/
 # Linux arm64（ubuntu-24.04-arm 原生 runner：tray-icon/GTK 在原生环境直接链接，
 # 交叉链接缺 aarch64 GTK 库故不用交叉路线；updater 的 linux-arm64 平台键已就绪）。
+#
+# 发布清单签名（T6-4）：Secret MANIFEST_SIGNING_KEY（ed25519 私钥）存在时，
+# build job 以 CAMPUS_MANIFEST_SIGNING=1 构建二进制（嵌入仓内 resources/manifest-pubkey
+# 公钥），manifest job 组装全平台 latest.json → 助手 --sign-manifest 签名 →
+# --verify-manifest 用仓内公钥复核（私钥/公钥不匹配即失败）→ 上传 latest.json；
+# Secret 缺失时两侧都跳过（构建不嵌公钥，客户端不做清单签名校验）并输出警告。
+# 两侧必须同源同批：要么同时启用，要么都不做。
 
 on:
   push:
@@ -34,6 +43,9 @@ jobs:
     name: OpenWrt 服务包与 LuCI 插件
     # 桌面发布任务已创建 Release 后再上传，复用版本说明并避免创建竞态。
     needs: build
+    # caller job 只允许 name/uses/with/secrets/needs/if/permissions——不支持
+    # timeout-minutes（CI 首跑 startup_failure 实锤，actionlint 钉死）；超时
+    # 预算由 openwrt.yml 内部各 job 的 timeout-minutes 承担（60/15/60）
     uses: ./.github/workflows/openwrt.yml
     permissions:
       actions: read
@@ -44,6 +56,7 @@ jobs:
   build:
     name: 构建 ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +83,9 @@ jobs:
     env:
       RELEASE_TARGET: ${{ matrix.target }}
       ARCHIVE: campus-auth-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+      # T6-4 清单签名：Secret 存在时 build.rs 嵌入仓内公钥（与 manifest job 的
+      # 签名步骤同源同批；缺失时构建不嵌公钥，客户端不做清单签名校验）
+      CAMPUS_MANIFEST_SIGNING: ${{ secrets.MANIFEST_SIGNING_KEY != '' && '1' || '' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,6 +105,12 @@ jobs:
         with:
           toolchain: ${{ steps.rust-toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
+
+      # 按 target 区分缓存 scope，六个矩阵互不污染（key 还自动含 rustc 版本与 Cargo.lock）
+      - name: 缓存 Cargo 构建产物
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: release-${{ matrix.target }}
 
       # tray-icon 的 Linux 后端链接 GTK3 / appindicator / xdo（muda 菜单模拟点击），
       # 构建期需要 -dev 头文件
@@ -121,8 +143,25 @@ jobs:
             throw "tag $env:GITHUB_REF_NAME 与 Cargo.toml version=$cargo 不一致，请先同步版本号"
           }
 
+      # 供应链审计：构建经 cargo-auditable 包装，把依赖清单审计信息嵌入产物二进制的
+      # 版本控制信息段——不影响产物行为；campus-auth 与 campus-auth-helper 两个
+      # binary 都经此步构建，均被覆盖
+      # 安装走 taiki-e/install-action 预编译二进制（SHA pin 与 fuzz.yml 一致）而非
+      # cargo install：后者从源码编译要数分钟，rust-cache 只省二次编译，缓存 miss
+      # 时六矩阵各付一次全量编译
+      - name: 安装 cargo-auditable
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-auditable
+
+      # T6-4：签名未启用时显著提示（构建不嵌公钥，客户端对清单不做签名校验）
+      - name: 清单签名未启用警告
+        if: env.CAMPUS_MANIFEST_SIGNING != '1'
+        shell: pwsh
+        run: Write-Host "::warning::未配置 GitHub Secret MANIFEST_SIGNING_KEY，本次发布不签名清单、二进制不嵌入签名公钥（客户端不做清单签名校验）"
+
       - name: Release 构建
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo auditable build --release --locked --target ${{ matrix.target }}
 
       - name: 校验 Windows 真实产物版本资源
         if: runner.os == 'Windows'
@@ -146,6 +185,11 @@ jobs:
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth.exe" $out
           Copy-Item "target/$env:RELEASE_TARGET/release/campus-auth-helper.exe" $out
           Set-Content -LiteralPath "$out/campus-auth.portable" -Value "campus-auth-portable-v1" -Encoding utf8NoBOM
+          # 版本 marker：非 Windows 读取端的版本来源（无 PE 版本资源），与 Windows
+          # 版本资源同源取 Cargo.toml version；Windows 也写入以保持六矩阵产物一致
+          $version = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if (-not $version) { throw "Cargo.toml 缺少 version 字段" }
+          Set-Content -LiteralPath "$out/campus-auth.version" -Value $version -Encoding utf8NoBOM
           Copy-Item "resources" "$out/resources" -Recurse
           Copy-Item "src" "$out/src" -Recurse
           New-Item -ItemType Directory -Path "$out/frontend" | Out-Null
@@ -184,6 +228,14 @@ jobs:
           cp "target/$RELEASE_TARGET/release/campus-auth" pkg/
           cp "target/$RELEASE_TARGET/release/campus-auth-helper" pkg/
           printf '%s\n' 'campus-auth-portable-v1' > pkg/campus-auth.portable
+          # 版本 marker：非 Windows 无 PE 版本资源，更新器从包内 exe 同目录的该文件
+          # 提取版本（与 Windows 版本资源同源取 Cargo.toml version，严格 semver）
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "Cargo.toml 缺少 version 字段" >&2
+            exit 1
+          fi
+          printf '%s\n' "$version" > pkg/campus-auth.version
           cp -R resources pkg/resources
           cp -R src pkg/src
           mkdir -p pkg/frontend
@@ -256,9 +308,141 @@ jobs:
           fi
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
 
+  manifest:
+    name: 签名发布清单
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      # T6-4 清单签名启用判定：与 build job 的 CAMPUS_MANIFEST_SIGNING 同源同批
+      # （Secret 存在 → 两侧同时启用；缺失 → 两侧都不做，本 job 只输出警告）
+      HAS_SIGNING_KEY: ${{ secrets.MANIFEST_SIGNING_KEY != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 检测签名密钥
+        id: signing
+        run: |
+          if [ "$HAS_SIGNING_KEY" != "true" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::未配置 GitHub Secret MANIFEST_SIGNING_KEY，跳过发布清单签名（本次发布二进制同样不嵌签名公钥，客户端不做清单签名校验）"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 读取 Rust 工具链版本
+        if: steps.signing.outputs.enabled == 'true'
+        id: rust-toolchain
+        run: |
+          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)"
+          if [ -z "$channel" ]; then
+            echo "rust-toolchain.toml 缺少 toolchain.channel" >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 Rust 工具链
+        if: steps.signing.outputs.enabled == 'true'
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+
+      - name: 缓存 Cargo 构建产物
+        if: steps.signing.outputs.enabled == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: release-manifest-signer
+
+      # 助手二进制承载 --sign-manifest / --verify-manifest；openwrt 特性关闭
+      # tray-icon/GTK 桌面依赖，无 GUI runner 可直接编译（flags 与 openwrt.yml 一致）
+      - name: 构建签名助手
+        if: steps.signing.outputs.enabled == 'true'
+        run: cargo build --release --locked --no-default-features --features openwrt,no-embed --bin campus-auth-helper
+
+      # 全平台清单：版本/发布日期/更新说明取自 Release 元数据，平台包信息来自
+      # 各矩阵产物与其 .sha256 伴随文件（名称按矩阵约定推导）
+      - name: 组装发布清单（latest.json）
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, sys, urllib.request
+
+          tag = os.environ["RELEASE_TAG"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          meta = json.loads(subprocess.check_output(
+              ["gh", "release", "view", tag, "--json", "assets,body,publishedAt"]))
+          assets = {a["name"]: a for a in meta["assets"]}
+
+          # 构建矩阵 target → 更新器平台键（与 Rust 侧 infer_platform_key 对齐）。
+          # 只覆盖桌面六平台：openwrt 经系统服务更新，更新器不查询其平台键
+          targets = [
+              ("x86_64-pc-windows-msvc", "zip", "windows-x64"),
+              ("aarch64-pc-windows-msvc", "zip", "windows-arm64"),
+              ("aarch64-apple-darwin", "tar.gz", "macos-arm64"),
+              ("x86_64-apple-darwin", "tar.gz", "macos-x64"),
+              ("x86_64-unknown-linux-gnu", "tar.gz", "linux-x64"),
+              ("aarch64-unknown-linux-gnu", "tar.gz", "linux-arm64"),
+          ]
+
+          platforms = {}
+          missing = []
+          for target, ext, key in targets:
+              name = f"campus-auth-{tag}-{target}.{ext}"
+              asset = assets.get(name)
+              sha_asset = assets.get(f"{name}.sha256")
+              if not asset or not sha_asset:
+                  missing.append(name)
+                  continue
+              sha_doc = urllib.request.urlopen(
+                  sha_asset["browser_download_url"], timeout=60).read().decode().strip()
+              platforms[key] = {
+                  "url": asset["browser_download_url"],
+                  "sha256": sha_doc.split()[0].lower(),
+                  "size": asset["size"],
+              }
+          if missing:
+              print("发布缺少以下资产，无法组装清单: " + ", ".join(missing), file=sys.stderr)
+              sys.exit(1)
+
+          manifest = {
+              "version": tag[1:] if tag.startswith("v") else tag,
+              "release_date": (meta.get("publishedAt") or "")[:10],
+              "changelog": meta.get("body") or "",
+              "platforms": platforms,
+          }
+          with open("latest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+          print("已生成 latest.json，平台: " + ", ".join(sorted(platforms)))
+          PY
+
+      - name: 签名发布清单
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          MANIFEST_SIGNING_KEY: ${{ secrets.MANIFEST_SIGNING_KEY }}
+        run: ./target/release/campus-auth-helper --sign-manifest latest.json
+
+      # 一致性闸门：用仓内公钥复核刚生成的签名——Secret 私钥与提交入仓的公钥
+      # 不匹配会在这里失败，防止发出所有嵌公钥客户端都校不过的清单
+      - name: 复核清单签名
+        if: steps.signing.outputs.enabled == 'true'
+        run: ./target/release/campus-auth-helper --verify-manifest latest.json
+
+      - name: 上传清单到 GitHub Release
+        if: steps.signing.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" latest.json --clobber
+
   docker:
     name: 构建 Docker ${{ matrix.platform }}
+    # 版本门禁（tag 与 Cargo.toml 一致）只在 build job 校验，架构镜像推送必须排在其后，
+    # 否则门禁失败时镜像仍会被推上 ghcr（代价：发布串行，约 +10-15 分钟）
+    needs: build
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -302,6 +486,7 @@ jobs:
     name: 发布 Docker 多架构清单
     needs: [build, docker]
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     env:
       IMAGE_NAME: ghcr.io/misyra/campus-auth-rs
     steps:

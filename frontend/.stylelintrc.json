@@ -1,0 +1,26 @@
+{
+  "extends": "stylelint-config-recommended",
+  "rules": {
+    "color-no-hex": [true, { "message": "禁止直写 hex——颜色一律走 --token（base.css 定义层例外）" }],
+    "color-named": "never",
+    "declaration-property-value-disallowed-list": {
+      "/^color$/": ["white", "black", "red", "blue"],
+      "/^background-color$/": ["white", "black"]
+    },
+    "no-descending-specificity": [true, { "severity": "warning" }],
+    "no-duplicate-selectors": [true, { "severity": "warning" }],
+    "property-no-deprecated": [true, { "severity": "warning" }]
+  },
+  "overrides": [
+    { "files": ["src/styles/base.css"], "rules": { "color-no-hex": null, "color-named": null } },
+    {
+      "files": ["src/**/*.vue"],
+      "customSyntax": "postcss-html",
+      "rules": {
+        "selector-pseudo-class-no-unknown": [true, { "ignorePseudoClasses": ["deep", "global", "slotted"] }],
+        "selector-pseudo-element-no-unknown": [true, { "ignorePseudoElements": ["v-deep", "v-global", "v-slotted"] }]
+      }
+    }
+  ]
+}
+

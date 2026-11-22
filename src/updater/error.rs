@@ -11,8 +11,8 @@ pub enum UpdaterError {
     /// 路由器版交由系统服务管理升级，避免助手与 procd 同时启动后继进程。
     #[error("OpenWrt 版请先停止 campus-auth 服务，再手动替换安装包并启动服务")]
     ServiceManaged,
-    /// 独立更新任务异常退出。
-    #[error("更新任务执行失败: {0}")]
+    /// 独立更新任务异常退出（panic / 被中止），载荷为中文描述 + 原始 JoinError。
+    #[error("{0}")]
     OperationFailed(String),
     /// 拉取发布清单（latest.json）失败（网络/超时/非 2xx）
     #[error("拉取发布清单失败: {0}")]
@@ -32,6 +32,38 @@ pub enum UpdaterError {
     /// 本变体是"有包但发布流程漏带校验文件"，诊断方向不同。
     #[error("发布中当前平台包缺失 SHA256 校验文件，已拒绝更新")]
     ChecksumUnavailable,
+
+    /// 发布清单签名缺失或校验失败（嵌公钥构建的严格校验模式）
+    ///
+    /// 仅编译期嵌入了签名公钥的构建会走到这里（验证策略见
+    /// `updater::signature` 模块 doc）：清单没有携带 `signature` 字段，或签名
+    /// 与嵌入的发布方公钥不匹配。fail-closed：拒绝接受该清单，不降级为无签名
+    /// 流程——清单源被劫持时换包补假摘要的通道被签名彻底封死。
+    #[error("发布清单签名校验失败，已拒绝该清单（缺失签名或签名与发布方公钥不匹配）")]
+    ManifestSignatureInvalid,
+
+    /// 嵌公钥构建下发布未附带已签名的清单文件（GitHub Release 路径）
+    ///
+    /// 嵌公钥构建的信任锚只有发布方签名（见 `updater::signature` 模块 doc 的
+    /// 「同源同批」）：发布缺 `latest.json` 签名资产时，回退逐资产合成清单等于
+    /// 退回纯 TLS 信任，两种信任模型不可共存，故 fail-closed 拒绝而非降级。
+    /// 未嵌公钥构建不产生本错误（资产缺失照旧回退合成清单，与现状一致）。
+    #[error("发布缺少已签名的清单文件，已拒绝回退到未签名合成清单")]
+    SignedManifestMissing,
+
+    /// 清单版本低于本机已见过的最高版本（版本回滚保护）
+    ///
+    /// 版本单调保护只约束**清单驱动的自动流**：同一更新通道内，清单版本低于
+    /// 已记录的最高已见版本、且仍高于当前版本（可能驱动一次降级安装）时拒绝。
+    /// 用户主动切换更新通道（主动降级）不受影响——记录按通道隔离，切换后按
+    /// 新通道重建记录；低于当前版本的清单不构成可执行动作，不在此拒绝。
+    #[error("版本回滚被拒绝：清单版本 {manifest} 低于本机已见过的最高版本 {seen}")]
+    VersionRollbackRejected {
+        /// 本机已见过的最高清单版本。
+        seen: String,
+        /// 被拒绝的清单版本。
+        manifest: String,
+    },
 
     /// Releases 列表中没有符合更新通道的发布（列表为空 / 全为草稿 / tag 无法解析）
     #[error("Releases 列表中未找到符合更新通道的发布")]
@@ -102,23 +134,38 @@ pub enum UpdaterError {
     StalePending,
 
     /// zip 解压失败（损坏/格式错误/路径穿越）
-    #[error("解压失败: {0}")]
+    ///
+    /// 载荷是「动作 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），Display 直接透出。
+    #[error("{0}")]
     ExtractFailed(String),
 
     /// staging 目录创建失败
-    #[error("创建 staging 目录失败: {0}")]
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），`ErrorKind` 原样保留。
+    #[error("{0}")]
     StagingDirCreateFailed(#[source] std::io::Error),
 
-    /// pending.json 写入失败
-    #[error("写入 pending.json 失败: {0}")]
+    /// pending.json / 暂存包落盘写失败
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），`ErrorKind` 原样保留。
+    #[error("{0}")]
     PendingWriteFailed(#[source] std::io::Error),
 
     /// pending.json 读取失败
-    #[error("读取 pending.json 失败: {0}")]
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装），`ErrorKind` 原样保留。
+    #[error("{0}")]
     PendingReadFailed(#[source] std::io::Error),
 
     /// 助手进程启动失败
-    #[error("启动更新助手失败: {0}")]
+    ///
+    /// 载荷是「动作 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装，固定原因场景为自述中文文案）。
+    #[error("{0}")]
     HelperSpawnFailed(#[source] std::io::Error),
 
     /// 已有更新正在下载（进程内并发互斥窗口）
@@ -141,16 +188,15 @@ pub enum UpdaterError {
     #[error("替换可执行文件失败: {0}")]
     SelfReplaceFailed(String),
 
-    /// 回滚操作失败（仅记录，不中断流程）
-    #[error("回滚失败: {0}")]
-    RollbackFailed(String),
-
     /// URL 非 HTTPS，安全策略拒绝
     #[error("仅允许 HTTPS 下载源: {0}")]
     HttpsRequired(String),
 
     /// 无法确定当前可执行文件路径
-    #[error("无法确定当前可执行文件路径: {0}")]
+    ///
+    /// 载荷是「动作 + 失败类别 + 原始错误」的中文文案（构造点经
+    /// `utils::io_human` 包装）。
+    #[error("{0}")]
     CurrentExeResolveFailed(#[source] std::io::Error),
 
     /// 当前 Worker 来自外部或只读布局，不能由便携版更新器安全覆盖

@@ -9,17 +9,27 @@
  * 自动保存：字段变更 debounce 静默 PUT（见 useTasks），无保存按钮、
  * 无「放弃未保存的修改」确认；JSON 语法非法时不落盘只标红（并在退出时明说一句）。
  *
+ * 工具栏另有「录制新任务」入口（TaskRecordingDialog）：选方案 → 配置会话录制 →
+ * 动作转步骤 → 保存为浏览器任务，编排见 useTaskRecording。
+ *
  * 版式类名走 `styles/pages/tasks.css` 的 `tsk-*` 共享组（三个面板同一份）。
  */
+import AppDropdownMenu from "@/components/common/AppDropdownMenu.vue";
+import AppDropdownMenuItem from "@/components/common/AppDropdownMenuItem.vue";
 import IconApp from "@/components/common/IconApp.vue";
+import EmptyState from "@/components/common/EmptyState.vue";
 import FieldHelp from "@/components/common/FieldHelp.vue";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import CommunityTasksEntry from "@/components/common/CommunityTasksEntry.vue";
+import TaskRecordingDialog from "./TaskRecordingDialog.vue";
+import { useTaskRecording } from "./useTaskRecording";
+import { computed, onMounted, ref, watch } from "vue";
 import { useTasks } from "@/composables/useTasks";
 import { useScripts } from "@/composables/useScripts";
 import { useHttpTasks } from "@/composables/useHttpTasks";
 import { useRepoImport } from "@/composables/useRepoImport";
 import { useProfiles } from "@/composables/useProfiles";
 import { useTaskEditorQuery } from "@/composables/useTaskEditorQuery";
+import { useTaskDirectory } from "@/composables/useTaskDirectory";
 import { useDragSort } from "@/utils/drag";
 import { useDebug } from "@/composables/useDebug";
 import { autosaveLabel } from "@/utils/autosave";
@@ -32,6 +42,7 @@ const s = useScripts();
 const h = useHttpTasks();
 const repo = useRepoImport();
 const debug = useDebug();
+const recording = useTaskRecording();
 const { profiles } = useProfiles();
 
 // B1：拖拽排序必须互传全量——后端 order 接口会整体替换三组顺序，
@@ -41,16 +52,9 @@ const drag = useDragSort(t.tasks, { tasks: t.tasks, scripts: s.scripts, http: h.
 /** 实际列表（任务目录的浏览器任务视图） */
 const browserTasks = computed(() => t.tasks.value);
 
-/**
- * 行下标 → 拖拽用的**全量**下标。
- *
- * 模板里 `v-for` 走的是搜索过滤后的 `visibleTasks`，而 `useDragSort` 按传入列表
- * （全量 `t.tasks`）的 id 做 splice 与持久化：把过滤后的下标直接喂给它，搜索状态
- * 下拖一行会挪动另一条任务，并把错的顺序写进后端（刷新后才暴露）。
- */
-function dragIndex(taskId: string): number {
-  return t.tasks.value.findIndex((task) => task.id === taskId);
-}
+// 首拉在途：空列表可能只是「还没拉到」，先给加载态再判空（避免首屏闪「暂无任务配置」）
+const directory = useTaskDirectory();
+const listLoading = computed(() => directory.loading.value && !directory.loaded.value);
 
 // ===== 二级编辑页路由语义：?task=<id> =====
 /** 编辑态判据只有一个：草稿非空（query 只是"意图"，见 useTaskEditorQuery） */
@@ -133,47 +137,8 @@ const bindingIndex = computed(() => {
 /** 绑定索引是否可用（profiles 已拉取）：未就绪时绑定列显示「—」 */
 const bindingsReady = computed(() => Object.keys(profiles.value).length > 0);
 
-// ===== 行尾 ⋯ 菜单：同一时刻只开一个 =====
-const openMenuId = ref("");
-
-function toggleRowMenu(taskId: string): void {
-  openMenuId.value = openMenuId.value === taskId ? "" : taskId;
-}
-
-function closeRowMenu(): void {
-  openMenuId.value = "";
-}
-
-function runRowAction(action: () => unknown): void {
-  closeRowMenu();
-  void action();
-}
-
-function onDocumentPointerDown(): void {
-  closeRowMenu();
-}
-
-function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeRowMenu();
-}
-
-watch(openMenuId, (open) => {
-  if (open) {
-    document.addEventListener("pointerdown", onDocumentPointerDown);
-    document.addEventListener("keydown", onDocumentKeydown);
-  } else {
-    document.removeEventListener("pointerdown", onDocumentPointerDown);
-    document.removeEventListener("keydown", onDocumentKeydown);
-  }
-});
-
-// 切走时菜单还开着的话，watch 的清理分支不会执行（pre-flush watcher 在卸载时不再跑），
-// 必须在 onBeforeUnmount 里直接摘掉 document 监听
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-  document.removeEventListener("keydown", onDocumentKeydown);
-  closeRowMenu();
-});
+// 行尾 ⋯ 菜单的开合 / 外部点击 / Esc / 键盘导航已收口进 AppDropdownMenu（E6），
+// 本组件不再持任何菜单状态。
 
 // ===== 编辑态派生 =====
 /**
@@ -244,6 +209,11 @@ onMounted(async () => {
         placeholder="搜索名称 / ID / 描述"
         aria-label="搜索浏览器任务"
       />
+      <CommunityTasksEntry />
+      <button type="button" class="btn btn-sm" title="录制浏览器操作自动生成任务" @click="recording.openDialog()">
+        <IconApp name="target" class="icon-sm" />
+        录制新任务
+      </button>
       <button type="button" class="btn btn-sm" title="从文件导入任务" @click="t.importTask()">
         <IconApp name="upload" class="icon-sm" />
         从文件导入
@@ -273,55 +243,79 @@ onMounted(async () => {
         </colgroup>
         <thead>
           <tr>
-            <th class="tsk-drag-cell"></th>
-            <th>名称</th>
-            <th class="tsk-cell-id">任务 ID</th>
-            <th class="tsk-cell-bind">绑定方案</th>
-            <th class="tsk-cell-mtime">最近修改</th>
-            <th class="tsk-actions">操作</th>
+            <th scope="col" class="tsk-drag-cell"></th>
+            <th scope="col">名称</th>
+            <th scope="col" class="tsk-cell-id">任务 ID</th>
+            <th scope="col" class="tsk-cell-bind">绑定方案</th>
+            <th scope="col" class="tsk-cell-mtime">最近修改</th>
+            <th scope="col" class="tsk-actions">操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-if="!browserTasks.length">
+          <tr v-if="listLoading">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="layout" :stroke-width="1.5" />
-                <span>暂无任务配置</span>
-                <span class="empty-desc">点击上方「选择现成任务」使用已有登录流程，或新建任务</span>
-                <div class="empty-actions">
+              <div class="loading-state"><div class="spinner"></div><p>正在加载任务…</p></div>
+            </td>
+          </tr>
+          <tr v-else-if="!browserTasks.length">
+            <td colspan="6">
+              <EmptyState icon="layout" :stroke-width="1.5" title="暂无任务配置" description="点击上方「社区任务」使用已有登录流程，或新建任务">
+                <template #actions>
                   <button type="button" class="btn btn-sm btn-primary" @click="onNewTask">
                     <IconApp name="plus" />新建任务
                   </button>
-                </div>
-              </div>
+                </template>
+              </EmptyState>
             </td>
           </tr>
           <tr v-else-if="!visibleTasks.length">
             <td colspan="6">
-              <div class="empty-state">
-                <IconApp name="search" :stroke-width="1.5" />
-                <span>没有匹配「{{ searchQuery }}」的任务</span>
-              </div>
+              <EmptyState icon="search" :stroke-width="1.5" :title="`没有匹配「${searchQuery}」的任务`" />
             </td>
           </tr>
           <tr
             v-for="task in visibleTasks"
             :key="task.id"
             data-draggable-list
-            @dragstart="drag.handleDragStart($event, dragIndex(task.id))"
-            @dragover="drag.onDragOver($event, dragIndex(task.id))"
-            @drop="drag.onDrop($event, dragIndex(task.id))"
+            @dragstart="drag.handleDragStart($event, drag.indexOf(task.id))"
+            @dragover="drag.onDragOver($event, drag.indexOf(task.id))"
+            @drop="drag.onDrop($event, drag.indexOf(task.id))"
             @dragend="drag.onDragEnd($event)"
             @click="openEditor(task.id)"
           >
             <td class="tsk-drag-cell" @click.stop>
-              <div
-                class="task-drag-handle"
-                title="拖拽排序"
-                @mousedown="drag.onHandleMouseDown($event)"
-                @mouseup="drag.onHandleMouseUp($event)"
-              >
-                <IconApp name="list" class="icon-sm" />
+              <div class="tsk-order-group">
+                <!-- 拖拽把手是指针专用装饰：键盘排序走旁边「上移 / 下移」按钮，
+                     屏读器不播报避免与按钮重复（no-static 由此豁免） -->
+                <div
+                  class="task-drag-handle"
+                  title="拖拽排序"
+                  aria-hidden="true"
+                  @mousedown="drag.onHandleMouseDown($event)"
+                  @mouseup="drag.onHandleMouseUp($event)"
+                >
+                  <IconApp name="list" class="icon-sm" />
+                </div>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`上移：${task.name || task.id}`"
+                  :aria-label="`上移：${task.name || task.id}`"
+                  :disabled="drag.indexOf(task.id) === 0"
+                  @click="drag.moveBy(task.id, -1)"
+                >
+                  <IconApp name="chevron-up" class="icon-sm" />
+                </button>
+                <button
+                  type="button"
+                  class="tsk-order-btn"
+                  :title="`下移：${task.name || task.id}`"
+                  :aria-label="`下移：${task.name || task.id}`"
+                  :disabled="drag.indexOf(task.id) === t.tasks.value.length - 1"
+                  @click="drag.moveBy(task.id, 1)"
+                >
+                  <IconApp name="chevron-down" class="icon-sm" />
+                </button>
               </div>
             </td>
             <td>
@@ -343,42 +337,35 @@ onMounted(async () => {
             </td>
             <td class="tsk-cell-mtime"><span class="tsk-mtime">{{ formatMtime(task.modified_at) }}</span></td>
             <td class="tsk-actions" @click.stop>
-              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${task.name || task.id}`" @click="openEditor(task.id)">
+              <button type="button" class="btn btn-sm btn-icon-only" :title="`编辑：${task.name || task.id}`" :aria-label="`编辑：${task.name || task.id}`" @click="openEditor(task.id)">
                 <IconApp name="pencil" class="icon-sm" />
               </button>
               <button
                 type="button"
                 class="btn btn-sm btn-icon-only"
                 :title="`调试运行：${task.name || task.id}`"
+                :aria-label="`调试运行：${task.name || task.id}`"
                 :disabled="debug.loading.value"
                 @click="debug.startDebug(task.id)"
               >
                 <IconApp :name="debug.loading.value ? 'refresh' : 'bug'" class="icon-sm" :class="{ spin: debug.loading.value }" />
               </button>
-              <button
-                type="button"
-                class="btn btn-sm btn-icon-only"
-                :title="`更多操作：${task.name || task.id}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenuId === task.id"
-                @pointerdown.stop
-                @click.stop="toggleRowMenu(task.id)"
-              >
-                <IconApp name="more-vertical" class="icon-sm" />
-              </button>
-              <div v-if="openMenuId === task.id" class="tsk-menu" role="menu" @pointerdown.stop>
-                <button type="button" role="menuitem" :disabled="debug.loading.value" @click="runRowAction(() => debug.startDebug(task.id))">调试</button>
-                <button type="button" role="menuitem" :disabled="t.duplicatingIds.has(task.id)" @click="runRowAction(() => t.duplicateTask(task.id))">复制为新任务</button>
-                <button type="button" role="menuitem" :disabled="t.exportingIds.has(task.id)" @click="runRowAction(() => t.exportTask(task.id))">导出 JSON</button>
-                <button
-                  type="button"
-                  role="menuitem"
+              <AppDropdownMenu>
+                <template #trigger>
+                  <button type="button" class="btn btn-sm btn-icon-only" :title="`更多操作：${task.name || task.id}`" :aria-label="`更多操作：${task.name || task.id}`" @pointerdown.stop @click.stop>
+                    <IconApp name="more-vertical" class="icon-sm" />
+                  </button>
+                </template>
+                <AppDropdownMenuItem :disabled="debug.loading.value" @select="debug.startDebug(task.id)">调试</AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="t.duplicatingIds.has(task.id)" @select="t.duplicateTask(task.id)">复制为新任务</AppDropdownMenuItem>
+                <AppDropdownMenuItem :disabled="t.exportingIds.has(task.id)" @select="t.exportTask(task.id)">导出 JSON</AppDropdownMenuItem>
+                <AppDropdownMenuItem
                   class="tsk-menu-danger"
                   :disabled="task.id === 'default'"
                   :title="task.id === 'default' ? '内置默认任务是浏览器渠道的兜底，不可删除' : ''"
-                  @click="runRowAction(() => t.deleteTask(task.id))"
-                >删除</button>
-              </div>
+                  @select="t.deleteTask(task.id)"
+                >删除</AppDropdownMenuItem>
+              </AppDropdownMenu>
             </td>
           </tr>
         </tbody>
@@ -387,7 +374,7 @@ onMounted(async () => {
         <span>共 {{ browserTasks.length }} 个任务</span>
         <span v-if="searchQuery.trim()">· {{ visibleTasks.length }} 个匹配</span>
         <span class="tsk-spacer"></span>
-        <span>拖拽行首调整顺序 · 点行进入编辑 · 改动自动保存</span>
+        <span>点行进入编辑 · 改动自动保存</span>
       </div>
     </div>
   </div>
@@ -476,6 +463,8 @@ onMounted(async () => {
           </div>
           <div class="card-body">
             <div class="form-group">
+              <!-- aria-invalid/aria-describedby 与下方三态说明联动：语法错误时屏读器
+                   在控件上直接读到错误结论；合法但含危险步骤时读到危险提示 -->
               <textarea
                 id="task-json"
                 v-model="t.editingTask.value.json"
@@ -483,12 +472,14 @@ onMounted(async () => {
                 rows="18"
                 placeholder="任务JSON配置"
                 :class="{ 'json-invalid': t.jsonError.value, 'json-valid': jsonValid }"
+                :aria-invalid="!!t.jsonError.value || undefined"
+                :aria-describedby="t.jsonError.value ? 'task-json-note' : t.dangerousSteps.value.length ? 'task-json-note' : undefined"
                 @input="t.validateJson(); t.syncJsonToMeta()"
               ></textarea>
-              <div v-if="t.jsonError.value" class="json-error">JSON 语法错误，修正前不会保存：{{ t.jsonError.value }}</div>
+              <div v-if="t.jsonError.value" id="task-json-note" class="json-error">JSON 语法错误，修正前不会保存：{{ t.jsonError.value }}</div>
               <!-- 危险步骤常驻提示：自动保存模式下没有"保存前"这个时机了（旧版在那里弹一次
                    确认，改一次字段就静默落盘），所以提示挪到字段旁边——用户得当场知道存的是什么 -->
-              <div v-else-if="t.dangerousSteps.value.length" class="note note--warn">
+              <div v-else-if="t.dangerousSteps.value.length" id="task-json-note" class="note note--warn">
                 <IconApp name="alert-triangle" class="icon-sm" />
                 <span>
                   这份配置含 {{ t.dangerousSteps.value.length }} 个会执行 JavaScript 的步骤（{{
@@ -538,16 +529,17 @@ onMounted(async () => {
         <div class="card">
           <div class="card-header"><h3>快速上手</h3></div>
           <div class="card-body tsk-side-body">
-            <p class="tsk-side-hint">任务本身不会自动运行：到「方案」页选中它并保存，自动登录才会使用。</p>
             <p class="tsk-side-hint">
-              可以<button type="button" class="btn btn-link" @click="repo.showRepoImport()">选择现成任务</button>，或用<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成。
+              任务不会自动运行：到「方案」页选中并保存后生效。可<button type="button" class="btn btn-link" @click="repo.showRepoImport()">选择现成任务</button>或用<a :href="TUTORIAL_VIDEO_RECORD_URL" target="_blank" rel="noopener noreferrer">任务录制器</a>生成，步骤字段说明见<a href="/api/docs/task-writing-guide" target="_blank" rel="noopener noreferrer">编写指南</a>。
             </p>
-            <p class="tsk-side-hint">步骤类型与字段说明见<a href="/api/docs/task-writing-guide" target="_blank" rel="noopener noreferrer">编写指南</a>。</p>
           </div>
         </div>
       </div>
     </div>
   </div>
+
+  <!-- 录制新任务弹窗（Modal 经 portal 渲染，两态之外挂载） -->
+  <TaskRecordingDialog />
 </template>
 
 <style scoped>
@@ -556,9 +548,10 @@ onMounted(async () => {
 
 /* 描述并入名称格之后本表不再有独立的弹性列，故让**名称列**吃剩余宽度
    （fixed 布局下 auto 列分得剩余空间；不改的话剩下 5 列会被等比例放大，
-   名称两行反而分不到最宽）。 */
-.tsk-table col.tsk-col-name {
-  width: auto;
+   名称两行反而分不到最宽）。列宽分叉走共享类的 --tsk-col-name-w 变量口，
+   不在 scoped 直改共享类声明值。 */
+.tsk-table-card .tsk-table {
+  --tsk-col-name-w: auto;
 }
 
 /* JSON 正文编辑器：等宽 + 可纵向拉伸（中文描述与长步骤数组都要能读） */

@@ -108,3 +108,78 @@ def test_get_ocr_marks_and_clears_load_started(monkeypatch) -> None:
         release.set()
         ocr_runtime._ocr_cache.clear()
         ocr_runtime._ocr_load_started.clear()
+
+
+def test_get_ocr_normalizes_blank_and_dirty_range(monkeypatch) -> None:
+    """P2-6：空串/纯空白/脏数据与"未指定"共用默认档实例（key 规范化）。"""
+    import ocr_runtime
+
+    fake = _FakeOcr()
+    created: list[int] = []
+
+    def factory(**_kwargs):
+        created.append(1)
+        return fake
+
+    monkeypatch.setitem(sys.modules, "ddddocr", SimpleNamespace(DdddOcr=factory))
+    ocr_runtime._ocr_cache.clear()
+    try:
+        s_default = ocr_runtime._get_ocr(False)
+        s_blank = ocr_runtime._get_ocr(False, "")
+        s_spaces = ocr_runtime._get_ocr(False, "   ")
+        s_dirty = ocr_runtime._get_ocr(False, ["bad"])  # 非 str/int 脏数据退默认档
+        assert s_default is s_blank is s_spaces is s_dirty
+        assert created == [1], "等价取值应共用一个模型实例"
+    finally:
+        ocr_runtime._ocr_cache.clear()
+
+
+def test_get_ocr_failed_set_ranges_falls_back_to_default_instance(monkeypatch) -> None:
+    """P2-6：set_ranges 失败 → key 归一为默认档，与未指定范围共用实例。"""
+    import ocr_runtime
+
+    class BrokenRangeFake:
+        def set_ranges(self, _r: object) -> None:
+            raise ValueError("bad range")
+
+        def classification(self, _img: bytes) -> str:
+            return "ok"
+
+    inst = BrokenRangeFake()
+    monkeypatch.setitem(sys.modules, "ddddocr", SimpleNamespace(DdddOcr=lambda **_kw: inst))
+    ocr_runtime._ocr_cache.clear()
+    try:
+        s_bogus = ocr_runtime._get_ocr(False, "绝对非法")
+        s_default = ocr_runtime._get_ocr(False)
+        assert s_bogus is s_default, "set_ranges 失败的取值应归一到默认档实例"
+        assert (False, None) in ocr_runtime._ocr_cache
+    finally:
+        ocr_runtime._ocr_cache.clear()
+
+
+def test_get_ocr_lru_evicts_oldest_beyond_cap(monkeypatch) -> None:
+    """P2-6：缓存实例数有上限（LRU），触顶逐项淘汰最久未使用。"""
+    import ocr_runtime
+
+    class RangedFake:
+        def set_ranges(self, _r: object) -> None:
+            pass
+
+    monkeypatch.setitem(
+        sys.modules, "ddddocr", SimpleNamespace(DdddOcr=lambda **_kw: RangedFake())
+    )
+    ocr_runtime._ocr_cache.clear()
+    try:
+        keys = [(False, f"0123456789{i}") for i in range(5)]
+        for _, rng in keys:
+            ocr_runtime._get_ocr(False, rng)
+        assert len(ocr_runtime._ocr_cache) == ocr_runtime._OCR_CACHE_MAX_ENTRIES
+        assert keys[0] not in ocr_runtime._ocr_cache, "最旧的实例应被淘汰"
+        assert keys[-1] in ocr_runtime._ocr_cache, "最新的实例应保留"
+        # 触碰 k1 使其变新，再插入新 key → 淘汰的是更旧的 k2
+        ocr_runtime._get_ocr(False, keys[1][1])
+        ocr_runtime._get_ocr(False, "extra-range")
+        assert keys[1] in ocr_runtime._ocr_cache, "最近使用的实例不应被淘汰"
+        assert keys[2] not in ocr_runtime._ocr_cache
+    finally:
+        ocr_runtime._ocr_cache.clear()

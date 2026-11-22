@@ -11,7 +11,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum NetworkError {
     /// 子进程执行失败
-    #[error("子进程执行失败: {command}")]
+    ///
+    /// Display 内联原始错误（此前只挂在 `source` 链上，`{e}` 打日志时原因丢失）。
+    #[error("网络探测命令 {command} 启动失败：{source}")]
     SubprocessFailed {
         /// 执行的系统命令。
         command: String,
@@ -30,7 +32,9 @@ pub enum NetworkError {
     },
 
     /// 解析系统命令输出失败
-    #[error("解析系统命令输出失败: {command}")]
+    ///
+    /// Display 内联原始原因（非零退出码等），排障时不必再翻 `source` 链。
+    #[error("解析网络探测命令 {command} 输出失败：{source}")]
     ParseFailed {
         /// 执行的系统命令。
         command: String,
@@ -42,6 +46,11 @@ pub enum NetworkError {
     /// 网络检测不支持当前平台
     #[error("网络检测不支持当前平台")]
     UnsupportedPlatform,
+
+    /// 短 TTL 内缓存的近期失败（A21）：仅保留原始错误文案，避免瞬时故障期间
+    /// 每个探测周期都重新 spawn 高开销子进程
+    #[error("{0}")]
+    CachedFailure(String),
 }
 
 /// 网络检测 trait：各平台提供具体实现
@@ -180,7 +189,10 @@ async fn run_command(program: &str, args: &[&str]) -> Result<String, NetworkErro
         );
         return Err(NetworkError::ParseFailed {
             command: program.to_string(),
-            source: anyhow::anyhow!("命令退出码 {:?}", output.status.code()),
+            source: anyhow::anyhow!(
+                "命令以非零退出码 {:?} 结束，无可用输出",
+                output.status.code()
+            ),
         });
     }
     Ok(decode_console_output(&output.stdout))
@@ -890,22 +902,30 @@ pub const SUBPROCESS_TIMEOUT_SECS: u64 = 10;
 /// 网卡枚举缓存 TTL（秒）：避免每次探测周期 / Web 请求都新起 ipconfig/netsh/route 子进程
 const DETECT_CACHE_TTL_SECS: u64 = 30;
 
+/// 失败结果缓存 TTL（秒）：错误只缓存短时间，瞬时故障恢复后尽快允许重试（A21）
+const DETECT_ERROR_CACHE_TTL_SECS: u64 = 5;
+
 /// 单项缓存条目
 struct Cached<V> {
     fetched_at: std::time::Instant,
     value: V,
 }
 
+/// 单项缓存槽：成功/失败结果均可缓存（A21），错误以文案暂存、命中时还原
+type DetectCacheSlot<V> = std::sync::Mutex<Option<Cached<Result<V, String>>>>;
+
 /// 带 30s TTL 的网络检测器包装（7.3）
 ///
 /// `list_interfaces` / `default_gateways` / `current_ssid` 各自缓存，TTL 内直接返回缓存，
 /// 避免 monitor 每探测周期 + 每个探测请求都重新 spawn
 /// ipconfig、netsh、route 子进程（各 10s 超时，开销大）。
+/// 失败结果也缓存（A21）：成功 30s、失败 5s 短 TTL，错误文案经
+/// [`NetworkError::CachedFailure`] 还原。
 pub(crate) struct CachingDetector {
     inner: std::sync::Arc<dyn NetworkDetect>,
-    interfaces: std::sync::Mutex<Option<Cached<Vec<InterfaceInfo>>>>,
-    gateways: std::sync::Mutex<Option<Cached<Vec<Ipv4Addr>>>>,
-    ssid: std::sync::Mutex<Option<Cached<Option<String>>>>,
+    interfaces: DetectCacheSlot<Vec<InterfaceInfo>>,
+    gateways: DetectCacheSlot<Vec<Ipv4Addr>>,
+    ssid: DetectCacheSlot<Option<String>>,
 }
 
 impl CachingDetector {
@@ -919,12 +939,19 @@ impl CachingDetector {
     }
 
     /// 读缓存：未过期则返回 Some（克隆值），否则返回 None（触发重新探测）
-    fn fresh<T: Clone>(entry: &std::sync::Mutex<Option<Cached<T>>>) -> Option<T> {
+    ///
+    /// 成功结果走 [`DETECT_CACHE_TTL_SECS`]，失败结果走 [`DETECT_ERROR_CACHE_TTL_SECS`]
+    /// 短 TTL（A21）：失败也缓存可挡住瞬时故障期的高频重试，短 TTL 保证故障恢复
+    /// 后尽快自愈。
+    fn fresh<T: Clone>(entry: &DetectCacheSlot<T>) -> Option<Result<T, String>> {
         let guard = entry.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .as_ref()
-            .filter(|c| c.fetched_at.elapsed().as_secs() < DETECT_CACHE_TTL_SECS)
-            .map(|c| c.value.clone())
+        let cached = guard.as_ref()?;
+        let ttl = if cached.value.is_ok() {
+            DETECT_CACHE_TTL_SECS
+        } else {
+            DETECT_ERROR_CACHE_TTL_SECS
+        };
+        (cached.fetched_at.elapsed().as_secs() < ttl).then(|| cached.value.clone())
     }
 
     /// 写缓存
@@ -940,30 +967,51 @@ impl CachingDetector {
 #[async_trait]
 impl NetworkDetect for CachingDetector {
     async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
-        if let Some(v) = Self::fresh(&self.interfaces) {
-            return Ok(v);
+        if let Some(cached) = Self::fresh(&self.interfaces) {
+            return cached.map_err(NetworkError::CachedFailure);
         }
-        let value = self.inner.list_interfaces().await?;
-        Self::store(&self.interfaces, value.clone());
-        Ok(value)
+        match self.inner.list_interfaces().await {
+            Ok(value) => {
+                Self::store(&self.interfaces, Ok(value.clone()));
+                Ok(value)
+            }
+            Err(error) => {
+                Self::store(&self.interfaces, Err(error.to_string()));
+                Err(error)
+            }
+        }
     }
 
     async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
-        if let Some(v) = Self::fresh(&self.gateways) {
-            return Ok(v);
+        if let Some(cached) = Self::fresh(&self.gateways) {
+            return cached.map_err(NetworkError::CachedFailure);
         }
-        let value = self.inner.default_gateways().await?;
-        Self::store(&self.gateways, value.clone());
-        Ok(value)
+        match self.inner.default_gateways().await {
+            Ok(value) => {
+                Self::store(&self.gateways, Ok(value.clone()));
+                Ok(value)
+            }
+            Err(error) => {
+                Self::store(&self.gateways, Err(error.to_string()));
+                Err(error)
+            }
+        }
     }
 
     async fn current_ssid(&self) -> Result<Option<String>, NetworkError> {
-        if let Some(v) = Self::fresh(&self.ssid) {
-            return Ok(v);
+        if let Some(cached) = Self::fresh(&self.ssid) {
+            return cached.map_err(NetworkError::CachedFailure);
         }
-        let value = self.inner.current_ssid().await?;
-        Self::store(&self.ssid, value.clone());
-        Ok(value)
+        match self.inner.current_ssid().await {
+            Ok(value) => {
+                Self::store(&self.ssid, Ok(value.clone()));
+                Ok(value)
+            }
+            Err(error) => {
+                Self::store(&self.ssid, Err(error.to_string()));
+                Err(error)
+            }
+        }
     }
 }
 

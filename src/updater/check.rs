@@ -1,7 +1,13 @@
 //! 版本检查：latest.json 拉取 + semver 比较 + 平台选择
 //!
 //! 负责从配置的发布源拉取 `latest.json`，按当前平台（`target_os`/`target_arch`）
-//! 选择下载包，并通过 `semver` 比较判断是否存在可用更新。
+//! 选择下载包，并通过 `semver` 比较判断是否存在可用更新。清单在接受前经过
+//! ed25519 签名严格校验（嵌公钥构建；见 [`super::signature`] 模块 doc）：
+//! 自定清单文件直接校验随文件携带的 `signature` 字段；GitHub Release 路径
+//! 优先使用发布方随发布上传的已签名 `latest.json` 资产——嵌公钥构建下资产
+//! 缺失或不可用（含签名校验失败）一律直接拒绝，绝不回退逐资产合成清单
+//! （合成清单无签名字段，纯 TLS 信任与签名信任锚不可共存）；未嵌公钥构建
+//! 不做签名校验，资产不可用时照旧回退合成清单。
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::UpdateChannel;
 use crate::updater::error::UpdaterError;
+use crate::updater::signature;
 
 /// 更新源 URL 白名单：`https` 任意主机放行（拒绝 userinfo）；`http` 仅精确回环主机
 ///
@@ -150,7 +157,8 @@ pub(crate) async fn fetch_manifest(
         .send()
         .await
         .map_err(UpdaterError::ManifestFetchFailed)?;
-    // 重定向收敛：最终 URL 仍须通过白名单（防 https→http evil 跳转）
+    // 重定向已由客户端策略逐跳前置校验，此处兜底：最终 URL 仍须通过白名单
+    // （防 https→http evil 跳转；custom policy 下恒通过，无行为漂移）
     if !is_allowed_update_url(response.url().as_str()) {
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
     }
@@ -172,6 +180,9 @@ pub(crate) async fn fetch_manifest(
 
     // 格式 1：自定 latest.json（含 version 字段）
     if body.get("version").is_some() {
+        // T6-4：清单接受前的签名严格校验（嵌公钥构建；未嵌公钥构建为直通）。
+        // 校验先于结构解析：真实性优先，损坏的伪造清单不进入后续任何分支
+        signature::verify_manifest_value(&body)?;
         let manifest: ReleaseManifest =
             serde_json::from_value(body).map_err(UpdaterError::ManifestParseFailed)?;
         // UPD-5：自定义清单与 GitHub 路径同口径——命中平台包必须携带非空
@@ -198,13 +209,26 @@ pub(crate) async fn fetch_manifest(
     )))
 }
 
-/// 将单个 GitHub Release JSON 对象转换为发布清单
+/// 将单个 GitHub Release JSON 对象转换为发布清单（生产入口）
 ///
-/// 复用[`fetch_manifest`]的 tag_name 分支与通道列表路径：解析版本号，逐平台
-/// 资产拉取 `.sha256` 伴随文件（缺失的平台包直接跳过，见 G11/G12）。
+/// 以编译期嵌入的签名公钥调用 [`manifest_from_github_release_with_key`]；
+/// 测试注入显式密钥以覆盖嵌钥/无钥两种构建形态。
 async fn manifest_from_github_release(
     client: &reqwest::Client,
     body: &serde_json::Value,
+) -> Result<ReleaseManifest, UpdaterError> {
+    let verifying_key = signature::embedded_verifying_key();
+    manifest_from_github_release_with_key(client, body, verifying_key.as_ref()).await
+}
+
+/// [`manifest_from_github_release`] 的核心实现（`verifying_key` 可注入）
+///
+/// 复用[`fetch_manifest`]的 tag_name 分支与通道列表路径：解析版本号，逐平台
+/// 资产拉取 `.sha256` 伴随文件（缺失的平台包直接跳过，见 G11/G12）。
+async fn manifest_from_github_release_with_key(
+    client: &reqwest::Client,
+    body: &serde_json::Value,
+    verifying_key: Option<&ed25519_dalek::VerifyingKey>,
 ) -> Result<ReleaseManifest, UpdaterError> {
     let tag = body
         .get("tag_name")
@@ -229,6 +253,33 @@ async fn manifest_from_github_release(
         .flatten()
         .cloned()
         .collect();
+    // T6-4：优先使用发布方随发布上传的已签名清单 latest.json（对完整清单的
+    // 整体签名，含全平台包信息）。回退口径按构建形态二分：
+    // - 嵌公钥构建（verifying_key = Some）：资产缺失或不可用（下载 / 解析 /
+    //   签名校验失败）一律直接拒绝，绝不回退逐资产合成清单——合成清单无签名
+    //   字段，属纯 TLS 信任，与嵌钥构建的签名信任锚不可共存（fail-closed）。
+    //   资产缺失报 [`UpdaterError::SignedManifestMissing`]；签名不匹配
+    //   （[`UpdaterError::ManifestSignatureInvalid`]）是篡改信号；缺当前平台
+    //   包（PlatformNotAvailable）原样上抛，由通道枚举的候选回退口径处理
+    //   （语义见 fetch_latest_json_manifest doc）。
+    // - 未嵌公钥构建（verifying_key = None）：不做签名校验，资产取不到可用
+    //   内容时回退逐资产合成清单，与现状一致。
+    match latest_json_asset_url(&assets) {
+        Some(url) => {
+            match fetch_latest_json_manifest_with_key(client, &url, verifying_key).await {
+                Ok(manifest) => return Ok(manifest),
+                // 嵌公钥构建：一律不回退合成清单（含签名校验失败——篡改信号），
+                // 错误原样上抛
+                Err(e) if verifying_key.is_some() => return Err(e),
+                Err(e) => {
+                    tracing::warn!("随发布上传的已签名清单不可用（{e}），回退逐资产合成清单")
+                }
+            }
+        }
+        // 嵌公钥构建：发布未附带已签名清单 → 拒绝（fail-closed）
+        None if verifying_key.is_some() => return Err(UpdaterError::SignedManifestMissing),
+        None => {}
+    }
     let mut platforms: HashMap<String, PlatformPackage> = HashMap::new();
     // 仅拉取当前平台的校验信息：检查失败一条日志足够，且避免多平台全拉的刷屏与
     // 额外 sha256 伴随文件请求（旧逻辑遍历全部平台，每平台还重试一次）。
@@ -262,6 +313,75 @@ async fn manifest_from_github_release(
         changelog,
         platforms,
     })
+}
+
+/// 从发布资产中定位发布方签名的清单文件 `latest.json`（T6-4）
+///
+/// 文件名精确匹配（忽略大小写）；返回其下载 URL。URL 未通过更新源白名单时
+/// 按缺失处理（与 `.sha256` 伴随文件同口径：URL 完全由清单侧资产清单控制，
+/// 不通过即不追）。
+fn latest_json_asset_url(assets: &[serde_json::Value]) -> Option<String> {
+    let asset = assets.iter().find(|a| {
+        a.get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| n.eq_ignore_ascii_case("latest.json"))
+            .unwrap_or(false)
+    })?;
+    let url = asset
+        .get("browser_download_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if url.is_empty() {
+        return None;
+    }
+    if !is_allowed_update_url(url) {
+        // 只记 host：该 URL 完全由清单控制，可能携带 query/userinfo，勿整串进日志
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        tracing::warn!(host, "latest.json 资产 URL 未通过更新源白名单，按缺失处理");
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// 拉取并校验发布方签名的清单文件 `latest.json`（T6-4）
+///
+/// 链路：下载 → ed25519 签名严格校验（嵌公钥构建；未嵌公钥构建为直通）→
+/// 反序列化为 [`ReleaseManifest`] → 当前平台包存在性校验（缺失按
+/// [`UpdaterError::PlatformNotAvailable`] 报告，保持既有候选回退语义：
+/// 该候选被视为"发布缺当前平台资产"，通道枚举时继续尝试更低候选；嵌公钥
+/// 构建下同样原样上抛——已签名清单可信且为权威内容，不经合成清单回退）。
+async fn fetch_latest_json_manifest_with_key(
+    client: &reqwest::Client,
+    url: &str,
+    verifying_key: Option<&ed25519_dalek::VerifyingKey>,
+) -> Result<ReleaseManifest, UpdaterError> {
+    let response = client
+        .get(url)
+        .timeout(MANIFEST_FETCH_TIMEOUT)
+        .header("Accept", "application/json")
+        .header("User-Agent", "campus-auth-updater")
+        .send()
+        .await
+        .map_err(UpdaterError::ManifestFetchFailed)?;
+    let response = response
+        .error_for_status()
+        .map_err(UpdaterError::ManifestFetchFailed)?;
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(UpdaterError::ManifestFetchFailed)?;
+    signature::verify_manifest_with_key(&body, verifying_key)?;
+    let manifest: ReleaseManifest =
+        serde_json::from_value(body).map_err(UpdaterError::ManifestParseFailed)?;
+    if !manifest.platforms.contains_key(CURRENT_PLATFORM_KEY) {
+        return Err(UpdaterError::PlatformNotAvailable(
+            "latest.json 清单中无当前平台的下载包".into(),
+        ));
+    }
+    Ok(manifest)
 }
 
 /// 从发布源 URL 推导 GitHub Releases 列表 API 地址（通道枚举用）
@@ -340,6 +460,7 @@ pub(crate) async fn fetch_manifest_for_channel(
         .send()
         .await
         .map_err(UpdaterError::ManifestFetchFailed)?;
+    // 重定向已由客户端策略逐跳前置校验，此处兜底（custom policy 下恒通过）
     if !is_allowed_update_url(response.url().as_str()) {
         return Err(UpdaterError::HttpsRequired(response.url().to_string()));
     }
@@ -644,6 +765,17 @@ async fn fetch_sha256_assoc(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if url.is_empty() {
+        return String::new();
+    }
+    // 与主包下载同一白名单：清单指向的校验文件也可能被诱导到 http/内网地址；
+    // 未通过按「缺失」处理，沿用既有 ChecksumUnavailable → 下一候选回退口径
+    if !is_allowed_update_url(url) {
+        // 只记 host：该 URL 完全由清单控制，可能携带 query/userinfo，勿整串进日志
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        tracing::warn!(host, ".sha256 伴随文件 URL 未通过更新源白名单，按缺失处理");
         return String::new();
     }
     // 当前平台的校验失败不重试：网络错误或空体直接返回空串，调用方仅记一条
@@ -1160,5 +1292,372 @@ mod tests {
             matches!(err, UpdaterError::RateLimited { retry_after: 1 }),
             "{err}"
         );
+    }
+
+    /// `.sha256` 伴随文件 URL 未通过更新源白名单 → 按「缺失」处理返回空串（B4）
+    ///
+    /// 白名单在 `client.get` 前短路，无需起 mock 服务；`http://example.com`
+    /// 非 loopback 主机，恒被拒绝。
+    #[tokio::test]
+    async fn fetch_sha256_assoc_rejects_non_whitelisted_url() {
+        let assets = [serde_json::json!({
+            "name": "app.zip.sha256",
+            "browser_download_url": "http://example.com/app.zip.sha256",
+        })];
+        let asset_refs: Vec<&serde_json::Value> = assets.iter().collect();
+        let sha = fetch_sha256_assoc(&loopback_client(), &asset_refs, "app.zip").await;
+        assert!(
+            sha.is_empty(),
+            "非白名单伴随 URL 应按缺失返回空串，实际 {sha:?}"
+        );
+    }
+
+    // ============ T6-4：发布方签名清单（latest.json 资产） ============
+
+    /// latest.json 资产定位：精确名（忽略大小写）命中，伴随文件/白名单外/缺 URL 按缺失处理
+    #[test]
+    fn test_latest_json_asset_url() {
+        let mk =
+            |name: &str, url: &str| serde_json::json!({"name": name, "browser_download_url": url});
+        // 精确命中（多资产中找出清单文件）
+        assert_eq!(
+            latest_json_asset_url(&[
+                mk("pkg.zip", "https://x/pkg.zip"),
+                mk("latest.json", "https://x/latest.json"),
+            ])
+            .as_deref(),
+            Some("https://x/latest.json")
+        );
+        // 大小写不敏感
+        assert_eq!(
+            latest_json_asset_url(&[mk("Latest.JSON", "https://x/latest.json")]).as_deref(),
+            Some("https://x/latest.json")
+        );
+        // `.sha256` 伴随文件不是清单文件本身
+        assert_eq!(
+            latest_json_asset_url(&[mk("latest.json.sha256", "https://x/latest.json.sha256")]),
+            None
+        );
+        // URL 未通过白名单（非回环 http）→ 按缺失处理
+        assert_eq!(
+            latest_json_asset_url(&[mk("latest.json", "http://example.com/latest.json")]),
+            None
+        );
+        // 缺 URL 字段 → 按缺失处理
+        assert_eq!(
+            latest_json_asset_url(&[serde_json::json!({"name": "latest.json"})]),
+            None
+        );
+        assert_eq!(latest_json_asset_url(&[]), None);
+    }
+
+    /// GitHub Release 路径优先使用已签名 latest.json 资产：
+    /// 版本与平台信息来自资产文件而非 release tag / 逐资产合成
+    #[tokio::test]
+    async fn manifest_from_github_release_prefers_signed_latest_json() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (secret_b64, _pubkey_b64) = signature::generate_signing_keypair();
+        // 清单版本 3.1.4 与 release tag v3.0.0 不同：命中即证明内容确实来自资产文件
+        let manifest_body = format!(
+            r#"{{"version":"3.1.4","platforms":{{"{}":{{"url":"https://example.invalid/pkg.zip","sha256":"{}"}}}}}}"#,
+            CURRENT_PLATFORM_KEY,
+            "a".repeat(64)
+        );
+        let signed = signature::sign_manifest_document(&manifest_body, &secret_b64).unwrap();
+        let latest_value: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/repo/release",
+                route_get(move || async move {
+                    axum::Json(serde_json::json!({
+                        "tag_name": "v3.0.0",
+                        "prerelease": false,
+                        "draft": false,
+                        "assets": [
+                            {
+                                "name": "latest.json",
+                                "browser_download_url": format!("http://{addr}/latest.json"),
+                            },
+                            {"name": "app.zip", "browser_download_url": "https://example.invalid/app.zip"},
+                        ],
+                    }))
+                }),
+            )
+            .route(
+                "/latest.json",
+                route_get(move || {
+                    let body = latest_value.clone();
+                    async move { axum::Json(body) }
+                }),
+            );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let manifest = fetch_manifest(&loopback_client(), &format!("http://{addr}/repo/release"))
+            .await
+            .expect("发布附带已签名清单时应直接使用");
+        assert_eq!(
+            manifest.version,
+            Version::parse("3.1.4").unwrap(),
+            "版本应来自已签名 latest.json 资产而非 release tag"
+        );
+    }
+
+    // ============ T6-4b：嵌钥构建下拒绝合成清单回退（fail-closed） ============
+
+    /// 测试用 SHA256 伴随文件内容（64 位 hex；检查阶段不校验长度）
+    const TEST_SHA256: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// 生成测试密钥对并签发清单文档，返回签名文本与发布方验证公钥
+    fn sign_with_new_keypair(body: &str) -> (String, ed25519_dalek::VerifyingKey) {
+        let (secret_b64, pubkey_b64) = signature::generate_signing_keypair();
+        let signed = signature::sign_manifest_document(body, &secret_b64).unwrap();
+        let pubkey = signature::decode_pubkey(&pubkey_b64).expect("测试公钥应可解析");
+        (signed, pubkey)
+    }
+
+    /// 当前平台包齐备的最小清单文档（`platforms` 由调用方给定以便构造缺平台场景）
+    fn manifest_body_with_platforms(version: &str, platforms: &str) -> String {
+        format!(r#"{{"version":"{version}","platforms":{platforms}}}"#)
+    }
+
+    /// 当前平台包齐备的清单文档
+    fn full_platform_manifest_body(version: &str) -> String {
+        manifest_body_with_platforms(
+            version,
+            &format!(
+                r#"{{"{}":{{"url":"https://example.invalid/pkg.zip","sha256":"{}"}}}}"#,
+                CURRENT_PLATFORM_KEY,
+                "a".repeat(64)
+            ),
+        )
+    }
+
+    /// 组装「逐资产合成可完整成功」的 release JSON：当前平台包 + `.sha256`
+    /// 伴随文件齐备；`latest_url` 为 `Some` 时附带已签名清单资产。
+    /// 嵌钥构建下合成回退被拒绝的断言依赖本基座——若回退未被拒，测试会拿到
+    /// 合成清单的 Ok（版本取 tag v2.0.0）而非期望错误
+    fn synthetic_capable_release(addr: SocketAddr, latest_url: Option<&str>) -> serde_json::Value {
+        let mut assets = vec![
+            serde_json::json!({
+                "name": platform_asset_name(),
+                "browser_download_url": format!("http://{addr}/{}", platform_asset_name()),
+                "size": 16,
+            }),
+            serde_json::json!({
+                "name": format!("{}.sha256", platform_asset_name()),
+                "browser_download_url": format!("http://{addr}/{}.sha256", platform_asset_name()),
+            }),
+        ];
+        if let Some(url) = latest_url {
+            assets.push(serde_json::json!({
+                "name": "latest.json",
+                "browser_download_url": url,
+            }));
+        }
+        serde_json::json!({
+            "tag_name": "v2.0.0",
+            "prerelease": false,
+            "draft": false,
+            "assets": assets,
+        })
+    }
+
+    /// 嵌钥构建 + 发布未附带 latest.json 资产 → 拒绝（SignedManifestMissing），
+    /// 不落合成清单：合成基座完整可用（`.sha256` 伴随文件可取），若回退未被拒
+    /// 本测试将拿到 Ok(v2.0.0) 而非期望错误
+    #[tokio::test]
+    async fn signed_asset_missing_rejects_synthetic_fallback_when_pubkey_embedded() {
+        let (_, pubkey) = sign_with_new_keypair(&full_platform_manifest_body("3.1.4"));
+        // 先绑定端口拿到地址，再据此构造 release JSON（伴随文件 URL 需含端口）
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let release = synthetic_capable_release(addr, None);
+        let sha_path = format!("/{}.sha256", platform_asset_name());
+        let app = axum::Router::new().route(&sha_path, route_get(|| async { TEST_SHA256 }));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let err =
+            manifest_from_github_release_with_key(&loopback_client(), &release, Some(&pubkey))
+                .await
+                .expect_err("嵌钥构建下资产缺失应拒绝回退合成清单");
+        assert!(
+            matches!(err, UpdaterError::SignedManifestMissing),
+            "应报 SignedManifestMissing，实际 {err}"
+        );
+    }
+
+    /// 嵌钥构建 + latest.json 资产签名不匹配（内容被篡改）→ 直接拒绝
+    /// （ManifestSignatureInvalid），不得回退到完整可用的合成清单——那是篡改信号
+    #[tokio::test]
+    async fn signature_failure_does_not_fall_back_when_pubkey_embedded() {
+        let (signed, pubkey) = sign_with_new_keypair(&full_platform_manifest_body("3.1.4"));
+        // 签名后篡改版本号 → 签名与规范化字节不再匹配
+        let mut tampered: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        tampered["version"] = serde_json::Value::String("9.9.9".into());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sha_path = format!("/{}.sha256", platform_asset_name());
+        let release = synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json")));
+        let app = axum::Router::new()
+            .route(
+                "/release",
+                route_get(move || async move { axum::Json(release.clone()) }),
+            )
+            .route(
+                "/latest.json",
+                route_get(move || {
+                    let body = tampered.clone();
+                    async move { axum::Json(body) }
+                }),
+            )
+            .route(&sha_path, route_get(|| async { TEST_SHA256 }));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let err = manifest_from_github_release_with_key(
+            &loopback_client(),
+            &synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json"))),
+            Some(&pubkey),
+        )
+        .await
+        .expect_err("嵌钥构建下签名校验失败应直接拒绝");
+        assert!(
+            matches!(err, UpdaterError::ManifestSignatureInvalid),
+            "应报 ManifestSignatureInvalid，实际 {err}"
+        );
+    }
+
+    /// 嵌钥构建 + latest.json 资产拉取失败（500）→ 错误原样上抛，不回退合成清单
+    /// （嵌钥构建的回退通道整体不存在，传输类错误同样终止）
+    #[tokio::test]
+    async fn signed_asset_fetch_failure_terminates_without_fallback_when_pubkey_embedded() {
+        let (_, pubkey) = sign_with_new_keypair(&full_platform_manifest_body("3.1.4"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sha_path = format!("/{}.sha256", platform_asset_name());
+        let release = synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json")));
+        let app = axum::Router::new()
+            .route(
+                "/release",
+                route_get(move || async move { axum::Json(release.clone()) }),
+            )
+            .route(
+                "/latest.json",
+                route_get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route(&sha_path, route_get(|| async { TEST_SHA256 }));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let err = manifest_from_github_release_with_key(
+            &loopback_client(),
+            &synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json"))),
+            Some(&pubkey),
+        )
+        .await
+        .expect_err("嵌钥构建下资产拉取失败应原样上抛");
+        assert!(
+            matches!(err, UpdaterError::ManifestFetchFailed(_)),
+            "应报 ManifestFetchFailed，实际 {err}"
+        );
+    }
+
+    /// 嵌钥构建 + 已签名清单可信但缺当前平台包 → PlatformNotAvailable 原样上抛
+    /// （签名清单是权威内容，不经合成清单"救回"；候选回退口径由通道枚举处理）
+    #[tokio::test]
+    async fn platform_missing_in_signed_manifest_propagates_without_synthetic_fallback() {
+        let body = manifest_body_with_platforms(
+            "3.1.4",
+            r#"{"not-a-real-platform":{"url":"https://example.invalid/pkg.zip","sha256":"aa"}}"#,
+        );
+        let (signed, pubkey) = sign_with_new_keypair(&body);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sha_path = format!("/{}.sha256", platform_asset_name());
+        let release = synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json")));
+        let latest_value: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/release",
+                route_get(move || async move { axum::Json(release.clone()) }),
+            )
+            .route(
+                "/latest.json",
+                route_get(move || {
+                    let body = latest_value.clone();
+                    async move { axum::Json(body) }
+                }),
+            )
+            .route(&sha_path, route_get(|| async { TEST_SHA256 }));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let err = manifest_from_github_release_with_key(
+            &loopback_client(),
+            &synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json"))),
+            Some(&pubkey),
+        )
+        .await
+        .expect_err("缺当前平台包应原样上抛");
+        assert!(
+            matches!(err, UpdaterError::PlatformNotAvailable(_)),
+            "应报 PlatformNotAvailable，实际 {err}"
+        );
+    }
+
+    /// 无公钥构建（显式传 None 对照）：资产缺失 / 拉取失败均照旧回退合成清单，
+    /// 兼容语义与修复前完全一致
+    #[tokio::test]
+    async fn no_pubkey_build_fallback_behavior_unchanged() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sha_path = format!("/{}.sha256", platform_asset_name());
+        let missing = synthetic_capable_release(addr, None);
+        let broken = synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json")));
+        let app = axum::Router::new()
+            .route(
+                "/release-missing",
+                route_get(move || async move { axum::Json(missing.clone()) }),
+            )
+            .route(
+                "/release-broken",
+                route_get(move || async move { axum::Json(broken.clone()) }),
+            )
+            .route(
+                "/latest.json",
+                route_get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            )
+            .route(&sha_path, route_get(|| async { TEST_SHA256 }));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = loopback_client();
+
+        // 资产缺失 → 合成清单（版本取 tag，摘要取伴随文件）
+        let manifest = manifest_from_github_release_with_key(
+            &client,
+            &synthetic_capable_release(addr, None),
+            None,
+        )
+        .await
+        .expect("无钥构建下资产缺失应照旧回退合成清单");
+        assert_eq!(manifest.version, Version::parse("2.0.0").unwrap());
+        assert_eq!(
+            manifest.platforms[CURRENT_PLATFORM_KEY].sha256, TEST_SHA256,
+            "合成清单摘要应来自 .sha256 伴随文件"
+        );
+
+        // 资产拉取失败 → 同样回退合成清单
+        let manifest = manifest_from_github_release_with_key(
+            &client,
+            &synthetic_capable_release(addr, Some(&format!("http://{addr}/latest.json"))),
+            None,
+        )
+        .await
+        .expect("无钥构建下资产拉取失败应照旧回退合成清单");
+        assert_eq!(manifest.version, Version::parse("2.0.0").unwrap());
     }
 }

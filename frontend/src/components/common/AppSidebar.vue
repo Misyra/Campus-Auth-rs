@@ -13,14 +13,14 @@ import IconApp from "@/components/common/IconApp.vue";
 // 同一列上。现在改为在左侧栏本层展开子项——导航与它归属的一级项长在一起，任务页
 // 只剩正文。子项数据在 `utils/navTree.ts`（窄屏 pill 行兜底共用同一份）。
 //
-// 设置同样展开二级目录，子项定位长页中的区域，滚动位置决定当前高亮。
+// 设置为单入口（阶段 4③）：不再展开二级目录，分区内导航由设置页 sticky 顶部
+// tab 条承担（schema 见 views/settings/schema.ts）。
 
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useStatus } from "@/composables/useStatus";
 import { useUi } from "@/composables/useUi";
-import { activeChildId, TASK_NAV_CHILDREN, SETTINGS_NAV_CHILDREN } from "@/utils/navTree";
-import { useSettingsNavigation } from "@/composables/useSettingsNavigation";
+import { activeChildId, TASK_NAV_CHILDREN } from "@/utils/navTree";
 
 const route = useRoute();
 const router = useRouter();
@@ -30,14 +30,6 @@ const { quitApp } = useUi();
 /** 任务页各子路由的名字都以 tasks 开头；设置页同理用 settings 前缀判定高亮 */
 const onTasks = computed(() => String(route.name).startsWith("tasks"));
 const onSettings = computed(() => String(route.name).startsWith("settings"));
-const settingsNavigation = useSettingsNavigation();
-const settingsExpanded = ref(onSettings.value);
-watch(onSettings, (active) => { if (active) settingsExpanded.value = true; });
-
-function navigateSettings(id: string, name: string): void {
-  if (route.name === name) settingsNavigation.requestScroll(id);
-  else void router.push({ name });
-}
 
 /** 「任务」分组当前激活的子项 id（不在该分组时为 null） */
 const activeTaskChild = computed(() => activeChildId(TASK_NAV_CHILDREN, String(route.name)));
@@ -127,30 +119,11 @@ function navigate(name: string): void {
         <IconApp name="file-text" class="nav-icon" /><span>任务</span>
       </button>
 
-      <div class="nav-group" :class="{ 'nav-group--open': settingsExpanded }">
-        <button type="button" class="nav-item nav-item--group" :class="{ active: onSettings }"
-          :aria-expanded="settingsExpanded" aria-controls="nav-settings-children"
-          :title="settingsExpanded ? '设置 — 点击收起' : '设置 — 点击展开'"
-          @click="settingsExpanded = !settingsExpanded">
-          <IconApp name="settings" class="nav-icon" /><span>设置</span>
-          <IconApp name="chevron-down" class="nav-caret" :class="{ 'nav-caret--collapsed': !settingsExpanded }" />
-        </button>
-        <div id="nav-settings-children" class="nav-children" :class="{ 'nav-children--open': settingsExpanded }"
-          :aria-hidden="!settingsExpanded" :inert="!settingsExpanded">
-          <div class="nav-children-inner">
-            <button v-for="child in SETTINGS_NAV_CHILDREN" :key="child.id" type="button" class="nav-child"
-              :class="{ active: onSettings && settingsNavigation.activeSection.value === child.id }"
-              :aria-current="onSettings && settingsNavigation.activeSection.value === child.id ? 'location' : undefined"
-              :title="child.title" @click="navigateSettings(child.id, child.name)">
-              {{ child.label }}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 手机底栏直接进入长页，分类定位由页内菜单提供。 -->
-      <button type="button" class="nav-item nav-settings-mobile" :class="{ active: onSettings }"
-        :aria-current="onSettings ? 'page' : undefined" @click="navigate('settings')" title="设置">
+      <!-- 设置：单入口（阶段 4③）。分区内导航收进设置页 sticky 顶部 tab 条，
+           侧栏不再展开子项；分区的锚点（/settings#<id>）由页内 tab 与命令面板承担。 -->
+      <button type="button" class="nav-item" :class="{ active: onSettings }"
+        :aria-current="onSettings ? 'page' : undefined" @click="navigate('settings')"
+        title="设置（网络检测 / 登录与时段 / 浏览器 / 任务与环境 / 系统 / 更新与日志 / 推送通知 / 外观）">
         <IconApp name="settings" class="nav-icon" /><span>设置</span>
       </button>
 

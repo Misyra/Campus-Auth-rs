@@ -8,16 +8,113 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::scheduler::{SchedulerApi, SchedulerError};
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
+
+// ---- 契约 DTO（T5-1b scheduler 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。`SchedulerJobData` 是
+// `ScheduledTask` 序列化形状 + 列表端点运行时补充字段的**镜像声明**
+// （handler 仍走 `serde_json::to_value(&job)` 后回填）；历史条目是
+// `read_history` 落盘记录的透传映射（run_at/message/trigger/duration 均为
+// 原值透传，类型随落盘数据，故标注为任意 JSON 值）。
+
+/// 启动触发的当日成功计数簿记（镜像 `ScheduledTask.startup_success`）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SchedulerDailySuccessData {
+    /// 本地日期（ISO 格式 YYYY-MM-DD）
+    pub date: String,
+    /// 当日成功执行次数
+    pub count: u32,
+}
+
+/// GET /api/scheduler/jobs 列表项（`ScheduledTask` + 展示字段镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SchedulerJobData {
+    /// 定时任务 ID（= 文件名 stem）
+    pub id: String,
+    /// 显示名称
+    pub name: String,
+    /// 任务描述
+    pub description: String,
+    /// cron 表达式（用户侧 5 字段；启动触发任务为空串）
+    pub cron: String,
+    /// 关联目标任务 ID（浏览器/脚本任务）
+    pub target_id: String,
+    /// 预留字段：未来「定时登录」可指定凭据 Profile；当前恒为 null（不生效）
+    pub profile_id: Option<String>,
+    /// 执行超时秒数；null = 使用全局默认值
+    pub timeout: Option<u64>,
+    /// 是否启用
+    pub enabled: bool,
+    /// 上次执行时间（ISO 8601 字符串）；从未执行时为 null
+    pub last_run: Option<String>,
+    /// 上次执行结果；从未执行时为 null
+    pub last_result: Option<String>,
+    /// 触发方式：`cron` / `startup`
+    pub trigger: String,
+    /// 启动触发：每日成功次数上限；null = 默认上限
+    pub max_runs_per_day: Option<u32>,
+    /// 启动触发：单轮失败后最大重试次数；null = 默认次数
+    pub max_retries: Option<u32>,
+    /// 启动触发：延迟执行秒数；null = 不延迟
+    pub startup_delay_secs: Option<u64>,
+    /// 启动触发：当日成功次数簿记；非启动触发任务为 null
+    pub startup_success: Option<SchedulerDailySuccessData>,
+    /// 目标任务类型（browser/script/http，由 target 关联任务推导）；无法推导时缺省
+    #[schema(nullable = false)]
+    pub task_type: Option<String>,
+    /// cron 表达式解析失败、enabled 却永不触发的标记（true 时前端应提示修复）
+    pub schedule_invalid: bool,
+    /// 启动触发任务补充的当日成功次数（前端展示「今日 x/N 次」）；仅启动触发任务存在
+    #[schema(nullable = false)]
+    pub startup_runs_today: Option<u32>,
+}
+
+/// GET /api/scheduler/jobs/{id}/history 条目（落盘记录的透传映射）
+///
+/// `run_at`/`message`/`trigger`/`duration` 为落盘原值透传（通常依次为
+/// ISO 时间字符串 / 文本 / 触发来源 / 耗时毫秒数；历史数据缺失时为 null），
+/// 不编造具体类型。
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SchedulerHistoryData {
+    /// 执行时间（落盘 timestamp 原值，通常为 ISO 8601 字符串，缺失时为 null）
+    pub run_at: Value,
+    /// 是否成功（落盘 status == "success" 推导，恒为布尔）
+    pub success: bool,
+    /// 执行结果消息（落盘原值透传，缺失时为 null）
+    pub message: Value,
+    /// 触发来源（落盘原值透传，缺失时为 null）
+    pub trigger: Value,
+    /// 耗时（落盘原值透传，缺失时为 null）
+    pub duration: Value,
+}
+
+/// POST /api/scheduler/jobs/{id}/toggle 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SchedulerToggleData {
+    /// 切换后的启用状态
+    pub enabled: bool,
+}
 
 /// GET /api/scheduler/jobs — 列出全部定时任务
 ///
 /// 返回时补充 `task_type` 展示字段（由 target 关联的任务类型推导），
 /// 以及 `schedule_invalid`（cron 表达式解析失败、enabled 却永不触发的标记）。
+#[utoipa::path(
+    get,
+    path = "/api/scheduler/jobs",
+    operation_id = "get_api_scheduler_jobs",
+    tag = "scheduler",
+    responses(
+        (status = 200, description = "全部定时任务（含 id/task_type/schedule_invalid 展示字段与启动触发的当日次数）", body = DataEnvelope<Vec<SchedulerJobData>>),
+    )
+)]
 pub async fn list_jobs(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -46,15 +143,21 @@ pub async fn list_jobs(
 }
 
 /// POST /api/scheduler/jobs 请求体：新建定时任务（cron 表达式 + 目标任务 target_id）
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct JobCreateBody {
+    /// 定时任务 ID（= 落盘文件名 stem，已存在则 409）
     pub id: String,
+    /// 显示名称；缺省落盘为「未命名定时任务」
     pub name: Option<String>,
+    /// 关联目标任务 ID（浏览器/脚本任务，必须已存在；任务类型由目标权威推导）
     pub target_id: String,
-    /// cron 表达式（触发方式为 startup 时可缺省，落盘为空串）
+    /// cron 表达式（用户侧 5 字段；触发方式为 startup 时可缺省，落盘为空串）
     pub cron: Option<String>,
+    /// 是否启用；缺省 true
     pub enabled: Option<bool>,
+    /// 任务描述
     pub description: Option<String>,
+    /// 执行超时秒数；缺省按目标任务类型钳制
     pub timeout: Option<u64>,
     /// 触发方式（"cron"/"startup"，缺省 cron）
     pub trigger: Option<String>,
@@ -79,6 +182,19 @@ fn parse_trigger(raw: Option<&str>) -> Result<crate::scheduler::task::TaskTrigge
 ///
 /// 任务类型由 `target_id` 关联的目标任务权威推导，不再单独存储。
 /// 已存在的 id 返回 409（`save_task` 为 upsert 语义，此处显式拒绝静默覆盖）。
+#[utoipa::path(
+    post,
+    path = "/api/scheduler/jobs",
+    operation_id = "post_api_scheduler_jobs",
+    tag = "scheduler",
+    request_body(content = JobCreateBody, description = "新建定时任务：target_id 必须指向已存在的任务；cron 触发须带合法 cron 表达式，startup 触发可缺省"),
+    responses(
+        (status = 200, description = "创建成功并已通知调度主循环", body = DataEnvelope<String>),
+        (status = 400, description = "触发方式非法、cron 表达式无法解析或目标任务不存在", body = ErrorResponse),
+        (status = 409, description = "定时任务 ID 已存在", body = ErrorResponse),
+        (status = 500, description = "任务文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn create_job(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
     Json(body): Json<JobCreateBody>,
@@ -110,7 +226,7 @@ pub async fn create_job(
 }
 
 /// PUT /api/scheduler/jobs/{id} 请求体：字段全可选，仅更新出现的字段
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct JobUpdateBody {
     pub cron: Option<String>,
     pub enabled: Option<bool>,
@@ -126,7 +242,21 @@ pub struct JobUpdateBody {
     pub startup_delay_secs: Option<u64>,
 }
 
-/// PUT /api/scheduler/jobs/{id} — 更新定时任务
+/// PUT /api/scheduler/jobs/{id} — 更新定时任务（字段级合并，未提供字段保留原值）
+#[utoipa::path(
+    put,
+    path = "/api/scheduler/jobs/{id}",
+    operation_id = "put_api_scheduler_jobs_id",
+    tag = "scheduler",
+    params(("id" = String, Path, description = "定时任务 ID")),
+    request_body(content = JobUpdateBody, description = "字段全可选：仅更新出现的字段（trigger=cron 时 cron 表达式会被重新校验）"),
+    responses(
+        (status = 200, description = "更新成功并已通知调度主循环", body = DataEnvelope<String>),
+        (status = 400, description = "触发方式非法、cron 表达式无法解析或目标任务不存在", body = ErrorResponse),
+        (status = 404, description = "定时任务不存在", body = ErrorResponse),
+        (status = 500, description = "任务文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn update_job(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
     Path(id): Path<String>,
@@ -174,6 +304,18 @@ pub async fn update_job(
 }
 
 /// DELETE /api/scheduler/jobs/{id} — 删除定时任务
+#[utoipa::path(
+    delete,
+    path = "/api/scheduler/jobs/{id}",
+    operation_id = "delete_api_scheduler_jobs_id",
+    tag = "scheduler",
+    params(("id" = String, Path, description = "定时任务 ID")),
+    responses(
+        (status = 200, description = "删除成功并已通知调度主循环", body = DataEnvelope<String>),
+        (status = 404, description = "定时任务不存在", body = ErrorResponse),
+        (status = 500, description = "任务文件删除失败", body = ErrorResponse),
+    )
+)]
 pub async fn delete_job(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
     Path(id): Path<String>,
@@ -184,6 +326,18 @@ pub async fn delete_job(
 }
 
 /// POST /api/scheduler/jobs/{id}/toggle — 切换启用/禁用
+#[utoipa::path(
+    post,
+    path = "/api/scheduler/jobs/{id}/toggle",
+    operation_id = "post_api_scheduler_jobs_id_toggle",
+    tag = "scheduler",
+    params(("id" = String, Path, description = "定时任务 ID")),
+    responses(
+        (status = 200, description = "切换后的启用状态", body = DataEnvelope<SchedulerToggleData>),
+        (status = 404, description = "定时任务不存在", body = ErrorResponse),
+        (status = 500, description = "任务文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn toggle_job(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
     Path(id): Path<String>,
@@ -198,6 +352,21 @@ pub async fn toggle_job(
 }
 
 /// POST /api/scheduler/jobs/{id}/run — 手动触发定时任务
+///
+/// 与 cron 触发共用同一并发信号量闸：同一任务正在执行或调度器正在关闭时 409。
+#[utoipa::path(
+    post,
+    path = "/api/scheduler/jobs/{id}/run",
+    operation_id = "post_api_scheduler_jobs_id_run",
+    tag = "scheduler",
+    params(("id" = String, Path, description = "定时任务 ID")),
+    responses(
+        (status = 200, description = "已接受触发（异步执行，成败见执行历史）", body = DataEnvelope<String>),
+        (status = 404, description = "定时任务不存在", body = ErrorResponse),
+        (status = 409, description = "任务正在执行或调度器正在关闭", body = ErrorResponse),
+        (status = 500, description = "内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn run_job(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
     Path(id): Path<String>,
@@ -216,6 +385,18 @@ pub async fn run_job(
 ///
 /// id 校验、读盘与字段映射内聚在 `SchedulerApi::read_history`（调度域），
 /// handler 仅做转发；前端期望扁平数组 `[{ run_at, success, message }]`。
+#[utoipa::path(
+    get,
+    path = "/api/scheduler/jobs/{id}/history",
+    operation_id = "get_api_scheduler_jobs_id_history",
+    tag = "scheduler",
+    params(("id" = String, Path, description = "定时任务 ID（非法 ID 含路径穿越片段时 400）")),
+    responses(
+        (status = 200, description = "执行历史扁平数组（run_at/message/trigger/duration 为落盘原值透传）", body = DataEnvelope<Vec<SchedulerHistoryData>>),
+        (status = 400, description = "定时任务 ID 非法（如路径穿越片段）", body = ErrorResponse),
+        (status = 500, description = "历史文件读取失败", body = ErrorResponse),
+    )
+)]
 pub async fn job_history(
     State(scheduler): State<Arc<dyn SchedulerApi>>,
     Path(id): Path<String>,

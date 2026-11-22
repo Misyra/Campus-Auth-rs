@@ -8,7 +8,7 @@ import { reactive } from "vue";
 import { router } from "../router";
 import type { InitStatus, LoginHistoryItem } from "../api/types";
 import { systemApi, monitorApi, actionsApi, historyApi } from "../api";
-import { ApiError, extractApiError, isNoBrowserMessage } from "../api/client";
+import { ApiError, ensureAuthToken, extractApiError, isNoBrowserMessage, onAuthReady } from "../api/client";
 import { TIMING } from "../utils/constants";
 import { frontendLogger } from "../utils/logger";
 import { createFetchGuard } from "../utils/guards";
@@ -42,7 +42,6 @@ const { confirm } = useConfirm();
 let initialized = false;
 // F9：记录 init 启动的轮询定时器 id，quitApp 时统一清理
 const statusPollTimerIds: Array<ReturnType<typeof setInterval>> = [];
-const autostartPollTimerIds: Array<ReturnType<typeof setInterval>> = [];
 
 // F9：5s 守卫——init 与 Dashboard mount 双触发不再重复请求；force 供显式刷新绕过
 const historyFetchGuard = createFetchGuard(5000);
@@ -227,8 +226,6 @@ async function quitApp(): Promise<void> {
     // 只有后端确认收到关闭请求后才停止前端活动；请求失败时保留可恢复的现有会话。
     statusPollTimerIds.forEach((id) => clearInterval(id));
     statusPollTimerIds.length = 0;
-    autostartPollTimerIds.forEach((id) => clearInterval(id));
-    autostartPollTimerIds.length = 0;
     useWebSocket().destroy();
     showExitOverlay();
   } catch (error) {
@@ -269,7 +266,7 @@ function extractMsg(data: unknown, fallback: string): string {
 function stripScreenshotHint(message: string): string {
   const text = String(message || "");
   return text
-    .replace(/\s*[\[(]?\s*截图[:：]\s*\/(?:logs|debug|temp)\/\S+\.(?:png|jpg|jpeg|webp|gif)\s*[\])]?/gi, "")
+    .replace(/\s*[[(]?\s*截图[:：]\s*\/(?:logs|debug|temp)\/\S+\.(?:png|jpg|jpeg|webp|gif)\s*[\])]?/gi, "")
     .trim();
 }
 
@@ -307,33 +304,6 @@ async function init(): Promise<void> {
   ]);
   state.isLoading = false;
 
-  const wsMgr = useWebSocket();
-  // 注册重连全量刷新回调：断线重连后补齐非实时推送的数据（历史遗留 F1）
-  // F1：重连刷新前检查 dirty，设置页有未保存编辑时跳过 fetchConfig，避免覆盖丢弃（对齐 useProfiles 守卫策略）
-  wsMgr.onWsReconnect(async () => {
-    const pending = [
-      // P15：重连刷新为显式刷新场景，force: true 绕过 5 秒守卫
-      // 任务/脚本由任务目录单次拉取同时刷新，无需再调 fetchScripts
-      profiles.fetchProfiles(true),
-      tasks.fetchTasks(true),
-      scheduled.loadScheduledTasks(true),
-      // F8 顺带：补齐重连后遗漏的只读数据源
-      config.fetchPureMode(true),
-      fetchLoginHistory(true),
-    ];
-    if (!config.dirty.value) {
-      pending.unshift(config.fetchConfig());
-    }
-    await Promise.allSettled(pending);
-  });
-  wsMgr.connectWebSocket();
-  wsMgr.setupVisibilityChange();
-  // 自动检查更新受设置门控（fetchConfig 已在上面 allSettled 中完成）：
-  // 关闭后启动不再检查，仅保留设置页/关于页的手动"立即检查"
-  if (config.config.updater.auto_check_enabled) {
-    void autoCheckUpdateOnStartup();
-  }
-
   // F9：保存轮询定时器 id，退出时 clearInterval，避免 quitApp 后页面仍持续轮询
   // 断连退避：后端失联时固定 30s 轮询会刷出大量失败日志；连续失败 3 次后
   // 间隔拉到 5min（轮询成功即恢复 30s），quitApp 时同样清理。
@@ -369,9 +339,61 @@ async function init(): Promise<void> {
     }, intervalMs);
     statusPollTimerIds.push(statusPollTimer);
   };
-  armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
-  const autostartPollTimer = setInterval(() => useStatus().fetchAutostart(), TIMING.AUTOSTART_POLL_INTERVAL);
-  autostartPollTimerIds.push(autostartPollTimer);
+  /** 轮询降级复位（P2-7c）：WS 重连成功或鉴权恢复即切回常规间隔，不等慢轮询自愈 */
+  const resetStatusPollBackoff = (): void => {
+    if (statusFailStreak >= 3) armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
+    statusFailStreak = 0;
+  };
+
+  const wsMgr = useWebSocket();
+  // 注册重连全量刷新回调：断线重连后补齐非实时推送的数据（历史遗留 F1）
+  // F1：重连刷新前检查 dirty，设置页有未保存编辑时跳过 fetchConfig，避免覆盖丢弃（对齐 useProfiles 守卫策略）
+  wsMgr.onWsReconnect(async () => {
+    const pending = [
+      // P15：重连刷新为显式刷新场景，force: true 绕过 5 秒守卫
+      // 任务/脚本由任务目录单次拉取同时刷新，无需再调 fetchScripts
+      profiles.fetchProfiles(true),
+      tasks.fetchTasks(true),
+      scheduled.loadScheduledTasks(true),
+      // F8 顺带：补齐重连后遗漏的只读数据源
+      config.fetchPureMode(true),
+      fetchLoginHistory(true),
+    ];
+    if (!config.dirty.value) {
+      pending.unshift(config.fetchConfig());
+    }
+    await Promise.allSettled(pending);
+    // P2-7c：WS 重连成功 = 后端可达且已鉴权，立即复位状态轮询的连败降级
+    //（降级间隔最长 5min，等慢轮询自愈太迟）
+    resetStatusPollBackoff();
+  });
+  // connectWebSocket 内部自带鉴权门（P2-7）：引导未完成时挂起等待就绪事件，
+  // 不会以匿名身份打出一圈 401 重连风暴
+  wsMgr.connectWebSocket();
+  wsMgr.setupVisibilityChange();
+  // 自动检查更新受设置门控（fetchConfig 已在上面 allSettled 中完成）：
+  // 关闭后启动不再检查，仅保留设置页/关于页的手动"立即检查"
+  if (config.config.updater.auto_check_enabled) {
+    void autoCheckUpdateOnStartup();
+  }
+
+  // P2-7：状态轮询与 WS 同样排在「鉴权就绪」之后——引导完成前发轮询只会拿 401
+  // 失败连败 3 次把间隔降级 5min。引导已有 token 即刻起表；引导态（AuthBootstrapGuide
+  // 接管）等就绪事件（就绪事件的另一订阅在 useWebSocket 内驱动 WS 本身）
+  void ensureAuthToken().then((token) => {
+    if (token) {
+      armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
+      return;
+    }
+    frontendLogger.info("app.init", "暂无可用凭据，状态轮询等待鉴权就绪");
+    onAuthReady(() => {
+      resetStatusPollBackoff();
+      armStatusPoll(TIMING.STATUS_POLL_INTERVAL);
+    });
+  });
+  // 自启动不再全局轮询：状态只在设置页挂载时拉取、操作（开关/应用预设）后刷新，
+  // 见 SystemStartupRows 的 onMounted 与 useConfig.toggleAutostart / useRunMode.applyRunMode。
+  // init 此处的一次拉取供向导运行模式判定与其它展示点读缓存值。
 
   // 应用外观
   appearance.applyAppearance();

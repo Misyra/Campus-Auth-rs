@@ -47,6 +47,8 @@
 - **大二进制不入库**：`*.exe` / `*.zip` / `*.bak`（约 29MB）已加入忽略；`fixtures/update/fake-update/` 与 `su-zip/` 仅保留 `latest.json` 与 `.sha256`，`fixtures/runtime-envs/su-*` / `e2e-helper-isolated` 的二进制需本地按需生成（`cargo build --release` 后拷贝或执行更新链路脚本）。
 - **空目录占位**：`environment/` / `logs/` / `tasks/browser/` 等空骨架以 `.gitkeep` 占位，避免检出后缺目录。
 - **不要直接以 `tests/fixtures/runtime-envs/*` 为 `base_path` 启动主程序**：它们是模板，测试应在 `tempfile::tempdir()` 中拷贝所需文件后启动，避免污染模板。
+- **时序等待一律轮询，不写固定 sleep**：「固定 sleep 后断言」的墙钟窗口在慢机会踩空（条件未达成即失败）、快机上又白等。tokio 用例统一走 `common::wait_until`（`assert!(wait_until(上限, 谓词))`，50ms 步进），谓词优先选既有观测面（如 `BridgeApi::session_busy`、`utils::lock::query_instance`、端口探测），上限给足余量（10-15s），断言「在期限内达成」本身成为测试的一部分。
+- **启动模式用例**（`instance_lifecycle.rs`，P2-9 起）：真起二进制的启动模式用例共享 `SERIAL` 互斥（口径同 `login_chain.rs`）；lightweight 按 `cfg` 分派断言两侧既定行为——macOS 自动降级为完整模式（Web 可用、引擎不自动启动），其余桌面平台保持真语义（`.instance` 哨兵端口 0、Web 不常驻）；login-once 用直连渠道 + 进程内 mock 门户（不依赖 Python/浏览器），断言登录成功后进程自退与登录历史落盘。
 
 ## 相关目录
 

@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::updater::error::UpdaterError;
+use crate::utils::io_human::io_error_at;
 
 /// staging 目录相对路径（相对 base_path）
 pub(crate) const STAGING_DIR_NAME: &str = "update/staging";
@@ -73,22 +74,31 @@ pub(crate) fn has_pending_update(base_path: &Path) -> bool {
 pub(crate) fn write_pending(pending: &PendingUpdate, base_path: &Path) -> Result<(), UpdaterError> {
     let path = pending_path(base_path);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(UpdaterError::PendingWriteFailed)?;
+        // 人话化载荷：动作 + 路径 + 失败类别 + 原始错误（ErrorKind 保留）
+        std::fs::create_dir_all(parent).map_err(|e| {
+            UpdaterError::PendingWriteFailed(io_error_at("创建更新目录", parent, e))
+        })?;
     }
     let json = serde_json::to_vec(pending).map_err(|e| {
-        UpdaterError::PendingWriteFailed(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        UpdaterError::PendingWriteFailed(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("pending 标记内容无法序列化（{e}）"),
+        ))
     })?;
-    crate::utils::io::atomic_write_bytes(&path, &json).map_err(UpdaterError::PendingWriteFailed)
+    crate::utils::io::atomic_write_bytes(&path, &json)
+        .map_err(|e| UpdaterError::PendingWriteFailed(io_error_at("写入待应用更新标记", &path, e)))
 }
 
 /// 读取并解析 pending.json
 pub(crate) fn read_pending(base_path: &Path) -> Result<PendingUpdate, UpdaterError> {
     let path = pending_path(base_path);
-    let data = std::fs::read(&path).map_err(UpdaterError::PendingReadFailed)?;
+    let data = std::fs::read(&path).map_err(|e| {
+        UpdaterError::PendingReadFailed(io_error_at("读取待应用更新标记", &path, e))
+    })?;
     serde_json::from_slice(&data).map_err(|e| {
         UpdaterError::PendingReadFailed(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            e.to_string(),
+            format!("待应用更新标记内容不是合法 JSON（{e}）"),
         ))
     })
 }

@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::updater::apply::STAGING_DIR_NAME;
 use crate::updater::download::MAX_UPDATE_ARCHIVE_BYTES;
 use crate::updater::error::UpdaterError;
+use crate::utils::io_human::{io_error, io_error_at};
 
 /// `update/` 根目录内由程序自身维护、不可被当作安装包的固定文件名
 ///
@@ -188,27 +189,32 @@ fn stage_local_package_blocking(
     archive_name: &str,
     expected_sha256: &str,
 ) -> Result<PathBuf, UpdaterError> {
-    std::fs::create_dir_all(staging_dir).map_err(UpdaterError::StagingDirCreateFailed)?;
+    std::fs::create_dir_all(staging_dir).map_err(|e| {
+        UpdaterError::StagingDirCreateFailed(io_error_at("创建更新暂存目录", staging_dir, e))
+    })?;
     let tmp_path = staging_dir.join(format!("{archive_name}.local.tmp"));
     // 上次中断可能残留同名临时文件；覆盖写前先清掉，避免尾部残留字节
     if tmp_path.exists() {
         let _ = std::fs::remove_file(&tmp_path);
     }
 
-    let mut reader = std::fs::File::open(src).map_err(UpdaterError::PendingWriteFailed)?;
-    let mut writer = std::fs::File::create(&tmp_path).map_err(UpdaterError::PendingWriteFailed)?;
+    let mut reader = std::fs::File::open(src)
+        .map_err(|e| UpdaterError::PendingWriteFailed(io_error_at("读取本地安装包", src, e)))?;
+    let mut writer = std::fs::File::create(&tmp_path).map_err(|e| {
+        UpdaterError::PendingWriteFailed(io_error_at("创建本地包暂存临时文件", &tmp_path, e))
+    })?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     let mut written = 0u64;
     loop {
-        let n =
-            std::io::Read::read(&mut reader, &mut buf).map_err(UpdaterError::PendingWriteFailed)?;
+        let n = std::io::Read::read(&mut reader, &mut buf)
+            .map_err(|e| UpdaterError::PendingWriteFailed(io_error("复制本地安装包", e)))?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
         std::io::Write::write_all(&mut writer, &buf[..n])
-            .map_err(UpdaterError::PendingWriteFailed)?;
+            .map_err(|e| UpdaterError::PendingWriteFailed(io_error("复制本地安装包", e)))?;
         written += n as u64;
         if written > MAX_UPDATE_ARCHIVE_BYTES {
             drop(writer);
@@ -218,7 +224,8 @@ fn stage_local_package_blocking(
             });
         }
     }
-    std::io::Write::flush(&mut writer).map_err(UpdaterError::PendingWriteFailed)?;
+    std::io::Write::flush(&mut writer)
+        .map_err(|e| UpdaterError::PendingWriteFailed(io_error("复制本地安装包", e)))?;
     drop(writer);
 
     let actual = hex::encode(hasher.finalize());
@@ -231,7 +238,9 @@ fn stage_local_package_blocking(
     }
 
     let archive_path = staging_dir.join(archive_name);
-    std::fs::rename(&tmp_path, &archive_path).map_err(UpdaterError::PendingWriteFailed)?;
+    std::fs::rename(&tmp_path, &archive_path).map_err(|e| {
+        UpdaterError::PendingWriteFailed(io_error_at("暂存本地安装包", &archive_path, e))
+    })?;
     Ok(archive_path)
 }
 
@@ -264,15 +273,19 @@ fn copy_into_staging_blocking(
     staging_dir: &Path,
     archive_name: &str,
 ) -> Result<PathBuf, UpdaterError> {
-    std::fs::create_dir_all(staging_dir).map_err(UpdaterError::StagingDirCreateFailed)?;
+    std::fs::create_dir_all(staging_dir).map_err(|e| {
+        UpdaterError::StagingDirCreateFailed(io_error_at("创建更新暂存目录", staging_dir, e))
+    })?;
     let path = staging_dir.join(archive_name);
-    let mut reader = std::fs::File::open(src).map_err(UpdaterError::PendingWriteFailed)?;
-    let mut writer = std::fs::File::create(&path).map_err(UpdaterError::PendingWriteFailed)?;
+    let mut reader = std::fs::File::open(src)
+        .map_err(|e| UpdaterError::PendingWriteFailed(io_error_at("读取上传的安装包", src, e)))?;
+    let mut writer = std::fs::File::create(&path)
+        .map_err(|e| UpdaterError::PendingWriteFailed(io_error_at("保存上传的安装包", &path, e)))?;
     let mut buf = [0u8; 65536];
     let mut written = 0u64;
     loop {
-        let n =
-            std::io::Read::read(&mut reader, &mut buf).map_err(UpdaterError::PendingWriteFailed)?;
+        let n = std::io::Read::read(&mut reader, &mut buf)
+            .map_err(|e| UpdaterError::PendingWriteFailed(io_error("复制上传的安装包", e)))?;
         if n == 0 {
             break;
         }
@@ -286,9 +299,10 @@ fn copy_into_staging_blocking(
             });
         }
         std::io::Write::write_all(&mut writer, &buf[..n])
-            .map_err(UpdaterError::PendingWriteFailed)?;
+            .map_err(|e| UpdaterError::PendingWriteFailed(io_error("复制上传的安装包", e)))?;
     }
-    std::io::Write::flush(&mut writer).map_err(UpdaterError::PendingWriteFailed)?;
+    std::io::Write::flush(&mut writer)
+        .map_err(|e| UpdaterError::PendingWriteFailed(io_error("复制上传的安装包", e)))?;
     Ok(path)
 }
 

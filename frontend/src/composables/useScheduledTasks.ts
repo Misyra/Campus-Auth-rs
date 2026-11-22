@@ -46,6 +46,8 @@ const { browserTasks, scripts: taskScripts, loaded: directoryLoaded } = useTaskD
 const scheduledTasks = ref<ScheduledTask[]>([]);
 /** 列表是否已成功拉取过一次：`?task=<id>` 未就绪时不判定"任务不存在"（见 useTaskEditorQuery 的 ready） */
 const scheduledLoaded = ref(false);
+/** 列表拉取是否在途：供面板区分「正在加载」与「确实为空」两种空态（配合 scheduledLoaded 消费） */
+const scheduledLoading = ref(false);
 /** 正在编辑的定时任务草稿（null = 列表态） */
 const scheduledTaskDraft = ref<ScheduledTaskDraft | null>(null);
 
@@ -84,6 +86,7 @@ async function loadScheduledTasks(force = false): Promise<void> {
   if (!fetchGuard.shouldFetch(force || refreshAfterPollStopped)) return;
   refreshAfterPollStopped = false;
   const mine = ++loadEpoch;
+  scheduledLoading.value = true;
   try {
     const data = await scheduledTasksApi.list();
     if (mine !== loadEpoch) return; // 过期快照：丢弃
@@ -99,6 +102,9 @@ async function loadScheduledTasks(force = false): Promise<void> {
     if (loadFail.trackFailure()) {
       toastOnly(false, extractApiError(e, "加载定时任务失败"));
     }
+  } finally {
+    // 过期拉取（已被新的一发接管）不动标志，由最新一发负责复位
+    if (mine === loadEpoch) scheduledLoading.value = false;
   }
 }
 
@@ -401,6 +407,7 @@ export function useScheduledTasks() {
   return {
     scheduledTasks,
     scheduledLoaded,
+    scheduledLoading,
     scheduledTaskDraft,
     isNewScheduledDraft,
     autosaveState: autosave.autosaveState,

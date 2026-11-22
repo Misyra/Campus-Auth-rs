@@ -6,7 +6,6 @@
 import { describe, it, expect } from "vitest";
 import {
   formatScheduleTime,
-  formatTimeValue,
   formatDuration,
   formatTimestamp,
   formatShortTime,
@@ -29,22 +28,6 @@ describe("formatScheduleTime", () => {
 
   it("缺失字段按 0 处理", () => {
     expect(formatScheduleTime({})).toBe("00:00");
-  });
-});
-
-describe("formatTimeValue", () => {
-  it("0 与 undefined 返回占位符", () => {
-    expect(formatTimeValue(0)).toBe("-");
-  });
-
-  it("一分钟内按秒展示", () => {
-    expect(formatTimeValue(30)).toBe("30秒");
-    expect(formatTimeValue(59)).toBe("59秒");
-  });
-
-  it("超过一分钟向上取整为分钟", () => {
-    expect(formatTimeValue(60)).toBe("1分钟");
-    expect(formatTimeValue(90)).toBe("2分钟");
   });
 });
 

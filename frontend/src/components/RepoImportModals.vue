@@ -19,6 +19,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import Modal from "./common/Modal.vue";
 import IconApp from "./common/IconApp.vue";
+import EmptyState from "./common/EmptyState.vue";
 import { repoApi } from "@/api";
 import type { RepoTask } from "@/api/types";
 import { TASK_REPO_SOURCES } from "@/utils/constants";
@@ -84,6 +85,10 @@ const detailRef = ref<HTMLElement | null>(null);
 /** 手机端列表在详情上方，点选后将详情带入可视区 */
 async function selectTask(task: RepoTask): Promise<void> {
   repo.selectRepoTask(task);
+  // 768 与本组件底部 @media(max-width: 768px)「列表封顶 40vh」块同档（全局
+  // --bp-md，见 index.css 断点约定清单；双栏变纵排本身在 responsive.css 的 640 档）。
+  // 媒体查询条件不能用 var()，matchMedia 字符串同理，故写字面值，一致性由
+  // breakpoints.test.ts 钉住
   if (!window.matchMedia("(max-width: 768px)").matches) return;
   await nextTick();
   detailRef.value?.scrollIntoView({
@@ -257,13 +262,18 @@ watch(
             </a>
           </div>
           <div v-if="selectedScreenshotUrl && !brokenImages.has(repoTaskKey(repo.repoImport.value.selected))" class="repo-detail-shot">
+            <!-- 可点击截图补键盘路径：role=button + Enter/Space 触发放大预览 -->
             <img
               :src="selectedScreenshotUrl"
-              :alt="`${repo.repoImport.value.selected.name} 登录页截图`"
+              :alt="`${repo.repoImport.value.selected.name} 登录页截图，回车放大查看`"
               loading="lazy"
               class="repo-detail-shot-img"
+              role="button"
+              tabindex="0"
               title="点击放大查看"
               @click="openShotPreview(selectedScreenshotUrl, repo.repoImport.value.selected.name)"
+              @keydown.enter.prevent="openShotPreview(selectedScreenshotUrl, repo.repoImport.value.selected.name)"
+              @keydown.space.prevent="openShotPreview(selectedScreenshotUrl, repo.repoImport.value.selected.name)"
               @error="markImageBroken(repoTaskKey(repo.repoImport.value.selected))"
             />
             <span class="repo-detail-zoom-hint">点击放大</span>
@@ -272,28 +282,30 @@ watch(
         <div v-else class="repo-detail-empty">选择任务，查看登录方式与来源</div>
       </div>
     </div>
-    <div v-else-if="repo.repoImport.value.loading" class="empty-state empty-state--dashed repo-import-hint">
-      <IconApp name="refresh" class="spin" :stroke-width="1.5" />
-      <strong class="empty-title">正在获取任务索引</strong>
+    <EmptyState v-else-if="repo.repoImport.value.loading" dashed class="repo-import-hint">
+      <template #icon><IconApp name="refresh" class="spin" :stroke-width="1.5" /></template>
+      <template #title>正在获取任务索引</template>
+      <!-- 说明文字保留手写 .empty-desc（默认插槽直排）：scoped 的 .repo-import-hint .empty-desc
+           限宽规则只命中带本组件 scope id 的插槽内容，走 #description 插槽会丢该样式 -->
       <span class="empty-desc">读取当前来源的可导入任务…</span>
-    </div>
-    <div v-else class="empty-state empty-state--dashed repo-import-hint">
-      <IconApp name="globe-grid" :stroke-width="1.5" />
+    </EmptyState>
+    <EmptyState v-else dashed class="repo-import-hint">
+      <template #icon><IconApp name="globe-grid" :stroke-width="1.5" /></template>
       <!-- 「还没点加载」与「加载成功但这一类没有条目」是两件事。 -->
-      <strong class="empty-title">{{ repo.repoImport.value.loaded ? '该来源暂无可导入任务' : repo.repoImport.value.source === 'custom' && !repo.repoImport.value.url.trim() ? '输入自定义索引地址' : '任务库尚未加载' }}</strong>
+      <template #title>{{ repo.repoImport.value.loaded ? '该来源暂无可导入任务' : repo.repoImport.value.source === 'custom' && !repo.repoImport.value.url.trim() ? '输入自定义索引地址' : '任务库尚未加载' }}</template>
       <span v-if="repo.repoImport.value.loaded" class="empty-desc">
         可切换来源，或使用包含浏览器、HTTP、脚本任务的自定义索引。
       </span>
       <span v-else class="empty-desc">{{ repo.repoImport.value.source === 'custom' && !repo.repoImport.value.url.trim() ? '填写地址后点击「加载任务库」获取任务。' : '可点击「加载任务库」重试，或切换来源。' }}</span>
       <!-- 指向仓库**主页**而非用户手填的索引地址：索引地址是给程序 GET 的 raw JSON，
            此前把它当作可读页面链接，点开是一屏 JSON 而不是仓库首页 -->
-      <div class="empty-actions">
+      <template #actions>
         <a v-if="repo.sourceHomeUrl.value" :href="repo.sourceHomeUrl.value" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">
           <IconApp name="globe" class="icon-sm" />
           直接查看仓库
         </a>
-      </div>
-    </div>
+      </template>
+    </EmptyState>
     <template #footer>
       <span class="repo-footer-hint">{{ repo.repoImport.value.selected ? `已选：${repo.repoImport.value.selected.name}` : repo.filteredRepoTasks.value.length ? '选择任务查看详情' : '任务来自社区仓库，导入前请核对内容' }}</span>
       <button v-if="repo.repoImport.value.selected" class="btn btn-primary btn-sm" :disabled="repo.repoImport.value.previewLoading" @click="repo.confirmRepoImport(repo.repoImport.value.selected!)">
@@ -351,7 +363,6 @@ watch(
 /* 默认只留一行提示，详细说明按需展开，给任务列表留出空间。 */
 .repo-ready-hint { margin-bottom: 12px; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.6; }
 .repo-ready-hint summary { cursor: pointer; }
-.repo-ready-hint summary span { margin-left: 8px; color: var(--accent-text, var(--accent)); white-space: nowrap; }
 .repo-ready-hint summary:focus-visible { outline: 2px solid var(--accent-text, var(--accent)); outline-offset: 3px; border-radius: var(--radius-xs); }
 .repo-ready-hint p { margin: 8px 0 0; }
 .repo-kind-badge { display: inline-block; flex: none; padding: 2px 7px; border: 1px solid var(--border); border-radius: var(--radius-xs); color: var(--text-secondary); background: var(--bg-hover); font-size: var(--text-xs); font-weight: 500; line-height: 1.5; }
@@ -386,7 +397,7 @@ watch(
 .repo-search-field input::-webkit-search-cancel-button { display: none; }
 .repo-result-count { flex: none; font-size: var(--text-xs); color: var(--text-secondary); }
 .repo-import-body { display: flex; gap: 12px; min-height: 0; }
-.repo-import-list { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; }
+.repo-import-list { flex: 1; min-width: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; }
 .repo-import-item { display: flex; width: 100%; gap: 12px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out); }
 .repo-import-item:hover { background: var(--bg-hover); }
 .repo-import-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -402,7 +413,7 @@ watch(
 .repo-item-desc { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.5; margin-top: 3px; }
 .repo-item-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 7px; font-size: var(--text-xs); color: var(--text-tertiary); }
 .repo-item-tags { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; }
+.repo-import-detail { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px; display: flex; flex-direction: column; gap: 8px; max-height: 56vh; overflow-y: auto; overscroll-behavior: contain; }
 .repo-detail-name { margin: 0; font-size: var(--text-lg); font-weight: 600; line-height: 1.4; }
 .repo-detail-desc { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); line-height: 1.6; }
 .repo-detail-next { margin: 2px 0; font-size: var(--text-xs); color: var(--text-secondary); line-height: 1.6; }
@@ -440,6 +451,8 @@ watch(
 .repo-confirm-summary > div { flex: 1; min-width: 0; }
 .repo-confirm-summary strong, .repo-confirm-summary span { display: block; overflow-wrap: anywhere; }
 .repo-confirm-summary span { margin-top: 4px; color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.6; }
+/* 上下文 span 规则统一排在各裸 span 之后（no-descending-specificity）：互不重叠的子树，纯次序约束 */
+.repo-ready-hint summary span { margin-left: 8px; color: var(--accent-text, var(--accent)); white-space: nowrap; }
 /* 空态复用全局 .empty-state--dashed（结构见 misc.css）：虚线框表达"待填充"，
    并为「直接查看仓库」留出可点区域。此处只复位整体透明度与收敛文字宽度，
    不改通用外观——.empty-state 默认 opacity:0.8 会把里面的按钮一起做旧，

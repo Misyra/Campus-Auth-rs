@@ -1,22 +1,110 @@
-/* 设置列表：所有分类共用名称、说明与控件列，跟随现有主题和材质。 */
+/* 设置列表：所有分类共用名称、说明与控件列，跟随现有主题和材质。
+   本块是设置页相对外壳契约（layout.css .page-content：flex 纵向 + gap）的差异声明：
+   1080px 列宽居中 + 分区间距归零（分区自带的 padding-top/边框承担间隔）。 */
 .settings-page {
   width: 100%;
   max-width: 1080px;
   margin-inline: auto;
-  height: 100%;
-  min-height: 0;
   gap: 0;
+  /* position: relative 必须有：全局 sr-only 隐藏类是绝对定位（base.css），若无定位
+     祖先，其包含块会逃逸到 html——外观页 4 个隐藏的原生取色控件（AppearanceColors
+     的 sr-only input）会把 documentElement.scrollHeight 撑到整页内容高度，滚轮在
+     content-wrapper 到底后链式滚动 window，表现为「页面可以无限往下滚」。滚动容器
+     是外层 content-wrapper，包含块必须钉在滚动容器内部：建到本页根上后，这些控件
+     只参与本页的滚动溢出、随页滚走，html 永远看不到它们（守卫测试位于
+     styles/utility.test.ts）。 */
+  position: relative;
 }
 
-/* 表单独立滚动，操作栏占据正常布局空间，避免透出或遮住正在编辑的行。 */
-.content-wrapper:has(> .settings-page) { overflow: hidden; }
-.settings-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable; scroll-padding-block: 16px; padding-inline: 2px 12px; }
+/* 滚动模型与其它页面一致：由外层 content-wrapper 整体滚动（layout.css），1080px 列
+   外的左右空白区也在同一滚动容器内，滚轮处处可用。旧版在此强制 overflow:hidden、
+   由 .settings-scroll 内部滚动，列外空白没有可滚容器推不动页面（2026-11-20 修复）。
+   随之退役的还有：本规则的 overflow:hidden、.settings-scroll 的
+   overflow/scrollbar-gutter/scroll-padding（后者已由 layout.css 的 content-wrapper
+   承担：scroll-padding-block 20px 参与下方 .settings-category 的锚定落点）。 */
+/* 本类只剩水平内缩：2px 左内缩与 .settings-category-heading 等文本元素的 2px 外边距
+   同一节奏，右内边距归零让卡片右缘与顶栏动作区/其它页内容右缘对齐 */
+.settings-scroll { padding-inline: 2px 0; }
 .settings-scroll > .settings-form { margin-top: 0; padding-bottom: 16px; gap: 48px; }
-.settings-category { min-width: 0; scroll-margin-top: 16px; }
+/* 锚定落点 = content-wrapper 的 scroll-padding-block（20px）+ 本值 = 96px：
+   分区标题落在 sticky tab 条（约 50px）之下并留呼吸空间，与 scrollspy 阅读带
+   （SettingsView 的 SPY_ROOT_MARGIN 顶边 -96px）同一条线 */
+.settings-category { min-width: 0; scroll-margin-top: 76px; }
 .settings-category + .settings-category { padding-top: 28px; border-top: 1px solid var(--border); }
 .settings-category-heading { margin: 0 2px 22px; font-size: var(--text-xl); font-weight: 650; color: var(--text-primary); }
-.settings-mobile-jump { display: none; }
-.settings-page .save-bar { margin-top: 12px; padding: 14px 2px 0; border-top: 1px solid var(--border); }
+
+/* ===== 顶部分区导航条（阶段 4③）=====
+   sticky 圆角容器 + 图标+文字按钮；active 走 --accent-soft 浅底（V2 token）。
+   滚动模型与页面一致：容器是外层 content-wrapper，本条随页面滚到顶后钉住。
+   窄屏不放不下时整条横向滚动（替代旧 settings-mobile-jump select，该 select 已退役）。 */
+.settings-tabs {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  flex: none;
+  padding: 6px;
+  margin-bottom: 20px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.settings-tabs::-webkit-scrollbar { display: none; }
+.settings-tab {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out);
+}
+.settings-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
+.settings-tab.active { background: var(--accent-soft); color: var(--accent-text, var(--accent)); font-weight: 600; }
+/* 搜索过滤期间被隐藏分区的 tab（P3-25）：置灰不可点，点击不触发定位也不改 hash；
+   悬停不变色（disabled 按钮仍匹配 :hover，需要显式压回原色） */
+.settings-tab:disabled { opacity: 0.45; cursor: default; }
+.settings-tab:disabled:hover { background: transparent; color: var(--text-secondary); }
+.settings-tab-icon { width: 15px; height: 15px; flex-shrink: 0; }
+
+/* 设置搜索：输入框已合并进顶栏（设置路由下顶栏搜索即本页过滤器，
+   见 composables/useSettingsSearch）；匹配按 schema 数据计算（utils/settingsSearch.ts），
+   本页只把结果落到类名：无命中的分区整体隐藏，命中的行/槽位加 .settings-search-hit。 */
+.settings-search-empty { flex: none; margin: 0 2px 16px; color: var(--text-secondary); font-size: var(--text-md); }
+.settings-category.settings-search-hidden { display: none; }
+/* 相邻分隔线挂在「前一个分区存在」上：分区被过滤掉后不再给后继分区留上边框 */
+.settings-category.settings-search-hidden + .settings-category { padding-top: 0; border-top: 0; }
+.settings-search-hit {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+/* 保存栏吸附在滚动视口底部（页面整体滚动后不再有「布局空间常驻」的底栏）：
+   bottom 与 content-wrapper 底内边距同值（32px），滚动全程的悬浮位置与滚到底的
+   静止位置重合，不出现临底跳变；不透明底遮住浮动时透出的内容行；层级取
+   --z-sticky——压过普通内容行，仍让下拉菜单/帮助气泡（--z-modal/--z-overlay）
+   浮在其上 */
+.settings-page .save-bar {
+  position: sticky;
+  bottom: 32px;
+  z-index: var(--z-sticky);
+  margin-top: 12px;
+  padding: 14px 2px 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+}
 .settings-save-status { color: var(--text-secondary); font-size: var(--text-md); }
 .settings-save-status--error { color: var(--error); }
 .settings-page .btn.save-btn { min-height: 38px; min-width: 80px; padding: 9px 20px; box-shadow: none; }
@@ -45,7 +133,7 @@
 .settings-list-page :is(.settings-card-header h2, .appearance-card-header h3) { font-size: var(--text-lg); font-weight: 600; }
 .settings-list-page :is(.card-body, .appearance-card-body) {
   flex: none;
-  padding: 0 20px;
+  padding: 0 16px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -54,32 +142,35 @@
 }
 .settings-list-page .card-body + .card-body { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
 .settings-list-page .card-body:has(+ .card-body) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-.settings-list-page :is(.settings-grid-2col, .ocr-settings-grid) { display: block; }
-.settings-list-page .settings-grid-2col > div:not(.setting-row),
-.settings-list-page .card-body .form-row { display: contents; }
+/* `.setting-row-control .form-row`（flex 右对齐）已于 2026-11-13 删除：模板里
+   .setting-row-control 内均无 .form-row 后代——.form-row 现存于 HttpFlowFields、
+   档案/AI/任务弹窗，都不在设置页，规则从不命中（彼时配套的
+   `.settings-list-page .card-body .form-row { display: contents }` 中和规则
+   已随阶段 4③ 面板拆分一并退役）。 */
+/* `.settings-grid-2col` / `.ocr-settings-grid` 已随阶段 4③ 面板拆分退役：
+   两个类仅存的模板使用点在旧分区组件（SystemSettings / TaskEnvironmentSettings），
+   组件按面板拆分后不再使用；行式布局由 .setting-row 与 card-body 自然流承担。 */
 
+/* 行距收紧（Demo A 全收版）：说明灰字退场后行高由标题行决定，min-height 一并退役；
+   分隔线以 color-mix 弱化到 55%，与收紧后的节奏匹配。 */
 .setting-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 340px);
   align-items: center;
   gap: 28px;
-  min-height: 78px;
-  padding-block: 18px;
-  border-bottom: 1px solid var(--border);
+  padding-block: 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 .setting-row:last-child { border-bottom: 0; }
 /* 开关的附属输入归入同一组，只在独立设置之间画分隔线。 */
 .setting-row:has(> .setting-row-details) { row-gap: 12px; }
 .setting-row-details { grid-column: 1 / -1; min-width: 0; padding-left: 16px; }
 .setting-row-details:has(> .setting-row-control) { padding-left: 0; }
-.setting-row-details > .setting-row { min-height: 0; padding-block: 0; border-bottom: 0; }
+.setting-row-details > .setting-row { padding-block: 0; border-bottom: 0; }
 .setting-row-details > .setting-row + .setting-row { margin-top: 16px; }
 .setting-row-copy { min-width: 0; }
 .setting-row-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: var(--text-base); font-weight: 500; color: var(--text-primary); line-height: 1.5; }
 .setting-row-title label { margin: 0; }
-.setting-row-description { margin-top: 4px; color: color-mix(in srgb, var(--text-primary) 62%, var(--bg-secondary)); font-size: var(--text-md); line-height: 1.6; overflow-wrap: anywhere; }
-.setting-row .setting-row-description :is(p, .hint, .ocr-description, .ocr-size-hint) { margin: 0; font-size: inherit; line-height: inherit; color: inherit; }
-.setting-row-description .hint { display: block; }
 .setting-row-control { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; margin: 0; }
 .setting-row-control > :is(input, select, textarea, .custom-select, .segmented, .appearance-slider-item, .appearance-presets) { width: 100%; min-width: 0; }
 .setting-row-control > input[type="number"] { max-width: 128px; }
@@ -90,9 +181,7 @@
 .setting-row-control .segmented button { flex: 1; padding-inline: 8px; }
 .setting-row-control .setting-row-switch { flex: none; width: 44px; margin: 0; }
 .setting-row-control .setting-row-switch .toggle-slider { order: 0; }
-.setting-row .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .setting-row.disabled .setting-row-control { opacity: .55; }
-.setting-row-control .form-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; justify-content: flex-end; }
 .setting-row-control .viewport-input-row { min-width: 0; }
 .setting-row-control .viewport-input { width: 100%; max-width: 100px; padding: 9px; }
 .setting-row-control .viewport-input-group { min-width: 0; }
@@ -113,7 +202,9 @@
 .settings-list-page .run-mode-option-desc { display: none; }
 .settings-list-page .update-check-row { justify-content: flex-end; gap: 8px; }
 .settings-list-page .update-check-row .hint { width: 100%; text-align: right; }
-.settings-list-page .card-body > :is(.browser-safe-info, .form-help-text, .note, .manual-update-tip) { margin: 16px 0; }
+/* 槽位组件以包裹 div 进入 card-body，说明块/提示条不再是直接子元素，
+   故由直接子选择器放宽为后代选择器（与拆分前的间距一致） */
+.settings-list-page .card-body :is(.browser-safe-info, .form-help-text, .note, .manual-update-tip) { margin: 16px 0; }
 .settings-list-page .env-lead { margin: 0; padding-top: 18px; }
 .settings-list-page .env-status-row { padding-block: 12px; }
 .settings-list-page.environment-page .env-checklist { grid-template-columns: minmax(0, 1fr); gap: 0; margin: 0; }
@@ -125,24 +216,24 @@
 .settings-list-page .ocr-preview { margin-left: auto; }
 .settings-list-page .ocr-recognize-btn { width: auto; margin: 0; }
 .settings-list-page .ocr-result { width: 100%; justify-content: flex-end; }
-.settings-list-page .ocr-description { font-size: inherit; }
+/* :has 参数计入特异度（--pinned 低于 :hover/:focus-visible），升序排列；三条声明相同，顺序不影响计算值 */
+.settings-list-page section:has(.field-help--pinned),
 .settings-list-page section:has(.field-help:hover),
-.settings-list-page section:has(.field-help:focus-visible),
-.settings-list-page section:has(.field-help--pinned) { position: relative; z-index: var(--z-overlay); }
+.settings-list-page section:has(.field-help:focus-visible) { position: relative; z-index: var(--z-overlay); }
 
 @media (max-width: 768px) {
-  .settings-mobile-jump { display: flex; align-items: center; gap: 12px; margin: 0 2px 16px; flex: none; }
-  .settings-mobile-jump label { flex: none; margin: 0; font-size: var(--text-md); color: var(--text-secondary); }
-  .settings-mobile-jump select { flex: 1; min-width: 0; width: auto; padding-block: 9px; }
+  /* 分区内导航由顶部 tab 条承担（窄屏横向滚动），旧 settings-mobile-jump select 已退役 */
   .settings-scroll > .settings-form { gap: 36px; }
   .settings-category + .settings-category { padding-top: 24px; }
   /* 手机已经有底部保存状态，顶栏保留完整页面名称。 */
   .main-content:has(> .content-wrapper > .settings-page .save-bar) .top-dirty-hint { display: none; }
-  .settings-scroll { padding-inline: 2px; scrollbar-gutter: auto; }
-  .settings-page .save-bar { padding-top: 12px; }
+  .settings-scroll { padding-inline: 2px; }
+  /* 窄屏 content-wrapper 内边距收窄为 --space-md（responsive.css），吸附距离随之
+     对齐，避免滚动到底时保存栏位置跳变 */
+  .settings-page .save-bar { padding-top: 12px; bottom: var(--space-md); }
   .settings-list-page { gap: 22px; }
-  .settings-list-page :is(.card-body, .appearance-card-body) { padding-inline: 14px; }
-  .setting-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-block: 16px; }
+  .settings-list-page :is(.card-body, .appearance-card-body) { padding-inline: 12px; }
+  .setting-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding-block: 12px; }
   .setting-row-control { justify-content: flex-start; }
   .setting-row-control > .custom-select { max-width: none; }
   .setting-row:has(> .setting-row-control > .setting-row-switch) { grid-template-columns: minmax(0, 1fr) 44px; gap: 14px; }

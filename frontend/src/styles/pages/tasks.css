@@ -4,16 +4,17 @@
    此前页内那张竖排二级导航卡在 2280px 视口下离左边缘 400px 有余、四周全是留白，
    像一张被丢在页面中间的卡片；且它把正文推到中间，与顶栏页标题（贴左）不同列。 */
 
-/* 左对齐（不是居中）+ **填满可用宽度**：与顶栏页标题同一起始列。居中会让标题贴左、
-   正文居中，在宽屏上读成两列；限宽则把 2280px 视口右侧白扔 500px 以上（用户实测直接
-   问「为啥右边空一块」）。列表 / 帮助卡这类内容本来就该铺满，真正怕拉长的是表单里
-   的单行输入框，那一层由各任务面板在自己的列里限制。 */
-.tasks-page {
-  max-width: none;
-}
+/* 任务页外壳消费 layout.css 的 .page-content 契约（flex 纵向 + gap --space-md），
+   本文件不再声明差异：左对齐 + **填满可用宽度**是契约的默认形态（.page-content
+   从不设 max-width）。此前这里写着 `.tasks-page { max-width: none }`，但契约化前
+   `.page-content` 也早已没有任何 max-width 可被它覆盖，属死规则，随契约化删除。
+   列表 / 帮助卡这类内容本来就该铺满，真正怕拉长的是表单里的单行输入框，
+   那一层由各任务面板在自己的列里限制。 */
 
 /* 窄屏兜底导航：≤768px 时侧栏只剩图标、子项文字放不下（responsive.css 里整块隐藏），
-   这里才出现。>768px 一律不渲染为可见元素，也就不占纵向空间。 */
+   这里才出现。>768px 一律不渲染为可见元素，也就不占纵向空间（display:none 不生成
+   盒子，契约 gap 也不会给它留空）。与面板根的间距交给外壳契约的 gap，本块不写
+   margin-bottom——此前双机制并存（margin + 契约化后的 gap）会叠成 32px。 */
 .tasks-narrow-nav {
   display: none;
 }
@@ -23,7 +24,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-xs);
-    margin-bottom: var(--space-md);
     padding: var(--space-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
@@ -65,6 +65,14 @@
   }
 }
 
+/* 卡片体上内边距的分叉点：默认 20px = card.css 共享 .card-body 的 padding 顶边值。
+   需要「首段贴住卡头」的面板（HttpTasksPanel 的 http-writing-help 折叠卡）在组件
+   scoped 里只声明 --card-body-pt 变量，不得改写共享类的声明值；未声明变量的卡片
+   计算值不变。 */
+.tasks-page .card-body {
+  padding-top: var(--card-body-pt, 20px);
+}
+
 /* ==================== 共享版式：列表页 + 二级编辑页（tsk-*） ====================
    三个列表型面板（浏览器任务 / 直连任务 / 脚本）共用同一骨架：**列表态整页表格 +
    编辑态独占全宽的二级页**（方案 G），两态由 `?task=<id>` 表达。
@@ -74,6 +82,9 @@
    一旦与其它页面的同名规则相遇，就会由导入顺序决定谁生效（静默覆盖）。 */
 
 /* ---- 列表态 ---- */
+/* 任务面板根（TasksView 嵌套 router-view 的落点，非 .page-content）：
+   纵向排布与页面外壳契约同款（flex column + gap --space-md），面板切到编辑态后
+   由 tsk-editor-page 等页面私有外壳接管。 */
 .tsk-list-page {
   display: flex;
   flex-direction: column;
@@ -104,7 +115,7 @@
   flex: 1 1 180px;
   min-width: 140px;
   max-width: 260px;
-  padding: 7px 11px;
+  padding: var(--space-sm) 11px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-glass-light);
@@ -138,9 +149,10 @@
 /* 列宽口径三面板统一：同一列在任何面板里都落在同一个 x 位置，切子页时表格不跳形。
    比例列用百分比、固定列用 px；`tsk-col-flex` 是"吃剩余空间"的那一列（直连任务的
    请求列）。浏览器任务与脚本列表已把描述并进名称格，由各自的 scoped 规则把
-   **名称列**改成 auto 来吃剩余宽度。 */
+   **名称列**改成 auto 来吃剩余宽度。单表要分叉名称列宽度时改走 `--tsk-col-name-w`
+   变量（如 HTTP 面板 24%），不在 scoped 里改写共享值（判据见 index.css 文件头）。 */
 .tsk-table col.tsk-col-drag { width: 44px; }
-.tsk-table col.tsk-col-name { width: 20%; }
+.tsk-table col.tsk-col-name { width: var(--tsk-col-name-w, 20%); }
 .tsk-table col.tsk-col-id { width: 14%; }
 .tsk-table col.tsk-col-flex { width: auto; }
 .tsk-table col.tsk-col-bind { width: 13%; }
@@ -154,24 +166,6 @@
    自动最小尺寸顶开，故这里补上 min-width: 0（与 `.tsk-cell-ellipsis` 同源的守卫）。 */
 .tsk-table .tsk-cell-flex {
   min-width: 0;
-}
-
-/* 圆角补偿：卡片不再裁切，由首尾单元格把圆角带出来。
-   表头不再铺底色（见下），故只有"会被染色的那一行"需要圆角——即悬停时的最后一行；
-   有页脚时底角归页脚，最后一行不再承担。
-   半径取 `--radius-xl`，与卡片自身一致（差一档会在圆角处露出约 2px 方角）。 */
-.tsk-table tbody tr:last-child td:first-child {
-  border-bottom-left-radius: var(--radius-xl);
-}
-
-.tsk-table tbody tr:last-child td:last-child {
-  border-bottom-right-radius: var(--radius-xl);
-}
-
-/* 有页脚时圆角归页脚，最后一行不再承担底角 */
-.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:first-child,
-.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:last-child {
-  border-radius: 0;
 }
 
 .tsk-table th {
@@ -192,7 +186,7 @@
 
 .tsk-table td {
   /* 行高加大：列表是页面主体，行距太密显得单薄 */
-  padding: 18px var(--space-md);
+  padding: var(--space-md);
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
   /* 悬停过渡跟随底色（底色画在单元格上，见下） */
@@ -213,6 +207,19 @@
   background: var(--bg-hover);
 }
 
+/* 圆角补偿：卡片不再裁切，由首尾单元格把圆角带出来。
+   表头不再铺底色（见上），故只有"会被染色的那一行"需要圆角——即悬停时的最后一行；
+   有页脚时底角归页脚，最后一行不再承担。
+   半径取 `--radius-xl`，与卡片自身一致（差一档会在圆角处露出约 2px 方角）。
+   本组按升序特异度排在基础 td 规则之后。 */
+.tsk-table tbody tr:last-child td:first-child {
+  border-bottom-left-radius: var(--radius-xl);
+}
+
+.tsk-table tbody tr:last-child td:last-child {
+  border-bottom-right-radius: var(--radius-xl);
+}
+
 /* 空态那一行不是数据行（没有 @click），别给它手型光标与悬停变色：
    整块 200px 高的区域变蓝又说"能点"，点下去毫无反应 */
 .tsk-table tbody tr:has(.empty-state) {
@@ -221,6 +228,12 @@
 
 .tsk-table tbody tr:has(.empty-state):hover td {
   background: transparent;
+}
+
+/* 有页脚时圆角归页脚，最后一行不再承担底角 */
+.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:first-child,
+.tsk-table-card:has(.tsk-foot) .tsk-table tbody tr:last-child td:last-child {
+  border-radius: 0;
 }
 
 /* 单元格省略：fixed 布局下省略号需要单元格自己 min-width:0 */
@@ -333,7 +346,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-sm);
-  padding: 9px var(--space-md);
+  padding: var(--space-sm) var(--space-md);
   font-size: var(--text-sm);
   color: var(--text-muted);
   border-top: 1px solid var(--border);
@@ -347,11 +360,16 @@
   flex: 1;
 }
 
-/* 行尾 ⋯ 菜单：绝对定位于操作列，同一时刻只开一个（面板持状态） */
+/* 计数与匹配数不折行：窄屏下「共 1 个任务」被压成两行（实测高 33px）很难看 */
+.tsk-foot > span:first-child,
+.tsk-foot > span:nth-child(2) {
+  white-space: nowrap;
+}
+
+/* 行尾 ⋯ 菜单（AppDropdownMenu 的 Content）。E6 起菜单由 Reka portal 出表格、
+   floating-ui 按触发器定位（.tsk-menu 自身不再绝对定位——旧 top/right 三行已删）：
+   表格横向滚动时菜单跟随触发器，窄屏自动翻转避让；z-index 会被库抄到定位包装层上。 */
 .tsk-menu {
-  position: absolute;
-  top: 100%;
-  right: 8px;
   z-index: var(--z-dropdown);
   display: flex;
   flex-direction: column;
@@ -364,7 +382,7 @@
 }
 
 .tsk-menu button {
-  padding: 6px 10px;
+  padding: 6px var(--space-sm);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -375,13 +393,14 @@
   transition: background var(--dur-base) var(--ease-out);
 }
 
-.tsk-menu button:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
+/* 禁用态先于 hover 态（升序特异度）；hover 规则带 :not(:disabled) 本就不会命中禁用按钮 */
 .tsk-menu button:disabled {
   color: var(--text-muted);
   cursor: default;
+}
+
+.tsk-menu button:hover:not(:disabled) {
+  background: var(--bg-hover);
 }
 
 .tsk-menu .tsk-menu-danger {
@@ -406,15 +425,17 @@
 .tsk-crumb-back {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 12px 4px 8px;
+  gap: var(--space-xs);
+  padding: var(--space-xs) 12px var(--space-xs) var(--space-sm);
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
   background: var(--bg-card);
   color: var(--text-secondary);
   font-size: var(--text-md);
   cursor: pointer;
-  transition: all var(--dur-base) var(--ease-out);
+  /* 只过渡 hover 实际改动的三属性（color/border-color/background），避免 all 连带无关属性 */
+  transition: color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out),
+    background var(--dur-base) var(--ease-out);
 }
 
 .tsk-crumb-back:hover {
@@ -520,14 +541,14 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-sm);
-  padding: 10px 12px;
+  padding: var(--space-sm) 12px;
   margin-bottom: var(--space-md);
   border: 1px solid rgba(var(--warning-rgb), 0.25);
   border-radius: var(--radius-md);
   background: var(--warning-bg);
   color: var(--warning-text);
   font-size: var(--text-md);
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 .tsk-gaps svg {
@@ -563,7 +584,7 @@
 .tsk-side-hint {
   margin: 0;
   font-size: var(--text-md);
-  line-height: 1.6;
+  line-height: 1.5;
   color: var(--text-secondary);
 }
 
@@ -571,7 +592,7 @@
   background: var(--bg-glass);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
-  padding: 0 4px;
+  padding: 0 var(--space-xs);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
 }
@@ -585,7 +606,7 @@
 .tsk-kv {
   display: grid;
   grid-template-columns: 76px minmax(0, 1fr);
-  gap: 6px 10px;
+  gap: 6px var(--space-sm);
   margin: 0;
   font-size: var(--text-md);
 }
@@ -652,6 +673,38 @@
   background: var(--bg-hover);
 }
 
+/* 行内上移/下移（F11）：触屏上 HTML5 DnD 不可用，这是排序的第二入口；
+   真实 button 键盘可达，与拖拽柄同组放行首。列表数据由 useDragSort.moveBy 移动，
+   与拖拽共用同一份顺序语义与持久化载荷。 */
+.tsk-order-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tsk-order-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xs);
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out);
+}
+
+.tsk-order-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tsk-order-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
 /* 拖拽中的那一行：整行弱化，作为"正在被移动"的反馈
    （原 `.task-item.dragging` 的等价物；列表从卡片改成表格后一度丢失了这个反馈）。
    刻意不做"落点指示线"：本列表是**实时交换**模型（拖过中线即换位），行本身已经在动，
@@ -684,7 +737,7 @@
   background: var(--bg-glass);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: var(--space-xs) 10px;
+  padding: var(--space-xs) var(--space-sm);
   max-width: 60%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -741,7 +794,7 @@
   font-size: var(--text-md);
   color: var(--accent-text, var(--accent));
   background: rgba(var(--accent-rgb), 0.1);
-  padding: var(--space-xs) 10px;
+  padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
 }
 
@@ -751,7 +804,7 @@
      给它 30% 已是宽裕；剩余宽度让给截图——截图才是调试时真正要看的东西。
      窄屏由 responsive.css 折为纵排。 */
   grid-template-columns: clamp(240px, 30%, 360px) minmax(0, 1fr);
-  gap: 16px;
+  gap: var(--space-md);
   flex: 1;
   min-height: min(460px, 52vh);
 }
@@ -761,9 +814,11 @@
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   /* 与截图列共用同一份竖向预算（见 .debug-screenshot）：步骤再长也只在列表内滚动，
      不会把整个面板顶出滚动条 */
   max-height: calc(92vh - 295px);
+  max-height: calc(92dvh - 295px);
   padding-right: 2px;
 }
 
@@ -771,7 +826,7 @@
   display: flex;
   align-items: flex-start;
   gap: var(--space-sm);
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm);
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   border-left-width: 3px;
@@ -852,7 +907,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-xs);
 }
 
 .debug-step-line {
@@ -963,6 +1018,7 @@
      间距（36px）− 截图头（32px）− 余量。两条路都不会把面板顶出滚动条。
      上下界：超宽屏最多 680px，极矮窗口至少 300px（此时面板体滚动）。 */
   max-height: max(300px, min(680px, calc(92vh - 295px)));
+  max-height: max(300px, min(680px, calc(92dvh - 295px)));
   object-fit: contain;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-hover);
@@ -973,7 +1029,7 @@
   position: absolute;
   right: 8px;
   bottom: 8px;
-  padding: 2px 8px;
+  padding: 2px var(--space-sm);
   border-radius: var(--radius-xs);
   font-size: var(--text-xs);
   color: var(--text-secondary);
@@ -985,7 +1041,9 @@
 /* 放大预览：宽度铺满弹窗即接近原图分辨率，超出高度时滚动查看整页 */
 .debug-zoom-body {
   max-height: 76vh;
+  max-height: 76dvh;
   overflow: auto;
+  overscroll-behavior: contain;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
 }

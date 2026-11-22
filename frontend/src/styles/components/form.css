@@ -1,7 +1,8 @@
 /* form.css — 表单（form-group / select 美化 / form-row / hint / field-help / radio-group） */
 .form-group {
   min-width: 0;
-  margin-bottom: var(--space-md);
+  /* 分叉通道：组件内嵌网格/行内布局不需要下边距时只在 scoped 声明 --form-group-margin */
+  margin-bottom: var(--form-group-margin, var(--space-md));
 }
 
 /* 地址与模板变量也要在窄屏换行，不能撑开表单网格。 */
@@ -29,25 +30,6 @@
   color-scheme: inherit;
 }
 
-.form-group input:hover:not(:disabled),
-.form-group select:hover:not(:disabled),
-.form-group textarea:hover:not(:disabled) {
-  background: var(--bg-glass-heavy);
-}
-
-.form-group input:focus-visible,
-.form-group select:focus-visible,
-.form-group textarea:focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
-}
-
-.form-group :is(input, select, textarea):disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
 /* ========== Custom Select Dropdown ==========
  * 原生 select 箭头：默认 slate 灰（两主题可读）；聚焦时跟随强调色（URL-encoded accent 静态值 + 浅色覆盖），
  * 自定义强调色场景箭头不变色为已知取舍——需跟随请换 CustomSelect 组件。 */
@@ -60,19 +42,6 @@
   background-size: 12px;
 }
 
-/* 聚焦箭头：内联 SVG 无法引用 CSS 变量，故两处色值需与默认主题色（单色黑白）保持一致 —
-   深色主题用白、浅色主题用黑。若用户改用彩色主题色，箭头仍是黑白（可接受：它只是聚焦提示，
-   而 data: URL 无法随变量变化；改彩色需 JS 生成或引入 mask，不属本改动范围）。 */
-.form-group select:focus-visible {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3Epolyline points='6 9 12 15 18'%3E/svg%3E");
-}
-
-.form-group select:hover:not(:disabled),
-.form-group textarea:hover:not(:disabled),
-.form-group input:hover:not(:disabled) {
-  border-color: var(--border-hover);
-}
-
 .form-group textarea {
   min-height: 140px;
   resize: vertical;
@@ -80,10 +49,41 @@
   line-height: 1.5;
 }
 
+.form-group :is(input, select, textarea):disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.form-group input:focus-visible,
+.form-group select:focus-visible,
+.form-group textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
+}
+
+/* 聚焦箭头：内联 SVG 无法引用 CSS 变量，故两处色值需与默认主题色（单色黑白）保持一致 —
+   深色主题用白、浅色主题用黑。若用户改用彩色主题色，箭头仍是黑白（可接受：它只是聚焦提示，
+   而 data: URL 无法随变量变化；改彩色需 JS 生成或引入 mask，不属本改动范围）。 */
+.form-group select:focus-visible {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3Epolyline points='6 9 12 15 18'%3E/svg%3E");
+}
+
+/* 悬停态（0,3,1）按 no-descending-specificity 排在裸控件与 focus 规则之后；
+   border-color 悬停描边原为重复选择器的独立规则，此处合并进同一条 */
+.form-group input:hover:not(:disabled),
+.form-group select:hover:not(:disabled),
+.form-group textarea:hover:not(:disabled) {
+  background: var(--bg-glass-heavy);
+  border-color: var(--border-hover);
+}
+
 .form-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-md);
+  /* 分叉通道：单列纵排 / 自定义列宽等变体只在 scoped 声明 --form-row-cols 与
+     --form-row-gap（照 .form-group 的 --form-group-margin 先例），不得改写声明值 */
+  grid-template-columns: var(--form-row-cols, 1fr 1fr);
+  gap: var(--form-row-gap, var(--space-md));
 }
 
 /* 双列变体：宽窄比（AI 配置页服务商预设 + Base URL 等场景） */
@@ -162,26 +162,20 @@
 }
 
 /*
- * 气泡宽度策略：**内容需要多宽就多宽**，上界取三者最小值——
- *   ① 变体默认上界（普通 420px / `--wide` 620px）
- *   ② 组件按触发点两侧实测剩余空间写入的 `--tip-max`（窄屏防越界，见 FieldHelp.syncAutoFlip）
- *   ③ 视口兜底 `calc(100vw - 64px)`
+ * 气泡本体（Reka TooltipContent）：portal 到 body 的真实元素（role=tooltip，
+ * 触发器经 aria-describedby 关联），定位 / 翻边 / 越界收紧归 floating-ui——
+ * 从触发器右侧起步，data-side 标注实际落位，碰撞内边距 32px 与旧视口兜底同源。
  *
- * 此前上界写死 320 / 460（翻转时还各再收紧 40px）：一句 38 字的中文说明在 460px 里
- * 折成两行半、末尾两个字单独落到第三行（实测「…自动登录才会用到／它。」），而 2280px
- * 的屏幕上右侧空着一千八百多像素——上界既不跟文案长度走，也不跟可用空间走。
- * 翻转不再单独收紧：左右摆的是气泡位置，不是它需要的宽度（真要收由 ② 实测决定）。
+ * 宽度策略不变：**内容需要多宽就多宽**，上界取三者最小值——
+ *   ① 变体默认上界（普通 420px / `--wide` 620px）
+ *   ② 库按碰撞实测写入的可用宽度（--reka-tooltip-content-available-width，
+ *     取代旧 syncAutoFlip 的两侧实测；翻转后自动按另一侧的可用空间收紧）
+ *   ③ 视口兜底 `calc(100vw - 64px)`
  */
-.field-help::after {
-  content: attr(data-tip);
-  /* 隐藏气泡不占横向滚动宽度；仅 opacity: 0 仍会撑宽窄屏表单。 */
-  display: none;
-  position: absolute;
-  left: calc(100% + 10px);
-  top: 50%;
-  transform: translateY(-50%) translateX(4px);
+.field-help-tip {
+  position: relative;
   width: max-content;
-  max-width: min(var(--tip-max, 420px), calc(100vw - 64px));
+  max-width: min(var(--tip-w, 420px), var(--reka-tooltip-content-available-width, calc(100vw - 64px)));
   padding: 10px 14px;
   border-radius: var(--radius-lg);
   border: 1px solid var(--tooltip-border);
@@ -193,30 +187,58 @@
   font-size: var(--text-sm);
   font-weight: 500;
   line-height: 1.7;
-  /* pre-line：data-tip 里的 \n 按段落换行（说明文案都按段落书写），
+  /* pre-line：文案里的 \n 按段落换行（说明文案都按段落书写），
      同时保留普通文本的自动换行；break-word 防止 URL / 代码片段撑破气泡 */
   white-space: pre-line;
   overflow-wrap: break-word;
-  opacity: 0;
+  /* 悬停态保持指针穿透，不挡气泡下的表单控件；钉住态才接管（见下）。
+     悬停不灭由 Reka 的 grace area 负责：指针从问号移向气泡不视为离开。 */
   pointer-events: none;
-  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+  /* 自成 stacking context：箭头 ::before 靠 z-index:-1 压进气泡底色之下
+     （旧实现靠 ::after 后绘覆盖箭头后半，伪元素换真元素后次序改由层级表达），
+     同时让库能读到本元素的 z-index 并写到定位包装层上 */
   z-index: var(--z-modal);
   backdrop-filter: var(--blur-md);
+  animation-duration: var(--dur-base);
+  animation-timing-function: var(--ease-out);
 }
 
-/* 指向问号的小箭头：贴气泡靠触发点的那一侧，让"这段说明属于谁"一眼可见
-   （此前气泡是悬空的一块，凑近了才猜得出它对应哪个 `?`）。
-   用"旋转 45° 的小方块"而不是 border 三角：45° 方块在四个方向上都对称、
-   与圆角气泡接缝更服帖，也不必为翻转各写一份 border 配色——
-   挡在气泡后面的那半块由 `::after` 覆盖（后绘制的伪元素压住先绘制的）。
-   位置以气泡左缘为基准（`100% + 10px` 就是气泡起点），取半个方块宽度回退，
-   使方块中心正好落在接缝上。 */
-.field-help::before {
+/* 长文案放宽上界（普通说明仍按 420px 走：一两句话的气泡不该横穿整屏） */
+.field-help-tip--wide {
+  --tip-w: 620px;
+}
+
+/* 落位方向决定入场位移与箭头朝向（data-side 由库按最终落位写入） */
+.field-help-tip[data-side="right"] {
+  animation-name: field-tip-in-right;
+}
+
+.field-help-tip[data-side="left"] {
+  animation-name: field-tip-in-left;
+}
+
+@keyframes field-tip-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
+}
+
+@keyframes field-tip-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+}
+
+/* 指向问号的小箭头：贴气泡靠触发点的那一侧，让"这段说明属于谁"一眼可见。
+   沿旧实现用"旋转 45° 的小方块"：四向对称、与圆角气泡接缝服帖，边界只描
+   朝向触发点的两条边；方块中心落在气泡靠触发点的那条缘上（半个宽度回退）。 */
+.field-help-tip::before {
   content: "";
-  display: none;
   position: absolute;
   top: 50%;
-  left: calc(100% + 10px - 4.5px);
+  left: -4.5px;
   width: 9px;
   height: 9px;
   background: var(--tooltip-bg);
@@ -224,54 +246,35 @@
   border-bottom: 1px solid var(--tooltip-border);
   border-radius: 2px;
   transform: translateY(-50%) rotate(45deg);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-base) var(--ease-out);
-  z-index: var(--z-modal);
+  z-index: -1;
 }
 
-.field-help:hover::after,
-.field-help:focus-visible::after {
-  display: block;
-  opacity: 1;
-  transform: translateY(-50%) translateX(0);
-}
-
-.field-help:hover::before,
-.field-help:focus-visible::before {
-  display: block;
-  opacity: 1;
-}
-
-/* 向左翻转提示框，用于右侧空间不足时 */
-.field-help--flip::after {
+.field-help-tip[data-side="left"]::before {
   left: auto;
-  right: calc(100% + 10px);
-  transform: translateY(-50%) translateX(-4px);
-}
-
-.field-help--flip::before {
-  left: auto;
-  right: calc(100% + 10px - 4.5px);
+  right: -4.5px;
   border-left: none;
   border-bottom: none;
   border-top: 1px solid var(--tooltip-border);
   border-right: 1px solid var(--tooltip-border);
 }
 
-.field-help--flip:hover::after,
-.field-help--flip:focus-visible::after {
-  transform: translateY(-50%) translateX(0);
+.field-help-tip-body {
+  display: block;
 }
 
-/* 长文案放宽上界（普通说明仍按 420px 走：一两句话的气泡不该横穿整屏） */
-.field-help--wide::after {
-  max-width: min(var(--tip-max, 620px), calc(100vw - 64px));
+/* 钉住态（点击展开）：气泡接管指针事件并限高可滚，做到「边填边看」。
+   再点一次、点别处或 Esc 关闭（解除逻辑在 FieldHelp 组件里）。 */
+.field-help-tip--pinned {
+  pointer-events: auto;
 }
 
-/* 钉住态（点击展开）：与 :hover 并列作为显示条件。
-   多段说明单独靠悬停看不完——鼠标一移向输入框气泡就消失，故点击后放开指针事件
-   并限高可滚，做到「边填边看」。再点一次、点别处或 Esc 关闭。 */
+.field-help-tip--pinned .field-help-tip-body {
+  max-height: min(60vh, 420px);
+  max-height: min(60dvh, 420px);
+  overflow-y: auto;
+}
+
+/* 钉住态触发器保持强调色：气泡还挂着，指向关系不能只在悬停那一瞬间成立 */
 .field-help--pinned,
 .field-help--pinned:hover,
 .field-help--pinned:focus-visible {
@@ -279,24 +282,6 @@
   background: rgba(var(--accent-rgb), 0.12);
   color: var(--accent-text, var(--accent));
 }
-
-.field-help--pinned::after {
-  display: block;
-  opacity: 1;
-  transform: translateY(-50%) translateX(0);
-  pointer-events: auto;
-  max-height: min(60vh, 420px);
-  overflow-y: auto;
-}
-
-/* 钉住态也要有箭头：气泡还挂着，指向关系不能只在悬停那一瞬间成立 */
-.field-help--pinned::before {
-  display: block;
-  opacity: 1;
-}
-
-/* 加宽修饰的定义在上面那组气泡规则里（`--wide` → 620px）；此处曾再写一份 460/420px 的
-   覆盖，两份规则叠在一起时后一份生效——改宽度时只看其中一处会得出"没生效"的错觉。 */
 
 /* ═══ JSON 校验反馈 ═══ */
 .json-error {

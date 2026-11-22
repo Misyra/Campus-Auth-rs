@@ -88,3 +88,30 @@ def test_javascript_template_expression_tracks_nested_string_context():
     assert resolve_javascript(script, {"VALUE": "a'b"}) == (
         "const value=`prefix ${'a\\'b'}`;"
     )
+
+
+def test_system_variable_values_skip_chained_expansion():
+    """P2-7：系统保留变量的值不再链式再展开——凭据含字面 {{X}} 不被二次替换。"""
+    from variable_resolver import resolve
+
+    variables = {
+        "USERNAME": "admin",
+        "PASSWORD": "pass{{USERNAME}}word",  # 真实密码恰好含占位符字面量
+        "TOKEN": "tok-1",
+    }
+    assert resolve("{{PASSWORD}}", variables) == "pass{{USERNAME}}word"
+    assert resolve("{{TOKEN}}", variables) == "tok-1"
+    # 任务自定义变量的链式引用仍是合法入口，照常展开
+    custom = dict(variables, user="{{USERNAME}}", ref="{{user}}")
+    assert resolve("{{user}}", custom) == "admin"
+    assert resolve("{{ref}}", custom) == "admin"
+
+
+def test_system_variable_literal_in_javascript_skips_expansion():
+    """P2-7：resolve_javascript 对系统变量值同样跳过链式再展开。"""
+    from variable_resolver import resolve_javascript
+
+    variables = {"USERNAME": "admin", "PASSWORD": "p'{{USERNAME}}w"}
+    out = resolve_javascript("login('{{PASSWORD}}')", variables)
+    assert "{{USERNAME}}" in out, "凭据中的占位符字面量必须原样保留"
+    assert "admin" not in out

@@ -9,11 +9,9 @@ export const TIMING = {
   STATUS_POLL_INTERVAL: 30000,
   /** 状态轮询断连退避间隔：连续失败 3 次后切换至此，成功即恢复常规间隔 */
   STATUS_POLL_SLOW_INTERVAL: 300000,
-  AUTOSTART_POLL_INTERVAL: 60000,
   TOAST_DURATION: 3000,
   TOAST_LEAVE_DELAY: 300,
   NOTIFICATION_MAX: 30,
-  OPENAPI_TIMEOUT: 5000,
   DRAG_SWAP_COOLDOWN: 120,
   WS_BACKOFF_BASE: 1000,
   WS_PING_INTERVAL: 30000,
@@ -59,6 +57,9 @@ export type TaskRepoMirrorId = "github" | "gitee";
  */
 export const APP_REPO_URL = "https://github.com/Misyra/Campus-Auth-rs";
 export const APP_RELEASES_URL = `${APP_REPO_URL}/releases`;
+
+/** 仓库内 LICENSE 文件地址（关于页引用） */
+export const APP_LICENSE_URL = `${APP_REPO_URL}/blob/master/LICENSE`;
 
 /** 具体版本的发布页地址；版本号为空时退回发布列表页 */
 export function releaseTagUrl(version: string | undefined | null): string {
@@ -328,6 +329,9 @@ export const DEFAULT_CONFIG: Config = {
     task_notification: true,
     show_tray: true,
     auto_restart_hours: 24,
+    // 远程访问引导凭据（管理密码）：与后端 AppSettings::default 一致（空串 =
+    // 未配置），随 app_settings 段经 GET/PATCH /api/config 往返
+    management_password: "",
   },
   updater: {
     check_on_startup: true,
@@ -341,6 +345,20 @@ export const DEFAULT_CONFIG: Config = {
     proxy_url: "",
     proxy_port: 7890,
   },
+  // 推送通知：与后端 NotificationSettings::default() 一致（总开关关、
+  // 事件集 login_failed + network_down、免打扰 22:00-08:00 未启用）
+  notification: {
+    enabled: false,
+    channels: [],
+    events: ["login_failed", "network_down"],
+    quiet_enabled: false,
+    quiet_start_hour: 22,
+    quiet_start_minute: 0,
+    quiet_end_hour: 8,
+    quiet_end_minute: 0,
+    retry_max_attempts: 3,
+    retry_base_interval_seconds: 2,
+  },
 };
 
 /**
@@ -351,10 +369,6 @@ export const DEFAULT_CONFIG: Config = {
  * 在应用与渲染时解析。它不是合法 CSS 颜色，任何直接当作色值使用的位置都必须先解析。
  */
 export const MONO_ACCENT = "mono";
-/** 单色主题色在浅色主题下的取值（日间黑） */
-export const MONO_ACCENT_LIGHT = "#000000";
-/** 单色主题色在深色主题下的取值（夜间白） */
-export const MONO_ACCENT_DARK = "#ffffff";
 
 export const DEFAULT_APPEARANCE: Appearance = {
   reduce_motion: false,

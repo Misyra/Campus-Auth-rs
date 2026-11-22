@@ -85,6 +85,8 @@ function stopAtRedirect(): void { props.step.stop_on_redirect = true; emit("chan
 .response-values { border-top: 1px solid var(--border); }
 .response-values > summary { padding: 15px 0; cursor: pointer; font-size: 13px; font-weight: 650; }
 .response-values > summary span { margin-left: 8px; color: var(--text-secondary); font-size: 12px; font-weight: 400; }
+.response-remove { width: 28px; height: 42px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.response-remove:hover { color: var(--danger); background: var(--danger-bg); }
 summary:focus-visible, .response-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .response-values-body { display: flex; flex-direction: column; gap: 12px; padding-bottom: 14px; }
 .response-help, .response-use { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
@@ -94,12 +96,13 @@ summary:focus-visible, .response-remove:focus-visible { outline: 2px solid var(-
 code { color: var(--text-primary); font-family: var(--font-mono); overflow-wrap: anywhere; }
 .response-rule { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
 .response-rule-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr) 28px; align-items: end; gap: 10px; }
-.response-rule-fields .form-group { margin: 0; min-width: 0; }
+/* 网格行内不需要 form-group 的下边距，走分叉变量；min-width: 0 共享层已声明不再复述 */
+.response-rule-fields .form-group { --form-group-margin: 0; }
 .response-rule-fields input, .response-rule-fields select { width: 100%; }
-.response-remove { width: 28px; height: 42px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); cursor: pointer; }
-.response-remove:hover { color: var(--danger); background: var(--danger-bg); }
 .response-add, .response-redirect { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); }
-@media (max-width: 850px) {
+/* 850 并入全局 900 档（index.css 断点约定清单）：850 距 900 更近，且按「降级
+   只早不晚」原则，网格塌单列从 ≤900 就开始，768–850 区间不再挤四列 */
+@media (max-width: 900px) {
   .response-rule-fields { grid-template-columns: minmax(0, 1fr) 28px; }
   .response-rule-fields .form-group { grid-column: 1; }
   .response-remove { grid-column: 2; grid-row: 1; }

@@ -86,6 +86,11 @@ async function fetchConfig(): Promise<void> {
     // 本 composable 明确不接收——它们属于 Profile，归方案页编辑。
     config.app_settings = { ...DEFAULT_CONFIG.app_settings, ...(data.app_settings || {}) };
     config.updater = { ...DEFAULT_CONFIG.updater, ...(data.updater || {}) };
+    // 推送通知：旧后端不下发时整体取默认值；通道列表以后端下发为准（不能与
+    // 默认值浅合并——那会把后端的通道列表和默认空数组拼错）
+    config.notification = { ...DEFAULT_CONFIG.notification, ...(data.notification || {}) };
+    // 管理密码在 app_settings 段内（后端 global.app.management_password），
+    // 与上面的段合并一起完成——GET 响应无顶层 management_password 字段
     // 旧配置只有 proxy_port（可能非默认值）：派生完整地址，
     // 保证输入框显示与后端 resolved_proxy_url 实际使用一致
     if (!config.updater.proxy_url && config.updater.proxy_port > 0) {
@@ -155,6 +160,45 @@ function rangeValuesFromConfig(): Record<string, unknown> {
 
 const { toastOnly } = useToast();
 
+/**
+ * saveConfig 载荷的 section 键（T5-3 autosave 增量化）。
+ *
+ * 与后端 PATCH /api/config/{section} 的全局设置段对齐（`ConfigSectionKey`，
+ * 后端另接受凭证域段与 active_profile_id，但那些属 Profile 域，不在本
+ * composable 的保存边界内）。管理密码在 app_settings 段内（后端
+ * `global.app.management_password`），随段一起提交。
+ */
+const SAVE_SECTIONS = [
+  "browser",
+  "worker",
+  "monitor",
+  "pause",
+  "logging",
+  "retry",
+  "app_settings",
+  "updater",
+  "notification",
+] as const;
+type SaveSection = (typeof SAVE_SECTIONS)[number];
+
+/**
+ * 计算与已保存快照相比发生变化的 section。
+ *
+ * savedSnapshot 是整表 JSON 串：解析后逐段 stringify 比对（配置体量小，
+ * 一次 parse 开销可忽略；段内键序与快照一致——两者同源于本模块的赋值路径）。
+ * 快照解析失败属异常路径，保守返回全量段以免漏存。
+ */
+function changedSections(snapshot: string): SaveSection[] {
+  let before: Partial<Record<SaveSection, unknown>>;
+  try {
+    before = JSON.parse(snapshot) as Partial<Record<SaveSection, unknown>>;
+  } catch {
+    return [...SAVE_SECTIONS];
+  }
+  const bag = config as unknown as Record<SaveSection, unknown>;
+  return SAVE_SECTIONS.filter((s) => JSON.stringify(bag[s]) !== JSON.stringify(before[s]));
+}
+
 /** 保存配置：校验硬错误阻断、警示仅提示；成功后以表单当前值刷新 dirty 快照 */
 async function saveConfig(force = false): Promise<void> {
   if (!dirty.value && !force) return;
@@ -185,10 +229,11 @@ async function saveConfig(force = false): Promise<void> {
 
   busy.save = true;
   saveFailed.value = false;
+  // 全量载荷（回退与兜底路径专用）：与既有全量 PATCH 字节同形。
   // 载荷只含全局设置：凭据/直连字段一律不提交（它们属 Profile，见文件头边界说明）。
   // 此前这里带着 username/auth_url/login_channel 等 13 个方案字段，等于让任意
   // 全局保存都能改写活跃方案的凭据——检测候选被静默落盘正是由此而来。
-  const payload: SaveConfigPayload = {
+  const fullPayload: SaveConfigPayload = {
     browser: config.browser,
     worker: config.worker,
     monitor: config.monitor,
@@ -197,21 +242,80 @@ async function saveConfig(force = false): Promise<void> {
     retry: config.retry,
     app_settings: config.app_settings,
     updater: config.updater,
+    notification: config.notification,
   };
 
   // ⚠ 快照必须在 `await` **之前**取。
-  // 这里等的是本次 PATCH 的载荷（payload 在上面已经构造好），所以"已提交的基准"
+  // 这里等的是本次 PATCH 的载荷（载荷在下面由各段构造），所以"已提交的基准"
   // 就是此刻的 config；PATCH 在途期间用户继续编辑产生的改动**不属于**这次提交。
   // 原实现在 await 之后才用"当前 config"当快照，于是途中的编辑被当成已保存基准、
   // dirty 被置 false —— 实际从未提交，属静默丢改动。
   const submittedSnapshot = JSON.stringify(config);
 
+  // 分节保存部分成功后的基准前移：以提交快照为源只吸收已落盘段——基准
+  // 若停在旧值，用户把已落盘段改回旧值会因「与旧基准一致」被判无变更，
+  // 重试不再包含该段，落盘值与界面静默背离（Codex 复审）。在途编辑对已
+  // 落盘段的新改动不属于「已保存值」，不吸收、保持 dirty 待下次保存
+  const advanceBaseline = (applied: readonly string[]) => {
+    if (!applied.length) return;
+    const snap = JSON.parse(savedSnapshot) as Record<string, unknown>;
+    const source = JSON.parse(submittedSnapshot) as Record<string, unknown>;
+    for (const section of applied) snap[section] = source[section];
+    savedSnapshot = JSON.stringify(snap);
+  };
+
   try {
-    await configApi.patch(payload, { signal: controller.signal });
+    // T5-3：按 dirty 所属 section 分组，逐段走 PATCH /api/config/{section}
+    //（多段同时 dirty 按列表顺序逐个发送；本保存入口是按钮触发、无防抖合并
+    // 节奏可继承，顺序发送即最小改法）。
+    const sections = force ? [...SAVE_SECTIONS] : changedSections(savedSnapshot);
+    if (sections.length === 0) {
+      // 防御路径：dirty 但所有段与快照一致（理论上仅在 config 混入非段字段时
+      // 出现——目前 FormState 全部字段都已归属某个段）——走全量 PATCH 兜底
+      await configApi.patch(fullPayload, { signal: controller.signal });
+    } else {
+      let fellBack = false;
+      const applied: string[] = [];
+      // 提交快照的深解析副本：段载荷的唯一来源。不能用 fullPayload——它只
+      // 是浅快照（各段与活 config 共享同一对象引用），早段 PATCH 在途时用户
+      // 对后段的编辑会穿透引用改写载荷；也不能直接读活值——落盘值会与
+      // 「保存成功后的基准（提交快照）」脱钩，随后改回快照值被判「无变更」
+      // 而漏发（Codex 三轮）。深解析彻底切断引用共享
+      const submitted = JSON.parse(submittedSnapshot) as SaveConfigPayload;
+      for (const section of sections) {
+        try {
+          await configApi.patchSection(section, submitted[section], {
+            signal: controller.signal,
+          });
+          applied.push(section);
+        } catch (error) {
+          // 防御性回退：404 = 端点未挂载（过渡期理论上不该发生，见
+          // patchSection 注释）。一次性回退全量 PATCH——语义与改动前完全
+          // 一致，且对已成功的段是同值幂等合并。非 404（400 校验拒绝等）
+          // 不回退：全量载荷同样会被拒，只会掩盖出错的段。
+          if (error instanceof ApiError && error.status === 404) {
+            frontendLogger.warn("config", `section 端点不可用（${section}），回退全量保存`);
+            fellBack = true;
+            break;
+          }
+          // 中断点之前的段已真实落盘：基准即时前移，重试按新基准判变更
+          advanceBaseline(applied);
+          throw error;
+        }
+      }
+      if (fellBack) {
+        // 回退全量 PATCH 前同样前移已逐段落盘的段：全量失败时重试判定不失真
+        // （成功则由下方整体快照前移覆盖，前移是其真子集、无冲突）
+        advanceBaseline(applied);
+        await configApi.patch(fullPayload, { signal: controller.signal });
+      }
+    }
     suppressDirty = true;
     try {
       await nextTick();
-      // 以**已提交值**为新快照：用户把值改回原样时 dirty 自动消失
+      // 以**已提交值**为新快照：用户把值改回原样时 dirty 自动消失。
+      // 部分段失败时不走到这里（catch 提前返回），已落盘段的基准由
+      // advanceBaseline 前移、未落盘段保持 dirty。
       savedSnapshot = submittedSnapshot;
       // 只有"当前值与已提交值一致"才清 dirty。在途编辑必须保留未保存标记，
       // 否则用户看不到脏提示、也不会再点一次保存（suppressDirty 窗口内被抑制的
@@ -277,9 +381,11 @@ async function toggleAutostart(enable: boolean): Promise<void> {
   busy.autostart = true;
   try {
     const data = await autostartApi.toggle(enable);
-    frontendLogger.info("autostart", data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
-    toastOnly(true, data?.message || `${enable ? "启用" : "关闭"}自启动成功`);
-    if (typeof data?.warning === "string") {
+    // 具名 AutostartToggleResult：message 为后端业务提示，warning 仅 Windows 端
+    // 缓存落盘失败时非 null（系统注册已生效，只提醒不回滚）
+    frontendLogger.info("autostart", data.message || `${enable ? "启用" : "关闭"}自启动成功`);
+    toastOnly(true, data.message || `${enable ? "启用" : "关闭"}自启动成功`);
+    if (typeof data.warning === "string") {
       frontendLogger.warn("autostart", data.warning);
       toastOnly(false, `系统设置已生效，但配置缓存保存失败：${data.warning}`);
     }

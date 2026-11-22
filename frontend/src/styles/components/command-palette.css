@@ -1,0 +1,144 @@
+/* command-palette.css — 命令面板（Ctrl+K）：
+   入口为顶栏搜索按钮（AppTopbar 的 .topbar-search），面板本体
+   CommandPalette.vue 经 defineAsyncComponent 懒加载。颜色全部引用 token，
+   深浅主题自动跟随；不在此改写任何既有 token 值。 */
+
+/* 面板：顶部悬停式（区别于 .modal-overlay 的垂直居中），搜索框承担全部输入 */
+.command-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-top);
+  background: var(--overlay);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 16px 16px;
+  backdrop-filter: var(--blur-sm);
+}
+
+.command-palette-panel {
+  width: min(560px, 100%);
+  max-height: min(480px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  overflow: hidden;
+}
+
+.command-palette-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.command-palette-search-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--content-text-muted);
+  flex-shrink: 0;
+}
+
+.command-palette-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--content-text-primary);
+  font-size: var(--text-md);
+  outline: none;
+}
+
+.command-palette-input::placeholder {
+  color: var(--content-text-muted);
+}
+
+.command-palette-kbd {
+  font-family: inherit;
+  font-size: var(--text-2xs);
+  color: var(--content-text-muted);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+
+.command-palette-list {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+}
+
+.command-palette-group-label {
+  font-size: var(--text-2xs);
+  color: var(--content-text-muted);
+  padding: 8px 10px 4px;
+}
+
+.command-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--content-text-primary);
+  cursor: pointer;
+}
+
+.command-palette-item.active {
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.command-palette-item-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.command-palette-item-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.command-palette-empty {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--content-text-muted);
+}
+
+.command-palette-hints {
+  display: flex;
+  gap: 14px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-2xs);
+  color: var(--content-text-muted);
+}
+
+.command-palette-hints kbd {
+  font-family: inherit;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 1px 4px;
+  margin-right: 3px;
+}
+
+/* 进出场过渡：仅淡入淡出（面板无缩放动画，打开要的是快） */
+.command-palette-fade-enter-active,
+.command-palette-fade-leave-active {
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+
+.command-palette-fade-enter-from,
+.command-palette-fade-leave-to {
+  opacity: 0;
+}

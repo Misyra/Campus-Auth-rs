@@ -2,12 +2,14 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -18,6 +20,18 @@ use super::settings::{NetworkMode, NetworkSettings};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const DNS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 已转发请求后等待上游响应头（含 1xx 过渡响应的每一读）的上限。
+/// 客户端自带请求级超时，此处只兜住「门户 accept 后永不回包」的悬挂。
+///
+/// 测试下缩短为 500ms 并走真实时钟：tokio 暂停时钟（start_paused）的
+/// auto-advance 在单线程运行时会无视刚就绪的真实套接字事件直接跳到下一个
+/// 定时器，serve_proxy 内固有的连接/请求头定时器会被虚假触发，回环转发
+/// 测试无法以虚拟时钟驱动真实 30s（详见 egress_tests 中的回归用例）。
+#[cfg(not(test))]
+const UPSTREAM_HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const UPSTREAM_HEAD_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// 网络出口准备失败，不允许静默降级到系统默认出口。
 #[derive(Debug, thiserror::Error)]
@@ -116,19 +130,44 @@ impl PreparedEgress {
         Ok(builder)
     }
 
+    /// 监测客户端缓存身份：`None` 表示出口每轮必变（Interface 的本地回环代理端口
+    /// 随机），调用方不得缓存客户端；`Some` 为「静态代理 URL 或空串」，同身份可复用。
+    pub(crate) fn cacheable_identity(&self) -> Option<String> {
+        if self.binding.is_some() {
+            return None;
+        }
+        Some(
+            self.proxy
+                .as_ref()
+                .map(|url| url.as_str().to_string())
+                .unwrap_or_default(),
+        )
+    }
+
     /// TCP 探测和入口预检使用同一出口，代理模式通过 HTTP CONNECT 或 SOCKS5 连接。
-    pub async fn connect(&self, host: &str, port: u16) -> io::Result<TcpStream> {
+    ///
+    /// 统一返回 [`HeadBufferedReader`]：HTTP CONNECT 引导可能越读到隧道首包
+    /// （server-first 协议的问候与代理响应合流），越读字节随流回放——丢弃
+    /// 是数据丢失、报错会把可达目标误判失败，回放是唯一两全口径。
+    pub async fn connect(&self, host: &str, port: u16) -> io::Result<HeadBufferedReader> {
         tokio::time::timeout(CONNECT_TIMEOUT, async {
             if let Some(binding) = &self.binding {
-                binding.connect(host, port).await
+                binding
+                    .connect(host, port)
+                    .await
+                    .map(HeadBufferedReader::new)
             } else if let Some(proxy) = &self.proxy {
                 if proxy.scheme() == "http" {
                     connect_http_proxy(proxy, host, port).await
                 } else {
-                    connect_socks_proxy(proxy, host, port).await
+                    connect_socks_proxy(proxy, host, port)
+                        .await
+                        .map(HeadBufferedReader::new)
                 }
             } else {
-                TcpStream::connect((host, port)).await
+                TcpStream::connect((host, port))
+                    .await
+                    .map(HeadBufferedReader::new)
             }
         })
         .await
@@ -136,10 +175,15 @@ impl PreparedEgress {
     }
 
     /// 域名检查使用所选网卡的 DNS，避免校验与连接走两套解析路径。
+    ///
+    /// IPv6 字面量可能以方括号形态传入（`url::Url::host_str()` 的产出），
+    /// 字面量解析与 DNS 查询均不认方括号——先剥一层再处理（P2-13，与
+    /// `web::ssrf` / `monitor::portal` 同口径）。
     pub async fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
         if let Some(binding) = &self.binding {
             binding.resolve(host, port).await
         } else {
+            let host = strip_ipv6_brackets(host);
             Ok(tokio::net::lookup_host((host, port)).await?.collect())
         }
     }
@@ -193,6 +237,15 @@ impl PreparedEgress {
     }
 }
 
+/// 剥除 IPv6 字面量的方括号（`[2001:db8::1]` → `2001:db8::1`）：
+/// `url::Url::host_str()` 返回带括号形态，而 `IpAddr` 解析与系统解析器
+/// （`lookup_host`）均不认括号；非括号形态原样返回（域名不受影响）
+fn strip_ipv6_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 /// 校园网 DNS 仅接受实际 IPv4 端点，避免解析 DNS 本身形成循环。
 pub fn parse_dns_server(value: &str) -> io::Result<SocketAddr> {
     let addr = value
@@ -200,7 +253,7 @@ pub fn parse_dns_server(value: &str) -> io::Result<SocketAddr> {
         .parse::<Ipv4Addr>()
         .map(|ip| SocketAddr::from((ip, 53)))
         .or_else(|_| value.trim().parse::<SocketAddr>())
-        .map_err(io::Error::other)?;
+        .map_err(|e| io::Error::other(format!("DNS 地址格式无效（{e}）")))?;
     if !addr.is_ipv4() || addr.port() == 0 || addr.ip().is_unspecified() || addr.ip().is_multicast()
     {
         return Err(io::Error::new(
@@ -251,6 +304,9 @@ impl Binding {
     }
 
     async fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        // IPv6 字面量的方括号形态先剥一层（P2-13）：不剥会绕过字面量分支、
+        // 被 dns_query 的 url::Host::parse 判为非域名而「DNS 域名无效」
+        let host = strip_ipv6_brackets(host);
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(vec![SocketAddr::new(ip, port)]);
         }
@@ -341,7 +397,9 @@ fn bind_interface(socket: &Socket, adapter: &EgressAdapter) -> io::Result<()> {
         };
         if result != 0 {
             // 仅在 Winsock 调用失败后立即读取线程错误码。
-            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+            let raw = io::Error::from_raw_os_error(unsafe { WSAGetLastError() });
+            // 人话化：动作 + 失败类别 + 原始错误（全限定路径避免非 Windows 构建的未使用导入）
+            return Err(crate::utils::io_human::io_error("绑定出口网卡", raw));
         }
         Ok(())
     }
@@ -499,16 +557,101 @@ impl LocalProxy {
     }
 }
 
-async fn read_http_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    let mut head = Vec::new();
-    loop {
-        if head.len() >= 32 * 1024 {
-            return Err(io::Error::other("代理请求头过大"));
+/// 回环代理请求头 / 上游响应头的字节上限
+const HTTP_HEAD_LIMIT: usize = 32 * 1024;
+
+/// 请求头整块读取的单次 read 缓冲（A24）：替代逐字节 read_u8 的每字节一次
+/// await 路径。
+const HTTP_HEAD_CHUNK: usize = 4096;
+
+/// 回环代理连接的读取适配层（A24），兼作出口连接的统一流类型。
+///
+/// `read_http_head` 整块读取时，单次 `read` 可能越过 `\r\n\r\n` 预读后续字节
+///（请求/响应消息体、CONNECT 隧道数据、keep-alive 流水线的下一请求）。这些
+/// 字节既不能丢弃也不能回写套接字，暂存在本层；之后的读取（消息体拷贝、
+/// 双向隧道、下一轮请求头）先于底层流消费它们，字节序与逐字节读取一致。
+/// [`PreparedEgress::connect`] 统一返回本类型：HTTP CONNECT 引导越读到的
+/// 隧道首包（server-first 协议在隧道建立瞬间即回问候，可能与代理响应合流）
+/// 随流回放而非报错——可达目标不得因有效隧道数据被误判失败（Codex 复审）。
+pub struct HeadBufferedReader {
+    stream: TcpStream,
+    pending: Vec<u8>,
+}
+
+impl HeadBufferedReader {
+    /// 包装底层流（`pub(crate)`：外部无需自行构造，仅出口路径内部与测试使用）
+    pub(crate) fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            pending: Vec::new(),
         }
-        head.push(stream.read_u8().await?);
-        if head.ends_with(b"\r\n\r\n") {
+    }
+
+    /// 头读取完成时回收越读字节，供后续消息体 / 隧道 / 下一请求消费。
+    /// 新旧字节按时间序拼接（新越读在前，尚未消费的旧 pending 在后）。
+    fn push_back(&mut self, mut extra: Vec<u8>) {
+        extra.extend_from_slice(&std::mem::take(&mut self.pending));
+        self.pending = extra;
+    }
+}
+
+impl AsyncRead for HeadBufferedReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.pending.is_empty() {
+            let n = self.pending.len().min(buf.remaining());
+            buf.put_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for HeadBufferedReader {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+async fn read_http_head(stream: &mut HeadBufferedReader) -> io::Result<Vec<u8>> {
+    let mut head = Vec::new();
+    let mut chunk = [0u8; HTTP_HEAD_CHUNK];
+    loop {
+        if let Some(end) = head.windows(4).position(|w| w == b"\r\n\r\n".as_slice()) {
+            let end = end + 4;
+            // 越读的尾字节留在适配层，供消息体拷贝 / 隧道 / 下一请求头消费
+            stream.push_back(head.split_off(end));
             return Ok(head);
         }
+        if head.len() >= HTTP_HEAD_LIMIT {
+            return Err(io::Error::other("代理请求头过大"));
+        }
+        // want 限制单次读取量，头总长不超过 32KB（与逐字节实现一致）
+        let want = (HTTP_HEAD_LIMIT - head.len()).min(chunk.len());
+        let read = stream.read(&mut chunk[..want]).await?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "代理请求头不完整（对端关闭）",
+            ));
+        }
+        head.extend_from_slice(&chunk[..read]);
     }
 }
 
@@ -519,7 +662,11 @@ fn header_value<'a>(headers: &'a [(&str, &str)], name: &str) -> Option<&'a str> 
         .map(|(_, value)| value.trim())
 }
 
-async fn copy_fixed(input: &mut TcpStream, output: &mut TcpStream, length: u64) -> io::Result<()> {
+async fn copy_fixed(
+    input: &mut (impl AsyncRead + Unpin),
+    output: &mut (impl AsyncWrite + Unpin),
+    length: u64,
+) -> io::Result<()> {
     let copied = tokio::io::copy(&mut (&mut *input).take(length), output).await?;
     if copied != length {
         return Err(io::Error::new(
@@ -530,7 +677,10 @@ async fn copy_fixed(input: &mut TcpStream, output: &mut TcpStream, length: u64) 
     Ok(())
 }
 
-async fn copy_chunked(input: &mut TcpStream, output: &mut TcpStream) -> io::Result<()> {
+async fn copy_chunked(
+    input: &mut (impl AsyncRead + Unpin),
+    output: &mut (impl AsyncWrite + Unpin),
+) -> io::Result<()> {
     loop {
         let mut line = Vec::new();
         while !line.ends_with(b"\r\n") {
@@ -584,8 +734,8 @@ fn body_length(headers: &[(&str, &str)]) -> io::Result<Option<u64>> {
 }
 
 async fn copy_message_body(
-    input: &mut TcpStream,
-    output: &mut TcpStream,
+    input: &mut (impl AsyncRead + Unpin),
+    output: &mut (impl AsyncWrite + Unpin),
     headers: &[(&str, &str)],
     response: bool,
 ) -> io::Result<bool> {
@@ -604,8 +754,10 @@ async fn copy_message_body(
     Ok(true)
 }
 
-async fn serve_proxy(mut incoming: TcpStream, binding: Arc<Binding>, auth: &str) -> io::Result<()> {
-    let mut connection: Option<(String, TcpStream)> = None;
+async fn serve_proxy(incoming: TcpStream, binding: Arc<Binding>, auth: &str) -> io::Result<()> {
+    // A24：请求头整块读取，两侧连接包一层适配层缓存越读字节
+    let mut incoming = HeadBufferedReader::new(incoming);
+    let mut connection: Option<(String, HeadBufferedReader)> = None;
     loop {
         let head = tokio::time::timeout(
             Duration::from_secs(if connection.is_some() { 90 } else { 8 }),
@@ -652,7 +804,7 @@ async fn serve_proxy(mut incoming: TcpStream, binding: Arc<Binding>, auth: &str)
             let connected =
                 tokio::time::timeout(CONNECT_TIMEOUT, binding.connect(host, port)).await;
             match connected {
-                Ok(Ok(stream)) => connection = Some((key, stream)),
+                Ok(Ok(stream)) => connection = Some((key, HeadBufferedReader::new(stream))),
                 failure => {
                     let message = match failure {
                         Ok(Err(error)) => error.to_string(),
@@ -718,7 +870,25 @@ async fn serve_proxy(mut incoming: TcpStream, binding: Arc<Binding>, auth: &str)
         }
         copy_message_body(&mut incoming, upstream, &headers, false).await?;
         loop {
-            let response = read_http_head(upstream).await?;
+            let response = match tokio::time::timeout(
+                UPSTREAM_HEAD_TIMEOUT,
+                read_http_head(upstream),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_) => {
+                    // 让客户端拿到明确的 504 而非连接重置；返回错误后 task 结束，
+                    // 信号量许可与半开连接随之释放。
+                    let _ = incoming
+                            .write_all(b"HTTP/1.1 504 Gateway Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "上游响应头等待超时",
+                    ));
+                }
+            };
             let text = String::from_utf8_lossy(&response);
             let mut lines = text.split("\r\n");
             let status_line = lines
@@ -846,7 +1016,11 @@ async fn connect_socks_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Res
     Ok(stream)
 }
 
-async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Result<TcpStream> {
+async fn connect_http_proxy(
+    proxy: &url::Url,
+    host: &str,
+    port: u16,
+) -> io::Result<HeadBufferedReader> {
     let mut stream = TcpStream::connect((
         proxy
             .host_str()
@@ -876,7 +1050,10 @@ async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Resu
             format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth}\r\n").as_bytes(),
         )
         .await?;
-    let response = read_http_head(&mut stream).await?;
+    // A24：响应头整块读取；越读字节（server-first 协议的问候与代理响应合流）
+    // 留在适配层随流回放——CONNECT 隧道里它们是有效数据而非异常
+    let mut reader = HeadBufferedReader::new(stream);
+    let response = read_http_head(&mut reader).await?;
     let first = std::str::from_utf8(&response)
         .map_err(io::Error::other)?
         .split("\r\n")
@@ -885,7 +1062,7 @@ async fn connect_http_proxy(proxy: &url::Url, host: &str, port: u16) -> io::Resu
     if first.split_whitespace().nth(1) != Some("200") {
         return Err(io::Error::other("代理拒绝 TCP CONNECT"));
     }
-    Ok(stream)
+    Ok(reader)
 }
 
 #[cfg(test)]

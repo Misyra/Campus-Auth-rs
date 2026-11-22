@@ -10,12 +10,17 @@ import type { RequestOptions } from "./client";
 import type {
   AiCaptureResult,
   AiLlmConfig,
+  AiStreamEvent,
   AutostartStatus,
+  AutostartToggleResult,
   BackgroundUploadResult,
   BinaryInfo,
   BrowserListResponse,
   ConfigResponse,
+  ConfigSessionStartResult,
+  ConfigSessionStopResult,
   DebugSession,
+  DiagnosticReport,
   EnvironmentStatus,
   HealthInfo,
   HttpLoginTestResult,
@@ -25,6 +30,8 @@ import type {
   LoginResultResponse,
   LoginHistoryItem,
   LogEntry,
+  MirrorChoice,
+  MirrorProbeResponse,
   MutationResult,
   NetworkDetectResult,
   NetworkTestResult,
@@ -89,12 +96,43 @@ async function fetchBundleWithTimeout(url: string, init: RequestInit): Promise<B
 
 export { ApiError, extractApiError } from "./client";
 
+/**
+ * PATCH /api/config/{section} 的合法段名（T5-3）。
+ *
+ * 与后端 `CONFIG_PATCH_SECTIONS` 对齐的全局设置子集——前端保存载荷只含全局
+ * 段（凭证域段归方案页 /api/profiles 编辑），故此处不导出后端也接受的其他段。
+ * 类型暂放本文件：types.ts 强类型化批次收敛时随 SaveConfigPayload 一并迁入。
+ */
+export type ConfigSectionKey =
+  | "browser"
+  | "worker"
+  | "monitor"
+  | "pause"
+  | "logging"
+  | "retry"
+  | "app_settings"
+  | "updater"
+  | "notification";
+
 /** 配置相关 */
 export const configApi = {
   fetch: () => http.get<ConfigResponse>("/api/config"),
   // B4：原 PUT /api/config 全量保存方法已删除（全库零调用，且扁平整体替换
   // 的载荷形状容易在后端演变为清空配置的地雷）；保存统一走 patch 增量语义
   patch: (payload: SaveConfigPayload, opts?: RequestOptions) => http.patch<MutationResult>("/api/config", payload, opts),
+  /**
+   * 单 section 局部更新（PATCH /api/config/{section}，T5-3）。
+   *
+   * 请求体即该段的局部对象，后端包装回单键全量 PATCH 走同一条合并链——
+   * 原子性 / 校验语义与全量 PATCH 完全一致；响应为与 GET 同形的完整扁平
+   * 快照。useConfig.saveConfig 按 dirty 所属段分组调用本方法，仅在后端
+   * 未挂载（404）时防御性回退全量 patch。
+   */
+  patchSection: <S extends ConfigSectionKey>(
+    section: S,
+    body: SaveConfigPayload[S],
+    opts?: RequestOptions,
+  ) => http.patch<MutationResult>(`/api/config/${pathSegment(section)}`, body, opts),
   fetchLogLevels: () => http.get<{ level: string }>("/api/config/log-levels"),
   setLogLevel: (level: string) => http.put<MutationResult>("/api/config/log-level", { level }),
   fetchStealthScript: () => http.get<{ script: string }>("/api/config/default-stealth-script"),
@@ -135,6 +173,31 @@ export const actionsApi = {
     http.post<LoginResultResponse>("/api/login", null, { timeout: timeoutMs }),
   cancelLogin: () => http.post<MutationResult>("/api/login/cancel"),
   testNetwork: () => http.post<NetworkTestResult>("/api/monitor/test", null, { timeout: 30000 }),
+};
+
+/**
+ * 推送通知：测试发送（POST /api/notification/test）。
+ *
+ * body 传通道草稿配置（channels，优先）或已保存通道 id（channel_id）；
+ * 后端用测试消息实际发送一次，逐通道返回回执。整体超时 60s：后端单通道
+ * 测试超时截断到 15s 且最多 3 个通道（45s），留余量兜底。
+ */
+export const notificationApi = {
+  test: (payload: { channels?: import("./types").NotificationChannelConfig[]; channel_id?: string }) =>
+    http.post<import("./types").NotificationTestResult>("/api/notification/test", payload, { timeout: 60000 }),
+};
+
+/** 一键网络诊断：后端五项并发探测，整体受 15s 总限时约束，放宽到 30s 兜底 */
+export const diagnosticsApi = {
+  run: () =>
+    http.post<DiagnosticReport>("/api/diagnostics/run", null, { timeout: 30000 }),
+  /** 导出诊断包（zip 附件）：manifest + 脱敏配置快照 + 事件流 + 日志 + 环境观测 */
+  async exportBundle(): Promise<Blob> {
+    const token = await ensureAuthToken();
+    return fetchBundleWithTimeout("/api/diagnostics/bundle", {
+      headers: token ? { "X-Auth-Token": token } : undefined,
+    });
+  },
 };
 
 /** 系统 */
@@ -183,27 +246,25 @@ export const systemApi = {
 
 /** 环境初始化（uv sync + Chromium，POST /api/environment/bootstrap） */
 export const environmentApi = {
+  // 响应即环境状态全量回包：与 types.ts 的 EnvironmentStatus 12 字段逐字段
+  // 对质（后端无 message 附加字段），直接复用不再内联复刻
   bootstrap: (opts?: RequestOptions) =>
-    http.post<
-      MutationResult & {
-        capability_ready: boolean;
-        uv_ready: boolean;
-        python_ready: boolean;
-        worker_ready: boolean;
-        manifest_current: boolean;
-        playwright_ready: boolean;
-        system_browser_ready: boolean;
-        ocr_enabled: boolean;
-        ocr_ready: boolean;
-        stage: string;
-        progress: { phase: string; percent: number; message: string } | null;
-        last_error: string | null;
-      }
-    >("/api/environment/bootstrap", null, { timeout: 650000, ...opts }),
+    http.post<EnvironmentStatus>(
+      "/api/environment/bootstrap",
+      null,
+      { timeout: 650000, ...opts },
+    ),
   fetchStatus: async (): Promise<EnvironmentStatus | null> => {
+    // InitStatus 自带可选 environment 字段（types.ts），双重断言已失效
     const data = await http.get<InitStatus>("/api/init-status");
-    return (data as InitStatus & { environment?: EnvironmentStatus }).environment ?? null;
+    return data.environment ?? null;
   },
+  /** 并发测速 GitHub 直连与各镜像（初始化弹窗镜像选择行，≤5s 实测窗口） */
+  probeMirrors: () =>
+    http.post<MirrorProbeResponse>("/api/environment/mirror-probe", null, { timeout: 15000 }),
+  /** 保存下载源选择偏好（auto/direct/mirror），后续 uv 与 Python 下载按此执行 */
+  setMirrorPreference: (choice: MirrorChoice) =>
+    http.put<{ selected: MirrorChoice }>("/api/environment/mirror-preference", choice),
 };
 
 /** 配置方案 */
@@ -213,7 +274,9 @@ export const profilesApi = {
     http.get<ProfileDetailResponse>(`/api/profiles/${pathSegment(id)}`),
   // 新建方案：POST /api/profiles/{id}，body 必含 id/name/username/password；
   // 可选设置字段（auth_url/trigger_url/isp/gateway_ip/wifi_ssid/active_task/
-  // active_http_task/login_channel）与 PUT 同语义
+  // active_http_task/login_channel/persistent_session_enabled）与 PUT 同语义
+  //（后端 ProfileCreateBody 接受 persistent_session_enabled 前该字段会被忽略：
+  // 新建时勾选的开关需在保存后的编辑里再确认一次）
   create: (
     id: string,
     payload: {
@@ -232,6 +295,8 @@ export const profilesApi = {
       active_http_task?: string;
       /** 脚本渠道绑定的脚本任务 ID（空 = 未绑定；脚本渠道同样没有内置兜底任务） */
       active_script_task?: string;
+      /** 持久会话开关（浏览器渠道）；录制动作由配置会话落盘，不经创建载荷 */
+      persistent_session_enabled?: boolean;
     },
   ) => http.post<MutationResult>(`/api/profiles/${pathSegment(id)}`, payload),
   save: (id: string, payload: ProfileUpdatePayload) =>
@@ -248,10 +313,51 @@ export const profilesApi = {
     http.post<MutationResult & { active_profile?: string }>("/api/profiles/auto-switch", { enabled }),
 };
 
+/**
+ * 浏览器持久会话的「配置会话」（headed 配置浏览器 + 交互录制）。
+ *
+ * start 打开以方案认证地址为门户地址的配置浏览器并开启录制；`options.record`
+ * 传 `false` 时为**自由浏览**模式（`?record=false`）：同样拉起持久浏览器并导航
+ * 到门户地址，但不注入录制器——供已启用持久会话的方案单独「打开浏览器」手动
+ * 登录（勾选门户记住密码），用完直接关窗即结束；该模式要求方案已启用持久会话
+ * （后端 400 拦截），且 stop 只能以 discard 结束。stop 结束会话：默认把录制动作
+ * 落盘方案（recorded_actions + persistent_session_enabled=true）；`apply=false`
+ * 仅结算取回动作数组、不写方案（「录制新任务」路径，避免误翻方案持久开关）；
+ * `discard=true` 仅关闭浏览器：不落盘录制、不写方案（响应仍返回真实
+ * recorded_count 与动作数组，是否采纳由调用方决定）。会话全局互斥：已有活跃会话时 start
+ * 返回 409（前端显示固定文案「已有配置会话进行中」），无活跃会话时 stop 也返回
+ * 409（后端 message 直显）。start 要等浏览器真实拉起并就绪，放宽客户端超时
+ * （与重定向检测同量级）。
+ */
+export const configSessionApi = {
+  start: (profileId: string, options?: { record?: boolean }) =>
+    http.post<ConfigSessionStartResult>(
+      `/api/profiles/${pathSegment(profileId)}/config-session/start${
+        options?.record === false ? "?record=false" : ""
+      }`,
+      null,
+      { timeout: 60000 },
+    ),
+  /** query 组装：discard（放弃）与 apply=false（任务录制，仅取动作不写方案）可并存；
+   *  两者缺省 = 落盘采纳（方案页「完成配置」路径） */
+  stop: (profileId: string, options?: { discard?: boolean; apply?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (options?.discard) qs.set("discard", "true");
+    if (options?.apply === false) qs.set("apply", "false");
+    const suffix = qs.size ? `?${qs.toString()}` : "";
+    return http.post<ConfigSessionStopResult>(
+      `/api/profiles/${pathSegment(profileId)}/config-session/stop${suffix}`,
+    );
+  },
+};
+
 /** 开机自启动 */
 export const autostartApi = {
   fetchStatus: () => http.get<AutostartStatus>("/api/autostart/status"),
-  toggle: (enable: boolean) => http.post<MutationResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
+  // toggle 走具名 AutostartToggleResult 而非通用 MutationResult：后端 enable/disable
+  // 的负载固定为 { message, warning? }（Windows 端缓存落盘失败时 warning 非 null），
+  // 收紧类型后调用方可直接消费具名字段
+  toggle: (enable: boolean) => http.post<AutostartToggleResult>(`/api/autostart/${enable ? "enable" : "disable"}`),
 };
 
 /** 卸载 */
@@ -343,7 +449,8 @@ export const aiApi = {
   async generateStream(
     payload: { extra_prompt?: string },
     opts: {
-      onEvent: (ev: Record<string, unknown>) => void;
+      /** 每帧回调：帧形态由后端 `ai::generate::StreamEvent` 序列化钉死，见 AiStreamEvent */
+      onEvent: (ev: AiStreamEvent) => void;
       signal?: AbortSignal;
       /** 空闲超时 ms，默认 600_000（10 分钟），有内容即重置，仅无内容连续达阈值才超时 */
       idleTimeoutMs?: number;
@@ -385,9 +492,8 @@ export const aiApi = {
       const decoder = new TextDecoder();
       let buf = "";
       let terminalReceived = false;
-      const deliver = (ev: Record<string, unknown>) => {
-        const type = String(ev.type ?? "");
-        if (type === "done" || type === "error") terminalReceived = true;
+      const deliver = (ev: AiStreamEvent) => {
+        if (ev.type === "done" || ev.type === "error") terminalReceived = true;
         opts.onEvent(ev);
       };
       while (true) {
@@ -407,7 +513,9 @@ export const aiApi = {
             const data = line.slice(5).trim();
             if (!data) continue;
             try {
-              const ev = JSON.parse(data) as Record<string, unknown>;
+              // wire 帧信任边界：帧形态由后端 `ai::generate::StreamEvent` 序列化钉死，
+              // 解析处一次性收窄到 AiStreamEvent 判别联合，消费侧免逐字段断言
+              const ev = JSON.parse(data) as AiStreamEvent;
               // 仅真实数据帧续命空闲计时：后端 ": keepalive" 注释帧只证明连接存活，
               // 不代表有内容——否则任何 ≥ keepalive 间隔的空闲阈值都永远打不到
               resetIdle();
@@ -419,7 +527,7 @@ export const aiApi = {
       // 处理尾部残留
       const tail = buf.trim();
       if (tail.startsWith("data:")) {
-        try { deliver(JSON.parse(tail.slice(5).trim()) as Record<string, unknown>); } catch {}
+        try { deliver(JSON.parse(tail.slice(5).trim()) as AiStreamEvent); } catch { /* 尾部残包非完整 JSON，可忽略 */ }
       }
       if (!terminalReceived) throw new Error("生成连接意外结束，未收到完成状态，请重试");
     } catch (e) {

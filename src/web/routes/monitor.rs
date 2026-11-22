@@ -11,6 +11,7 @@ use axum::Json;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::bridge::BridgeApi;
 use crate::config::{ConfigApi, DEFAULT_TRIGGER_URL};
@@ -19,22 +20,179 @@ use crate::environment::EnvironmentApi;
 use crate::monitor::{MonitorConfig, PortalDetectStatus};
 use crate::status::StatusManager;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 
 /// 可见浏览器重定向检测的总超时（含 Worker 启动、浏览器冷启动与 5 秒页面观察）。
 const REDIRECT_TEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// `POST /api/monitor/test-redirect` 请求体。
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct RedirectTestRequest {
     /// 用户尚未保存的自定义触发地址；空值使用内置默认地址。
     #[serde(default)]
     pub trigger_url: String,
-    /// 方案编辑器尚未保存的出口配置。
+    /// 方案编辑器尚未保存的出口配置（`NetworkSettings`，形状见
+    /// `crate::network::settings`，契约快照独立于 ToSchema 体系故以泛型对象标注）。
+    #[schema(value_type = Object)]
     pub network: Option<crate::network::settings::NetworkSettings>,
 }
 
+// ---- 契约 DTO（T5-1c monitor 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`。状态快照/探测结果是既有
+// Serialize 类型的线格式镜像（handler 仍走 `data(serde_json::to_value(..))`），
+// 不改 handler 返回类型；字符串枚举字段的取值在各字段 doc 中逐项列明。
+
+/// GET /api/monitor/status 响应载荷（`StatusSnapshot` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorStatusData {
+    /// 快照单调版本号（每次 merge +1，前端据此判断状态新旧）
+    pub snapshot_version: u64,
+    /// 引擎运行状态：running / stopped / dead
+    pub engine_state: String,
+    /// 是否处于冷却期（连续失败后的等待）
+    pub cooling_down: bool,
+    /// 冷却剩余秒数
+    pub cooling_down_remaining: Option<u32>,
+    /// 连续失败次数
+    pub consecutive_failures: u32,
+    /// 网络状态：online / captive_portal / offline / unknown
+    pub network_status: String,
+    /// 最近一次连通性解释
+    pub connectivity: MonitorConnectivityData,
+    /// 最近一次原始探测证据；尚未执行探测时为 null
+    pub last_probe_evidence: Option<ProbeEvidenceData>,
+    /// 上次网络检测时间（本地时区 ISO 8601）
+    pub last_check_time: Option<String>,
+    /// 登录状态：idle / running / success / failed / cancelled
+    pub login_status: String,
+    /// 登录来源：auto / manual / login_once / browser；无在途登录时为 null
+    pub login_source: Option<String>,
+    /// 登录结果消息
+    pub login_message: Option<String>,
+    /// 当前登录重试次数
+    pub retry_count: u32,
+    /// 当前活跃 Profile ID
+    pub active_profile: String,
+    /// 监测是否启用
+    pub monitor_enabled: bool,
+    /// 是否处于暂停时段
+    pub pause_active: bool,
+    /// 是否有新版本
+    pub update_available: bool,
+    /// 更新下载进度（下载期间有值，结束/失败后为 null）
+    pub update_progress: Option<super::system::EnvProgress>,
+    /// Python Worker 状态：not_installed / stopped / starting / ready / busy / error
+    pub worker_state: String,
+    /// 环境安装进度
+    pub environment_progress: Option<super::system::EnvProgress>,
+    /// 应用运行时长（秒）
+    pub uptime_seconds: u64,
+    /// 本次监控连续运行时长（秒）；未监控时为 0
+    pub monitoring_seconds: u64,
+    /// 调度器是否运行中
+    pub scheduler_running: bool,
+    /// 调度器下次触发时间（ISO 8601 字符串）
+    pub scheduler_next_fire_at: Option<String>,
+    /// 调度器管理的任务数量
+    pub scheduler_task_count: usize,
+    /// 累计网络检测次数
+    pub probe_total: u64,
+    /// 累计登录尝试次数
+    pub login_total: u64,
+}
+
+/// 连通性解释（`ConnectivityAssessment` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MonitorConnectivityData {
+    /// 网络连通性状态：online / captive_portal / offline / unknown
+    pub status: String,
+    /// 判断置信度：high / medium / low
+    pub confidence: String,
+    /// 主判断原因：not_checked / internet_verified / captive_detected /
+    /// external_failed_auth_reachable / link_up_login_assumed / redirect_login_assumed /
+    /// all_probes_failed / weak_evidence_only / inconclusive_evidence /
+    /// conflicting_evidence / no_probes_enabled
+    pub reason: String,
+    /// 认证入口补充证据：not_checked / reachable / unreachable / invalid / missing /
+    /// skipped_redirect_mode
+    pub auth_endpoint: String,
+    /// 自动恢复建议：no_action / attempt_login / attempt_login_once / wait_for_network /
+    /// wait_for_more_evidence / fix_configuration / no_probe_evidence / not_evaluated
+    pub recovery_advice: String,
+}
+
+/// 原始探测证据（`ProbeEvidence` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProbeEvidenceData {
+    /// TCP 弱连通探测：pass / captive / inconclusive / fail / disabled
+    pub tcp: String,
+    /// HTTP 204 门户探测：同 `tcp` 枚举
+    pub http: String,
+    /// URL 内容探测：同 `tcp` 枚举
+    pub url: String,
+    /// 本地链路诊断：not_checked / available / unavailable / probe_failed
+    pub local_link: String,
+}
+
+/// POST /api/monitor/test 响应载荷（`TestNetworkResult` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TestNetworkResultData {
+    /// 探测结论：online / captive_portal / offline / unknown
+    pub status: String,
+    /// 判断置信度：high / medium / low
+    pub confidence: String,
+    /// 主判断原因（取值同连通性解释的 `reason` 枚举）
+    pub reason: String,
+    /// 本地链路诊断：not_checked / available / unavailable / probe_failed
+    pub local_link: String,
+    /// 认证入口状态（取值同连通性解释的 `auth_endpoint` 枚举）
+    pub auth_endpoint: String,
+    /// 各探测方法的详细结果
+    pub details: ProbeDetailsData,
+    /// 探测耗时（毫秒）
+    pub duration_ms: u64,
+}
+
+/// 各探测方法的详细结果（`ProbeDetails` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProbeDetailsData {
+    /// TCP 探测结果描述
+    pub tcp: Vec<String>,
+    /// HTTP 探测结果描述
+    pub http: Vec<String>,
+    /// URL 探测结果描述
+    pub url: Vec<String>,
+}
+
+/// POST /api/monitor/test-redirect 响应载荷（`RedirectTestResult` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RedirectTestResultData {
+    /// 机器可读结论
+    pub status: RedirectTestStatus,
+    /// 前端直接展示的用户提示
+    pub message: String,
+}
+
+/// GET /api/network/interfaces 响应条目（`EgressAdapter` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NetworkInterfaceData {
+    /// 稳定标识：Windows 使用接口 GUID，Unix 优先使用 MAC
+    pub id: String,
+    /// 用户可识别的接口名称
+    pub name: String,
+    /// 当前接口索引
+    pub index: u32,
+    /// 当前 IPv4 地址
+    pub ipv4: String,
+    /// 当前接口 MAC，供门户凭据变换使用
+    pub mac: String,
+    /// 当前接口配置的 IPv4 DNS
+    pub dns_servers: Vec<String>,
+}
+
 /// 重定向检测结论。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RedirectTestStatus {
     /// 已识别到校园网认证页面。
@@ -91,6 +249,16 @@ fn validate_redirect_test_url(raw: &str) -> Result<String, ApiError> {
 }
 
 /// GET /api/monitor/status — 获取当前系统状态快照
+#[utoipa::path(
+    get,
+    path = "/api/monitor/status",
+    operation_id = "get_api_monitor_status",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "全局状态快照（引擎/网络/登录/调度/Worker/环境进度）", body = DataEnvelope<MonitorStatusData>),
+        (status = 500, description = "快照序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn get_status(State(status): State<Arc<StatusManager>>) -> Result<Json<Value>, ApiError> {
     let snapshot = status.borrow();
     Ok(data(serde_json::to_value(&snapshot)?))
@@ -100,6 +268,17 @@ pub async fn get_status(State(status): State<Arc<StatusManager>>) -> Result<Json
 ///
 /// 经 EngineApi 派发到「当前活跃」Engine（崩溃重启后自动指向新实例），
 /// oneshot 回复与 30s 超时封装在实现内。
+#[utoipa::path(
+    post,
+    path = "/api/monitor/test",
+    operation_id = "post_api_monitor_test",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "一轮手动网络探测结果（结论 + 置信度 + 分项探测描述）", body = DataEnvelope<TestNetworkResultData>),
+        (status = 503, description = "引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口，稍后重试）", body = ErrorResponse),
+        (status = 500, description = "探测执行失败（ProbeError / 网络测试超时）", body = ErrorResponse),
+    )
+)]
 pub async fn test_network(
     State(engine): State<Arc<dyn EngineApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -108,6 +287,17 @@ pub async fn test_network(
 }
 
 /// POST /api/monitor/start — 启动网络监测
+#[utoipa::path(
+    post,
+    path = "/api/monitor/start",
+    operation_id = "post_api_monitor_start",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "检测已启动", body = DataEnvelope<String>),
+        (status = 503, description = "引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口）", body = ErrorResponse),
+        (status = 500, description = "其他引擎内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn start_monitor(
     State(engine): State<Arc<dyn EngineApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -117,6 +307,17 @@ pub async fn start_monitor(
 }
 
 /// POST /api/monitor/stop — 停止网络监测
+#[utoipa::path(
+    post,
+    path = "/api/monitor/stop",
+    operation_id = "post_api_monitor_stop",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "检测已停止", body = DataEnvelope<String>),
+        (status = 503, description = "引擎命令通道不可用（队列饱和或 Engine 已退出/崩溃重启窗口）", body = ErrorResponse),
+        (status = 500, description = "其他引擎内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn stop_monitor(
     State(engine): State<Arc<dyn EngineApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -130,6 +331,20 @@ pub async fn stop_monitor(
 /// 先用既有 HTTP 探测确认“已正常联网”，命中时直接提示先退出登录；其余情况
 /// 强制 `headless=false` 启动独立临时浏览器。Worker 只返回页面分类，不返回或保存
 /// 最终 URL / 页面正文，避免门户一次性 token 进入配置、日志或前端状态。
+#[utoipa::path(
+    post,
+    path = "/api/monitor/test-redirect",
+    operation_id = "post_api_monitor_test_redirect",
+    tag = "monitor",
+    request_body = RedirectTestRequest,
+    responses(
+        (status = 200, description = "重定向检测结论（不含最终 URL，防门户临时 token 外泄）", body = DataEnvelope<RedirectTestResultData>),
+        (status = 400, description = "触发地址过长 / 格式无效 / 非 http(s) / 内嵌用户名或密码", body = ErrorResponse),
+        (status = 409, description = "Worker 忙（调试会话或浏览器任务占用）", body = ErrorResponse),
+        (status = 503, description = "出口网络准备失败、Python 环境未就绪、Worker 不可用（未安装/启动超时/网络出口受限）或浏览器检测失败", body = ErrorResponse),
+        (status = 500, description = "浏览器返回未知结果或内部错误", body = ErrorResponse),
+    )
+)]
 pub async fn test_redirect(
     State(config): State<Arc<dyn ConfigApi>>,
     State(bridge): State<Arc<dyn BridgeApi>>,
@@ -206,6 +421,16 @@ pub async fn test_redirect(
 }
 
 /// GET /api/network/interfaces：物理网卡及当前 IPv4 / DNS，供方案选择出口。
+#[utoipa::path(
+    get,
+    path = "/api/network/interfaces",
+    operation_id = "get_api_network_interfaces",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "可用于校园网出口的 IPv4 物理网卡清单", body = DataEnvelope<Vec<NetworkInterfaceData>>),
+        (status = 503, description = "网卡枚举失败或超时", body = ErrorResponse),
+    )
+)]
 pub async fn get_network_interfaces() -> Result<Json<Value>, ApiError> {
     let adapters = crate::network::adapters::list_adapters()
         .await

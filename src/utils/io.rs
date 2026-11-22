@@ -23,9 +23,17 @@ pub fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), std
 /// 父目录 fsync 确保目录项落盘（崩溃后不丢已提交数据）。
 pub fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // 临时文件后缀跟随目标扩展名（无扩展名用 .tmp）：此前恒为 .json，会给
+    // 非 JSON 目标（.instance / .plist / campus-auth.version 等）留下 .json
+    // 后缀的中间产物；全仓崩溃残留清理按 `.tmp_` 前缀判定（config::service
+    // 的 sweep_tmp_residue），无调用方依赖具体后缀
+    let suffix = path
+        .extension()
+        .map(|ext| format!(".{}", ext.to_string_lossy()))
+        .unwrap_or_else(|| ".tmp".to_owned());
     let mut tmp = tempfile::Builder::new()
         .prefix(".tmp_")
-        .suffix(".json")
+        .suffix(&suffix)
         .tempfile_in(dir)?;
     {
         use std::io::Write;
@@ -265,6 +273,7 @@ pub fn extract_tar_gz(
     mut accept: impl FnMut(&Path) -> bool,
 ) -> Result<(), std::io::Error> {
     use flate2::read::GzDecoder;
+    use std::io::Read;
 
     const MAX_TAR_ENTRIES: usize = 8_192;
     const MAX_TAR_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
@@ -331,8 +340,21 @@ pub fn extract_tar_gz(
                     std::fs::create_dir_all(parent)?;
                 }
                 let mut output = std::fs::File::create(&outpath)?;
-                std::io::copy(&mut entry, &mut output)?;
-                total_bytes = total_bytes.saturating_add(size);
+                // 实际写出量复核（照抄 zip 分支口径）：header 声明值不是实际
+                // 写出量的可靠上界——pax 扩展记录的 `size` 可覆盖 header 声明
+                // （tar crate 按 pax 值限读条目数据），小声明值过检而实际写出
+                // 超限时必须拦下并删除半成品，不给磁盘填充留路径
+                let copied = std::io::copy(
+                    &mut entry.by_ref().take(MAX_TAR_ENTRY_BYTES.saturating_add(1)),
+                    &mut output,
+                )?;
+                if copied > MAX_TAR_ENTRY_BYTES {
+                    if let Err(e) = std::fs::remove_file(&outpath) {
+                        tracing::debug!("清理超限 tar 条目文件失败: {e}");
+                    }
+                    return Err(std::io::Error::other("tar 文件条目超过大小上限"));
+                }
+                total_bytes = total_bytes.saturating_add(copied);
                 // tar header 原生携带 mode（含可执行位），恢复之
                 #[cfg(unix)]
                 {
@@ -690,6 +712,109 @@ mod tests {
         extract_tar_gz(&tar_path, &dest, |_| true).unwrap();
         assert!(!dest.parent().unwrap().join("evil.txt").exists());
         assert!(!dest.join("evil.txt").exists());
+    }
+
+    /// 声明量与实际写出量不符即拒：pax 扩展记录（typeflag 'x'）的 `size` 可
+    /// 覆盖后续条目的 header 声明（tar crate 按 pax 值限读条目数据），恶意包
+    /// 以小声明值通过上限预检、实际写出却远超上限——复核 `io::copy` 实际写出
+    /// 量，超限即删半成品返回错误（与 zip 分支同口径）。
+    /// tar::Builder 不会生成 pax size 覆盖，沿用手工构造 header 字节的写法
+    /// （同 test_extract_tar_gz_skips_traversal）。测试会真实写出 512MiB+1
+    /// 字节后被上限截断，属该安全边界回归的必然代价。
+    #[test]
+    fn test_extract_tar_gz_rejects_actual_size_exceeding_declared() {
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        // MAX_TAR_ENTRY_BYTES 为函数内常量（512MiB），此处按同值复算触发阈值
+        const MAX_ENTRY: u64 = 512 * 1024 * 1024;
+        // pax 覆盖后的实际读取量：声明 512 字节过检、实际读出 MAX+2048 字节
+        let pax_size = MAX_ENTRY + 2048;
+
+        // 最小 ustar 头构造：八进制字段为右对齐 + NUL 结尾
+        fn set_octal(buf: &mut [u8], value: u64) {
+            let s = format!("{:0width$o}\0", value, width = buf.len() - 1);
+            buf.copy_from_slice(s.as_bytes());
+        }
+        // 校验和：全 512 字节求和，chksum 字段按惯例以空格占位
+        fn finalize_cksum(hdr: &mut [u8; 512]) {
+            hdr[148..156].fill(b' ');
+            let sum: u64 = hdr.iter().map(|b| *b as u64).sum();
+            let chk = format!("{sum:06o}\0 ");
+            hdr[148..156].copy_from_slice(chk.as_bytes());
+        }
+
+        // pax 记录 "<len> size=<value>\n"：len 为含换行的整条记录长度
+        //（tar crate 校验 len == 记录行字节数 + 1，按定点迭代求出）
+        let value = pax_size.to_string();
+        let mut len = 0usize;
+        loop {
+            let total = format!("{len} size={value}").len() + 1;
+            if total == len {
+                break;
+            }
+            len = total;
+        }
+        let record = format!("{len} size={value}\n");
+
+        // pax 扩展条目：typeflag 'x'，载荷为上面的 size 记录
+        let mut pax_hdr = [0u8; 512];
+        pax_hdr[..15].copy_from_slice(b"PaxHeaders/evil");
+        set_octal(&mut pax_hdr[100..108], 0o644); // mode
+        set_octal(&mut pax_hdr[108..116], 0); // uid
+        set_octal(&mut pax_hdr[116..124], 0); // gid
+        set_octal(&mut pax_hdr[124..136], record.len() as u64); // size
+        set_octal(&mut pax_hdr[136..148], 0); // mtime
+        pax_hdr[156] = b'x'; // typeflag: pax 局部扩展头
+        pax_hdr[257..263].copy_from_slice(b"ustar\0");
+        pax_hdr[263..265].copy_from_slice(b"00");
+        finalize_cksum(&mut pax_hdr);
+
+        // 实际条目：声明 512 字节（远小于上限，过声明值预检）
+        let mut file_hdr = [0u8; 512];
+        file_hdr[..9].copy_from_slice(b"evil2.txt");
+        set_octal(&mut file_hdr[100..108], 0o644); // mode
+        set_octal(&mut file_hdr[108..116], 0); // uid
+        set_octal(&mut file_hdr[116..124], 0); // gid
+        set_octal(&mut file_hdr[124..136], 512); // size：声明量
+        set_octal(&mut file_hdr[136..148], 0); // mtime
+        file_hdr[156] = b'0'; // typeflag: regular file
+        file_hdr[257..263].copy_from_slice(b"ustar\0");
+        file_hdr[263..265].copy_from_slice(b"00");
+        finalize_cksum(&mut file_hdr);
+
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("pax-size-evil.tar.gz");
+        let mut gz = GzEncoder::new(
+            std::fs::File::create(&tar_path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        gz.write_all(&pax_hdr).unwrap();
+        gz.write_all(record.as_bytes()).unwrap();
+        // pax 载荷补齐到 512 块边界（tar 按块寻址）
+        gz.write_all(&vec![0u8; 512 - record.len()]).unwrap();
+        gz.write_all(&file_hdr).unwrap();
+        // 条目数据：pax 声明的全量零字节（gzip 高压缩比，tar.gz 落盘很小）
+        let chunk = vec![0u8; 8 * 1024 * 1024];
+        let mut remaining = pax_size;
+        while remaining > 0 {
+            let n = remaining.min(chunk.len() as u64) as usize;
+            gz.write_all(&chunk[..n]).unwrap();
+            remaining -= n as u64;
+        }
+        gz.write_all(&[0u8; 1024]).unwrap(); // 两块全零 EOF
+        gz.finish().unwrap();
+
+        let dest = dir.path().join("out");
+        let err = extract_tar_gz(&tar_path, &dest, |_| true).unwrap_err();
+        assert!(
+            err.to_string().contains("文件条目超过大小上限"),
+            "应以实际写出量复核拒绝（而非声明值预检）: {err}"
+        );
+        assert!(
+            !dest.join("evil2.txt").exists(),
+            "超限条目的半成品文件应被删除"
+        );
     }
 
     /// extract_archive 分派：.tar.gz 走 tar 解压、.zip 走 zip 解压

@@ -16,6 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import browser_detect
+import browser_lifecycle as worker_lifecycle
+import debug_commands
+import worker_paths
+
 
 # ── 超时归一化 ──
 
@@ -41,11 +46,12 @@ def test_custom_browser_health_requires_existing_file():
 
 
 def test_task_screenshot_cleanup_is_deferred(monkeypatch):
+    import debug_commands
     import playwright_worker
     from playwright_worker import WorkerCore
     from step_handlers import StepContext
 
-    monkeypatch.setattr(playwright_worker, "TASK_SCREENSHOT_RETENTION_SECS", 0)
+    monkeypatch.setattr(debug_commands, "TASK_SCREENSHOT_RETENTION_SECS", 0)
 
     async def run(path: Path):
         core = WorkerCore()
@@ -210,6 +216,7 @@ def test_force_interrupt_tears_down_debug_session(tmp_path):
 
 def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
     import playwright_worker as worker
+    import worker_paths
 
     files = [tmp_path / "old.png", tmp_path / "old.jpg", tmp_path / "old.jpeg"]
     keep = tmp_path / "note.txt"
@@ -217,8 +224,8 @@ def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
         path.write_bytes(b"x")
         # 固定早于模块加载时刻，避免文件系统时间精度导致边界不稳定。
         os.utime(path, (1, 1))
-    monkeypatch.setattr(worker, "_debug_screenshot_dir", lambda: tmp_path)
-    monkeypatch.setattr(worker, "_MODULE_LOAD_TIME", 2)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_MODULE_LOAD_TIME", 2)
 
     worker._purge_stale_debug_screenshots()
 
@@ -228,13 +235,14 @@ def test_purge_stale_debug_screenshots_covers_jpeg(monkeypatch, tmp_path):
 
 def test_purge_stale_debug_screenshots_removes_feedback_directory(monkeypatch, tmp_path):
     import playwright_worker as worker
+    import worker_paths
 
     stale = tmp_path / "feedback-old"
     stale.mkdir()
     (stale / "page.html").write_text("secret", encoding="utf-8")
     os.utime(stale, (1, 1))
-    monkeypatch.setattr(worker, "_debug_screenshot_dir", lambda: tmp_path)
-    monkeypatch.setattr(worker, "_MODULE_LOAD_TIME", 2)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_MODULE_LOAD_TIME", 2)
 
     worker._purge_stale_debug_screenshots()
 
@@ -350,56 +358,56 @@ def _patch_imports(monkeypatch, *, ddddocr_ok, numpy_ok):
 def test_preload_ocr_deps_full_load_when_ddddocr_present(monkeypatch):
     import builtins
 
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
     # force=True 直达完整加载路径（force=False 启动期先走能力探测门控，见下方门控测试）
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
     # 完整加载路径：仅 import ddddocr 一次即返回，不再额外 import numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 0
     # 任务 10：完整加载 → 能力上报 ocr=True
-    assert worker_main.OCR_CAPABILITIES == {"ocr": True}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": True}
     assert builtins.__import__ is not None
 
 
 def test_preload_ocr_deps_falls_back_to_numpy(monkeypatch):
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=True)
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
     # ddddocr 缺失（未安装/不完整）时退化为仅预加载 numpy
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
     # numpy-only 不具备 OCR 识别能力（任务 10）
-    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_silent_when_missing(monkeypatch):
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=False)
     # 两者都缺失时静默跳过，不抛异常（Worker 仍能正常启动）
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
     assert calls["ddddocr"] == 1
     assert calls["numpy"] == 1
-    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_gate_probes_only_without_force(monkeypatch):
     import importlib.util
 
-    import worker_main
+    import ocr_runtime
     calls = _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
     # 模拟 ddddocr 未安装（与真实 venv 是否装有无关）：探测层 find_spec 短路，
     # 不触发任何被拦截的 import，能力保持 False 且不产生 import WARN
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
-    worker_main._preload_ocr_deps()
+    ocr_runtime._preload_ocr_deps()
     assert calls == {"ddddocr": 0, "numpy": 0}
-    assert worker_main.OCR_CAPABILITIES == {"ocr": False}
+    assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
 
 
 def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
     import builtins
 
-    import worker_main
+    import ocr_runtime
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
@@ -409,7 +417,66 @@ def test_preload_ocr_deps_survives_dll_load_errors(monkeypatch):
 
     monkeypatch.setattr("builtins.__import__", fake_import)
     # 损坏的 OCR DLL 不得阻止 Worker 启动，否则普通手动登录也会一起失效。
-    worker_main._preload_ocr_deps(force=True)
+    ocr_runtime._preload_ocr_deps(force=True)
+
+
+# ── P2-1 影子模块修复回归 ──
+
+def test_preload_ocr_deps_single_source_no_shadow_import():
+    """playwright_worker 不得再 import worker_main（P2-1 影子模块根因钉死）。
+
+    `python worker_main.py` 启动时脚本跑在 __main__ 名下，playwright_worker 一旦
+    导入 worker_main 就会把其模块体重新执行一遍，产生第二份 OCR_CAPABILITIES
+    ——force 预热翻转写进影子字典，health check 永远上报启动探测结果。
+    修复后预加载函数下沉 ocr_runtime，两端共享同一模块。按 AST 检查真实
+    import 语句（而非源码文本），注释里提到该缺陷不会误报。
+    """
+    import ast
+    import inspect
+
+    import playwright_worker
+
+    tree = ast.parse(inspect.getsource(playwright_worker))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            offenders = [alias.name for alias in node.names if alias.name == "worker_main"]
+            assert not offenders, f"playwright_worker 出现影子导入: {offenders}"
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module != "worker_main", "playwright_worker 出现影子导入"
+
+
+def test_worker_health_check_reads_live_capability_after_force_flip(monkeypatch):
+    """force 预热翻转能力后，worker_health_check 必须立即读到新值。
+
+    影子模块缺陷的运行时症状：_run_task 入口 force=True 翻转的是影子字典，
+    health check 永远回启动探测结果。修复后 worker_core.capabilities 与
+    ocr_runtime.OCR_CAPABILITIES 是同一对象（worker_main._serve 注入同一字典），
+    翻转即上报。此前该场景无法经任何进程内测试表达——影子只存在于脚本启动形态。
+    """
+    import asyncio
+
+    import ocr_runtime
+    from playwright_worker import worker_core
+
+    # 对齐 worker_main._serve 的注入：核心与 ocr_runtime 共享同一字典对象
+    worker_core.capabilities = ocr_runtime.OCR_CAPABILITIES
+    try:
+        # 启动探测失败（依赖不可用）→ 能力 False
+        _patch_imports(monkeypatch, ddddocr_ok=False, numpy_ok=False)
+        ocr_runtime._preload_ocr_deps(force=True)
+        assert ocr_runtime.OCR_CAPABILITIES == {"ocr": False}
+
+        # 有码任务入口 force 预热成功（探测失败但依赖实际可用的边缘态）→
+        # 翻转为 True；health check 无需重启 Worker 即读到新值
+        _patch_imports(monkeypatch, ddddocr_ok=True, numpy_ok=True)
+        ocr_runtime._preload_ocr_deps(force=True)
+        assert ocr_runtime.OCR_CAPABILITIES == {"ocr": True}
+        result = asyncio.run(worker_core.handle_worker_health_check({}))
+        assert result["healthy"] is True
+        assert result["capabilities"] == {"ocr": True}
+    finally:
+        # 能力字典是模块级共享状态，复位避免污染后续用例的真实探测结果
+        ocr_runtime.OCR_CAPABILITIES["ocr"] = False
 
 
 # ── IPC 响应/事件序列化 ──
@@ -430,6 +497,50 @@ def test_emit_event_format(capsys):
     msg = json.loads(capsys.readouterr().out.strip())
     assert msg["event"] == "screenshot"
     assert msg["data"] == {"path": "a.png"}
+
+
+def test_write_line_survives_lone_surrogate(monkeypatch):
+    """C6：stdout 编码 errors="replace"——孤立代理字符降级 '?'，响应行总能写出。
+
+    strict 模式下 json.dumps(ensure_ascii=False) 保留的孤立代理（页面 JS 可产生）
+    会让 sys.stdout.write 抛 UnicodeEncodeError，该 id 的响应永不写出 →
+    Rust 超时 → Cancel → 可能强杀。replace 降级后整行仍是合法 UTF-8 + 合法 JSON，
+    在途请求得以正常结算。
+    """
+    import io
+    import sys
+
+    import worker_main
+
+    out_buf = io.BytesIO()
+    # 严格模式构造：未修复前对孤立代理写出必抛 UnicodeEncodeError
+    out_wrapper = io.TextIOWrapper(out_buf, encoding="utf-8", errors="strict")
+
+    def _fake_stream():
+        return io.TextIOWrapper(io.BytesIO(b""), encoding="utf-8", errors="strict")
+
+    monkeypatch.setattr(sys, "stdin", _fake_stream())
+    monkeypatch.setattr(sys, "stdout", out_wrapper)
+    monkeypatch.setattr(sys, "stderr", _fake_stream())
+
+    # 修复点：_force_utf8_stdio 应把 stdout 从 strict 重配为 replace
+    worker_main._force_utf8_stdio()
+
+    worker_main.emit_response(
+        1, {"success": True, "data": {"message": "\ud800bad"}, "error": None}
+    )
+    line = out_buf.getvalue().decode("utf-8")  # 不抛：整行必为合法 UTF-8
+    msg = json.loads(line)  # 不抛：整行必为合法 JSON
+    assert msg["id"] == 1
+    assert msg["result"]["data"]["message"] == "?bad", "孤立代理应降级为 '?'"
+
+    # 边界回归：不含 surrogate 的正常中文经此路径逐字节不变
+    worker_main.emit_response(
+        2, {"success": True, "data": {"message": "账号或密码错误"}, "error": None}
+    )
+    lines = out_buf.getvalue().decode("utf-8").strip().splitlines()
+    msg2 = json.loads(lines[1])
+    assert msg2["result"]["data"]["message"] == "账号或密码错误"
 
 
 def test_oversized_request_id_only_reads_bounded_prefix():
@@ -621,8 +732,95 @@ def test_dispatch_guarded_timeout_emits_unknown_error(monkeypatch, capsys):
     asyncio.run(_run())
 
 
+def test_timeout_self_heal_skips_interrupt_for_non_browser_commands(monkeypatch, capsys):
+    """C5：非浏览器类命令超时只取消任务，不触发 force_interrupt_pending 关页。
+
+    以 OCR 类挂起命令为例：关 self._page 会误伤 keep_alive preserve_state
+    保留的门户心跳页，白名单外的命令超时应跳过强制中断，错误响应照常发出。
+    """
+
+    async def _run():
+        import worker_main
+        from playwright_worker import worker_core
+
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
+        interrupt_calls = []
+
+        async def _spy():
+            interrupt_calls.append(1)
+
+        monkeypatch.setattr(worker_core, "force_interrupt_pending", _spy)
+
+        async def hang_handler(params):
+            await asyncio.sleep(3600)  # 永久挂起
+            return {}
+
+        worker_main.COMMANDS["test_hang_ocr"] = hang_handler
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 11, "method": "test_hang_ocr", "params": {}}
+            )
+            lines = capsys.readouterr().out.strip().splitlines()
+            assert len(lines) == 1
+            msg = json.loads(lines[0])
+            assert msg["id"] == 11
+            assert msg["result"]["success"] is False
+            assert msg["result"]["data"]["outcome"] == "unknown_error"
+        finally:
+            del worker_main.COMMANDS["test_hang_ocr"]
+
+        assert interrupt_calls == []  # 白名单外：spy 未被调用
+
+    asyncio.run(_run())
+
+
+def test_timeout_self_heal_interrupts_browser_commands(monkeypatch, capsys):
+    """C5：浏览器类命令（白名单内）超时仍触发一次 force_interrupt_pending。
+
+    handler 挂起时关页打断挂起的 CDP await；响应仍为 unknown_error。
+    """
+
+    async def _run():
+        import worker_main
+        from playwright_worker import worker_core
+
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
+        interrupt_calls = []
+
+        async def _spy():
+            interrupt_calls.append(1)
+
+        monkeypatch.setattr(worker_core, "force_interrupt_pending", _spy)
+
+        async def hang_handler(params):
+            await asyncio.sleep(3600)  # 永久挂起
+            return {}
+
+        worker_main.COMMANDS["execute_browser_task"] = hang_handler
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 12, "method": "execute_browser_task", "params": {}}
+            )
+            lines = capsys.readouterr().out.strip().splitlines()
+            assert len(lines) == 1
+            msg = json.loads(lines[0])
+            assert msg["id"] == 12
+            assert msg["result"]["success"] is False
+            assert msg["result"]["data"]["outcome"] == "unknown_error"
+        finally:
+            del worker_main.COMMANDS["execute_browser_task"]
+
+        assert interrupt_calls == [1]  # 白名单内：spy 恰被调用一次
+
+    asyncio.run(_run())
+
+
 def test_handle_evaluate_hung_script_times_out():
-    """handle_evaluate 挂起脚本被单独超时中断。"""
+    """handle_evaluate 挂起脚本被单独超时中断。
+
+    P2-2 同步：超时归类由 unknown_error 改为 assertion_failed（可重试，
+    与外层步骤 deadline 及 assert_text 口径一致），消息仍是"超时"。
+    """
 
     async def _run():
         from models import StepConfig
@@ -639,7 +837,7 @@ def test_handle_evaluate_hung_script_times_out():
         step = StepConfig(id="1", step_type="evaluate", code="while(true){}")
         with pytest.raises(WorkerError) as ei:
             await handle_evaluate(page, step, StepContext(page=page, default_timeout=100))
-        assert ei.value.outcome == "unknown_error"
+        assert ei.value.outcome == "assertion_failed"
         assert "超时" in ei.value.message
 
     asyncio.run(_run())
@@ -683,6 +881,60 @@ def test_new_page_registers_dialog_accept():
         await asyncio.sleep(0.05)
         assert accepted == [True], "dialog 处理器应调用 accept"
         # 弹窗文案被收集进当前任务列表（随 StructuredResult 上报给 Rust 登录日志）
+        assert core._task_dialogs == ["账号或密码错误！"]
+
+    asyncio.run(_run())
+
+
+def test_task_dialog_message_truncated():
+    """C3：超长弹窗文案在源头截断到 500 字符（emit 负载与 _task_dialogs 同时受益）。
+
+    门户 alert 可能携带超长 HTML：整段进入 IPC 会撑爆 Rust 侧 1MiB NDJSON
+    行上限，整行被丢弃并以错误结算，登录成功被误记为失败。
+    """
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        emitted = []
+        core.emit = lambda event_type, data: emitted.append((event_type, data))
+
+        class FakeDialog:
+            message = "A" * 10000
+
+            async def accept(self):
+                pass
+
+        await core._handle_page_dialog(FakeDialog())
+
+        assert len(emitted) == 1, "应 emit 一次 dialog 事件"
+        event_type, payload = emitted[0]
+        assert event_type == "dialog"
+        assert len(payload["message"]) <= 500, "emit 负载 message 应被截断"
+        assert payload["action"] == "accept"
+        assert len(core._task_dialogs) == 1, "截断后仍应收集进任务弹窗列表"
+        assert len(core._task_dialogs[0]) <= 500, "_task_dialogs 单条应被截断"
+
+    asyncio.run(_run())
+
+
+def test_task_dialog_normal_message_unchanged():
+    """C3 回归：正常短弹窗文案（如「登录成功！」）截断逻辑不影响内容。"""
+
+    async def _run():
+        from playwright_worker import WorkerCore
+
+        core = WorkerCore()
+        core.emit = lambda event_type, data: None
+
+        class FakeDialog:
+            message = "账号或密码错误！"
+
+            async def accept(self):
+                pass
+
+        await core._handle_page_dialog(FakeDialog())
         assert core._task_dialogs == ["账号或密码错误！"]
 
     asyncio.run(_run())
@@ -762,15 +1014,15 @@ def test_handle_close_browser_keep_alive_session_release():
         async def _fail_close(self):
             raise AssertionError("keep_alive 会话级档不应全量 close_browser")
 
-        orig_env = pw._WORKER_KEEP_ALIVE
+        orig_env = worker_lifecycle._WORKER_KEEP_ALIVE
         orig_session, orig_close = WorkerCore._close_session, WorkerCore.close_browser
-        pw._WORKER_KEEP_ALIVE = True
+        worker_lifecycle._WORKER_KEEP_ALIVE = True
         WorkerCore._close_session = fake_session
         WorkerCore.close_browser = _fail_close
         try:
             result = await core.handle_close_browser({})
         finally:
-            pw._WORKER_KEEP_ALIVE = orig_env
+            worker_lifecycle._WORKER_KEEP_ALIVE = orig_env
             WorkerCore._close_session = orig_session
             WorkerCore.close_browser = orig_close
         assert result == {}
@@ -936,12 +1188,14 @@ def test_browser_idle_release_fires_and_cancels():
         async def fake_close(self):
             closed.append(True)
 
-        orig_close = WorkerCore.close_browser
-        orig_secs = pw.BROWSER_IDLE_RELEASE_SECS
-        orig_env = pw._WORKER_KEEP_ALIVE
-        WorkerCore.close_browser = fake_close
-        pw.BROWSER_IDLE_RELEASE_SECS = 0.05
-        pw._WORKER_KEEP_ALIVE = False
+        # 空闲回收在生命周期锁内直接走锁内关闭（close_browser 公开入口会二次
+        # 加锁），故探针挂在 _close_browser_locked 上
+        orig_close = WorkerCore._close_browser_locked
+        orig_secs = worker_lifecycle.BROWSER_IDLE_RELEASE_SECS
+        orig_env = worker_lifecycle._WORKER_KEEP_ALIVE
+        WorkerCore._close_browser_locked = fake_close
+        worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = 0.05
+        worker_lifecycle._WORKER_KEEP_ALIVE = False
         try:
             # 到期触发
             core._arm_browser_idle_release()
@@ -956,13 +1210,13 @@ def test_browser_idle_release_fires_and_cancels():
             await asyncio.sleep(0.1)
             assert closed == [True], "取消后不应触发"
             # keep_alive 时武装为 no-op
-            pw._WORKER_KEEP_ALIVE = True
+            worker_lifecycle._WORKER_KEEP_ALIVE = True
             core._arm_browser_idle_release()
             assert core._browser_idle_task is None, "keep_alive 时不装空闲回收"
         finally:
-            WorkerCore.close_browser = orig_close
-            pw.BROWSER_IDLE_RELEASE_SECS = orig_secs
-            pw._WORKER_KEEP_ALIVE = orig_env
+            WorkerCore._close_browser_locked = orig_close
+            worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = orig_secs
+            worker_lifecycle._WORKER_KEEP_ALIVE = orig_env
 
     asyncio.run(_run())
 
@@ -1006,9 +1260,11 @@ def _chromium_registry(tmp: Path, revision: str = "1234") -> Path:
 
 def _bind_probe_paths(monkeypatch, pw, cache_dir: Path, registry: Path | None) -> None:
     """把缓存目录与 registry 指到临时位置，并清空必需目录名缓存"""
-    monkeypatch.setattr(pw, "_browser_cache_dir", lambda: cache_dir)
-    monkeypatch.setattr(pw, "_registry_path", lambda: registry)
-    monkeypatch.setattr(pw, "_REQUIRED_DIRS_CACHE", {})
+    # 探测逻辑归属 browser_detect 伴生模块（playwright_worker 已门面化），
+    # monkeypatch 统一打在属主模块上
+    monkeypatch.setattr(browser_detect, "_browser_cache_dir", lambda: cache_dir)
+    monkeypatch.setattr(browser_detect, "_registry_path", lambda: registry)
+    monkeypatch.setattr(browser_detect, "_REQUIRED_DIRS_CACHE", {})
 
 
 def _write_browser_dir(cache_dir: Path, name: str, *, complete: bool) -> None:
@@ -1107,8 +1363,8 @@ def test_managed_probe_honours_browsers_path_override(monkeypatch):
         _write_browser_dir(cache, "chromium-1234", complete=True)
         _write_browser_dir(cache, "chromium_headless_shell-1234", complete=True)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(cache))
-        monkeypatch.setattr(pw, "_registry_path", lambda: _chromium_registry(tmp_path))
-        monkeypatch.setattr(pw, "_REQUIRED_DIRS_CACHE", {})
+        monkeypatch.setattr(browser_detect, "_registry_path", lambda: _chromium_registry(tmp_path))
+        monkeypatch.setattr(browser_detect, "_REQUIRED_DIRS_CACHE", {})
 
         assert pw._browser_cache_dir() == cache
         assert pw._ensure_browser("chromium") is True
@@ -1392,5 +1648,322 @@ def test_serve_drains_queue_after_eof(monkeypatch, capsys):
 
     asyncio.run(_run())
     lines = capsys.readouterr().out.strip().splitlines()
-    ids = [json.loads(line)["id"] for line in lines]
+    # BRG-1b 起响应行前会有 command_started 事件行（无顶层 id），只统计响应行
+    msgs = [json.loads(line) for line in lines]
+    ids = [m["id"] for m in msgs if "id" in m]
     assert 1 in ids and 2 in ids, f"EOF 前的命令应全部执行: {ids}"
+
+
+# ── BRG-1b: 每命令恰好一次 command_started 起算点通知 ──
+
+def test_serve_emits_command_started_once_per_command(monkeypatch, capsys):
+    """主循环出队即将执行时对每条命令恰好发一次 command_started 事件，
+    顺序先于该命令的响应行；非 int id 的命令不发出（BRG-1b 协议契约）。"""
+    started_events: list[dict] = []
+
+    async def _run():
+        import io
+        import sys
+
+        import worker_main
+
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                '{"id": 1, "method": "worker_health_check"}\n'
+                '{"id": 2, "method": "worker_health_check"}\n'
+                # 非 int id（协议防御）：不应发出 command_started
+                '{"id": "not-int", "method": "worker_health_check"}\n'
+            ),
+        )
+
+        real_emit_event = worker_main.emit_event
+
+        def spy_emit_event(event_type, data):
+            if event_type == "command_started":
+                started_events.append(data)
+            real_emit_event(event_type, data)
+
+        monkeypatch.setattr(worker_main, "emit_event", spy_emit_event)
+
+        async def noop_close():
+            return None
+
+        monkeypatch.setattr(worker_main.worker_core, "close_browser", noop_close)
+        try:
+            await asyncio.wait_for(worker_main._serve(), timeout=10)
+        finally:
+            worker_main.shutdown_event.clear()
+
+    asyncio.run(_run())
+    # 每条带数字 id 的命令各一次、按队列顺序；非 int id 不发
+    assert started_events == [{"id": 1}, {"id": 2}], (
+        f"应按序对每条 int id 命令恰好各发一次 command_started: {started_events}"
+    )
+    # stdout 行序：每条命令的 command_started 事件行先于其响应行
+    msgs = [
+        json.loads(line)
+        for line in capsys.readouterr().out.strip().splitlines()
+        if line.strip()
+    ]
+    started_positions = {
+        m["data"]["id"]: i
+        for i, m in enumerate(msgs)
+        if m.get("event") == "command_started"
+    }
+    responses = [(i, m) for i, m in enumerate(msgs) if "result" in m]
+    assert len(responses) == 3, f"三条命令应各有一次响应: {responses}"
+    for i, m in responses:
+        mid = m["id"]
+        if isinstance(mid, int):
+            assert mid in started_positions, f"命令 {mid} 缺少 command_started 事件"
+            assert started_positions[mid] < i, (
+                f"命令 {mid} 的 command_started 应先于其响应行"
+            )
+        else:
+            assert mid not in started_positions, (
+                f"非 int id {mid!r} 不应发出 command_started"
+            )
+
+def test_evaluate_outer_deadline_maps_to_assertion_failed(monkeypatch):
+    """P2-2：run_step_async 外层 deadline 的 evaluate 系超时归 assertion_failed。
+
+    handler 尚未执行（如 frame 解析挂死）时由统一 deadline 兜底，归类必须与
+    assert_text 一致（可重试），不能以 unknown_error 终态终结登录。
+    """
+
+    async def _run():
+        import step_handlers
+        from models import StepConfig
+        from step_handlers import StepContext, WorkerError, run_step_async
+
+        async def hang_resolve_frame_scope(*_args, **_kwargs):
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(step_handlers, "_resolve_frame_scope", hang_resolve_frame_scope)
+        step = StepConfig.from_dict(
+            {"id": "e", "type": "evaluate", "code": "1+1", "frame": "main"}
+        )
+        context = StepContext(page=object(), default_timeout=80)
+        with pytest.raises(WorkerError) as ei:
+            await run_step_async(object(), step, context)
+        assert ei.value.outcome == "assertion_failed"
+        assert "超时" in ei.value.message
+
+    asyncio.run(_run())
+
+
+def test_idle_release_close_serializes_with_command_ensure(monkeypatch):
+    """P2 缺口③（P2-3 配套）：空闲回收关闭进行中命令到达，生命周期锁保证串行。
+
+    回收关闭卡在不可中断的关闭调用里（"cancel 已启动 task 无效"的最坏情形）；
+    持锁的 ensure_browser 必须等关闭完全退出后再判定状态，就绪的浏览器不会被
+    并发关闭撕成"命令已确认、状态已被清空"的裂缝。
+    变异验证：去掉 ensure_browser/_browser_idle_release 的生命周期锁本测试变红。
+    """
+
+    async def _run():
+        import playwright_worker as pw
+        from playwright_worker import WorkerCore
+
+        class AliveBrowser:
+            def is_connected(self):
+                return True
+
+        class AliveContext:
+            async def cookies(self):
+                return []
+
+        core = WorkerCore()
+        core._browser = AliveBrowser()
+        core._context = AliveContext()
+        core._last_browser_settings = {"pure_mode": True}
+
+        timeline: list[str] = []
+        close_entered = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def slow_close_locked(self):
+            timeline.append("close-enter")
+            close_entered.set()
+            try:
+                await release_close.wait()
+            except asyncio.CancelledError:
+                # 现实中 close 可能卡在不可中断的 CDP/native 关闭里，取消无法
+                # 提前终止它，只能等其自然返回
+                timeline.append("close-cancel-ignored")
+            core._browser = None
+            core._context = None
+            timeline.append("close-exit")
+
+        async def fake_start(self, config):
+            core._browser = AliveBrowser()
+            core._context = AliveContext()
+            timeline.append("rebuild")
+
+        orig_close = WorkerCore._close_browser_locked
+        orig_start = WorkerCore._start_browser
+        orig_secs = worker_lifecycle.BROWSER_IDLE_RELEASE_SECS
+        orig_env = worker_lifecycle._WORKER_KEEP_ALIVE
+        WorkerCore._close_browser_locked = slow_close_locked
+        WorkerCore._start_browser = fake_start
+        worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = 0.02
+        worker_lifecycle._WORKER_KEEP_ALIVE = False
+        try:
+            core._arm_browser_idle_release()
+            await close_entered.wait()
+            # 回收关闭进行中，命令到达
+            ensure_task = asyncio.ensure_future(
+                core.ensure_browser({"browser_settings": {"pure_mode": True}})
+            )
+            for _ in range(3):
+                await asyncio.sleep(0)  # 让 ensure_browser 走到锁等待点
+            release_close.set()
+            await ensure_task
+            assert core._browser is not None, "ensure 返回后浏览器必须就绪（不被回收关闭撕开）"
+            assert core._context is not None
+            assert "rebuild" in timeline, f"锁内应观察到已清空状态并重建: {timeline}"
+            assert timeline.index("close-exit") < timeline.index("rebuild")
+        finally:
+            WorkerCore._close_browser_locked = orig_close
+            WorkerCore._start_browser = orig_start
+            worker_lifecycle.BROWSER_IDLE_RELEASE_SECS = orig_secs
+            worker_lifecycle._WORKER_KEEP_ALIVE = orig_env
+            core._cancel_browser_idle_release()
+
+    asyncio.run(_run())
+
+
+def test_test_redirect_goto_responds_to_cancel(monkeypatch):
+    """P2-4：test_redirect 首导航挂死时取消即时生效（不再被动等满 15s 上限）。"""
+
+    async def _run():
+        import playwright_worker as pw
+        from playwright_worker import WorkerCore, cancel_registry
+        from step_handlers import StepCancelled
+
+        core = WorkerCore()
+        goto_started = asyncio.Event()
+        goto_cancelled = []
+
+        class FakePage:
+            async def goto(self, url, wait_until=None, timeout=None):
+                goto_started.set()
+                try:
+                    await asyncio.sleep(3600)  # 挂死的导航（CDP await 不返回）
+                except asyncio.CancelledError:
+                    goto_cancelled.append(True)
+                    raise
+
+        class FakeContext:
+            def on(self, *_args):
+                pass
+
+            async def new_page(self):
+                return FakePage()
+
+            async def close(self):
+                pass
+
+        class FakeBrowser:
+            async def new_context(self, **_kwargs):
+                return FakeContext()
+
+            async def close(self):
+                pass
+
+        async def fake_launch_browser(*_args, **_kwargs):
+            return FakeBrowser()
+
+        monkeypatch.setattr(core, "_launch_browser", fake_launch_browser)
+        core._playwright = object()  # 跳过 async_playwright().start()
+
+        task = asyncio.ensure_future(
+            core.handle_test_redirect(
+                {"trigger_url": "http://portal.example/", "cancel_id": "redirect-cancel-p24"}
+            )
+        )
+        try:
+            await asyncio.wait_for(goto_started.wait(), timeout=2)
+            cancel_registry.trigger("redirect-cancel-p24")
+            with pytest.raises(StepCancelled):
+                await asyncio.wait_for(task, timeout=2)
+            assert goto_cancelled == [True], "挂死的 goto 任务应被取消"
+        finally:
+            cancel_registry.unregister("redirect-cancel-p24")
+            if not task.done():
+                task.cancel()
+
+    asyncio.run(_run())
+
+
+def test_cancel_registry_pending_cap_evicts_oldest():
+    """P2-7：pending 上限触顶逐项淘汰最旧，不再 clear() 全清连坐。"""
+    from playwright_worker import CancelRegistry
+
+    reg = CancelRegistry()
+    cap = reg._MAX_PENDING
+    for i in range(cap):
+        reg.trigger(f"old_{i}")
+    reg.trigger("newest")  # 触顶：淘汰最旧的 old_0，而不是清空全部
+    assert len(reg._pending) == cap
+    ev_old = reg.register("old_0")
+    assert ev_old.is_set() is False, "被淘汰的最旧 pending 不再预置取消"
+    ev_new = reg.register("newest")
+    assert ev_new.is_set() is True, "新近 pending 必须存活（clear() 旧口径会连坐清掉）"
+
+
+def test_dispatch_guarded_timeout_full_chain_interrupt_and_convergence(monkeypatch, capsys):
+    """超时→取消→force_interrupt_pending→收敛全链路（P2 缺口②）。
+
+    命令级超时后取消任务并触发一次强制中断（真实语义：关页使挂起的 CDP
+    await 退出）；handler 迟到返回的结果被 emit_once 抑制，不产生第二行响应。
+    """
+
+    async def _run():
+        import worker_main
+        from playwright_worker import worker_core
+
+        monkeypatch.setattr(worker_main, "_command_timeout", lambda params: 0.1)
+        interrupt_calls = []
+        page_closed = asyncio.Event()
+
+        async def fake_force_interrupt_pending():
+            # 真实实现关闭 self._page，使挂起的 Playwright await 以
+            # "目标已关闭"异常结束；此处以事件放行等价模拟
+            interrupt_calls.append(True)
+            page_closed.set()
+
+        monkeypatch.setattr(
+            worker_core, "force_interrupt_pending", fake_force_interrupt_pending
+        )
+
+        converged = []
+
+        async def stubborn_handler(params):
+            try:
+                await page_closed.wait()  # 模拟挂在 CDP await 上的步骤
+            except asyncio.CancelledError:
+                converged.append("cancelled")
+                # 现实中的 handler 可能吞掉取消并在打断后迟到返回结果
+                return {"late": True}
+
+        worker_main.COMMANDS["execute_browser_task"] = stubborn_handler
+        try:
+            await worker_main._dispatch_guarded(
+                {"id": 31, "method": "execute_browser_task", "params": {}}
+            )
+        finally:
+            del worker_main.COMMANDS["execute_browser_task"]
+
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert len(lines) == 1, f"应仅有一封响应（迟到结果被抑制）: {lines}"
+        msg = json.loads(lines[0])
+        assert msg["id"] == 31
+        assert msg["result"]["success"] is False
+        assert msg["result"]["data"]["outcome"] == "unknown_error"
+        assert interrupt_calls == [True], "白名单内命令超时应触发恰好一次强制中断"
+        assert converged == ["cancelled"], "被取消的 handler 应真正收敛退出"
+
+    asyncio.run(_run())

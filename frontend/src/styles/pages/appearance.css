@@ -1,5 +1,7 @@
-/* 外观页：常用偏好优先，分区在宽屏并排，在小屏顺序阅读。 */
-.appearance-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+/* 外观页：常用偏好优先，分区在宽屏并排，在小屏顺序阅读。
+   本页已作为外观分区整体内嵌进设置页（panels.ts），根容器不是 .page-content、
+   不消费外壳契约——栅格排布（窄屏单列 / ≥1100px 双列）是本分区自有的布局形态。 */
+.appearance-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-md); align-items: start; }
 .appearance-intro { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 4px 0; }
 .appearance-intro h2 { font-size: var(--text-xl); font-weight: 650; letter-spacing: -.02em; }
 .appearance-intro p { margin-top: 5px; color: var(--text-muted); font-size: var(--text-md); }
@@ -8,18 +10,17 @@
 .appearance-card-icon { width: 19px; height: 19px; color: var(--accent-text); flex-shrink: 0; }
 .appearance-card-header h3 { font-size: var(--text-lg); font-weight: 600; margin: 0; color: var(--text-primary); flex: 1; }
 .appearance-reset-btn { background: transparent; border: none; color: var(--text-secondary); font-size: var(--text-sm); padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap; }
-.appearance-reset-btn:hover:not(:disabled) { color: var(--accent-text); background: rgba(var(--accent-rgb), .08); }
 .appearance-reset-btn:disabled { opacity: .4; cursor: default; }
+.appearance-reset-btn:hover:not(:disabled) { color: var(--accent-text); background: rgba(var(--accent-rgb), .08); }
 .appearance-card-body { padding: 20px; }
 .appearance-controls { display: flex; flex-direction: column; gap: 18px; }
 .appearance-field { display: flex; flex-direction: column; gap: 9px; min-width: 0; position: relative; }
-.appearance-field .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); border: 0; }
 .appearance-field-label { font-size: var(--text-md); color: var(--text-secondary); font-weight: 600; }
 .appearance-segmented button { flex: 1; }
 .appearance-colors { display: grid; grid-template-columns: repeat(7, minmax(0, 32px)); align-items: center; gap: 6px; width: 100%; max-width: 260px; }
-.appearance-colors > .appearance-color-btn { width: 100%; height: auto; aspect-ratio: 1; }
 .appearance-extra-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
 .appearance-color-btn { width: 32px; height: 32px; border-radius: 50%; border: 1px solid rgba(var(--slate-rgb), .25); display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer; position: relative; transition: box-shadow var(--dur-base), transform var(--dur-base); }
+.appearance-colors > .appearance-color-btn { width: 100%; height: auto; aspect-ratio: 1; }
 .appearance-color-btn:hover { transform: scale(1.08); }
 .appearance-color-btn.active { outline: 2px solid var(--text-primary); outline-offset: 3px; }
 .appearance-color-btn.custom::after { content: ''; position: absolute; bottom: -1px; right: -1px; width: 7px; height: 7px; border-radius: 50%; background: var(--text-primary); border: 1px solid var(--bg-card); }
@@ -47,7 +48,7 @@
 .appearance-slider-item input[type="range"] { appearance: none; -webkit-appearance: none; height: 28px; width: 100%; min-width: 0; border: none; padding: 0; cursor: pointer; background: transparent; }
 .appearance-slider-item input[type="range"]::-webkit-slider-runnable-track { height: 5px; background: var(--border-hover); border-radius: 10px; }
 .appearance-slider-item input[type="range"]::-moz-range-track { height: 5px; background: var(--border-hover); border-radius: 10px; }
-.appearance-slider-item input[type="range"]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; height: 18px; width: 18px; border: 2px solid var(--bg-card); border-radius: 50%; background: var(--accent-text); margin-top: -6.5px; box-shadow: 0 1px 3px #0002; }
+.appearance-slider-item input[type="range"]::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; height: 18px; width: 18px; border: 2px solid var(--bg-card); border-radius: 50%; background: var(--accent-text); margin-top: -6.5px; box-shadow: 0 1px 3px var(--overlay-soft); }
 .appearance-slider-item input[type="range"]::-moz-range-thumb { height: 16px; width: 16px; border: 2px solid var(--bg-card); border-radius: 50%; background: var(--accent-text); }
 .appearance-slider-item.disabled { opacity: .5; }
 .appearance-slider-item input:disabled { cursor: not-allowed; }
@@ -57,12 +58,14 @@
 .appearance-bg-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .appearance-bg-thumb.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 1px dashed var(--border-hover); color: var(--text-muted); font-size: var(--text-sm); }
 .appearance-bg-thumb-icon { width: 26px; height: 26px; }
-.appearance-bg-thumb-zoom { position: absolute; bottom: 5px; right: 5px; width: 26px; height: 26px; border-radius: 50%; background: #0009; color: #fff; display: flex; justify-content: center; align-items: center; }
+.appearance-bg-thumb-zoom { position: absolute; bottom: 5px; right: 5px; width: 26px; height: 26px; border-radius: 50%; background: var(--overlay); color: var(--text-on-accent); display: flex; justify-content: center; align-items: center; }
 .appearance-bg-thumb-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .appearance-reading-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-items: center; }
 .appearance-reading .segmented button { flex: 1; }
 .bg-preview-body img { max-width: 100%; max-height: 64vh; width: 100%; object-fit: contain; display: block; border-radius: var(--radius-md); }
-body.has-custom-bg::before { content: ''; position: fixed; inset: -30px; background-image: var(--bg-image); background-size: cover; background-position: center; filter: var(--bg-blur); opacity: var(--bg-opacity, .3); z-index: -1; pointer-events: none; }
+/* 壁纸挂在 html[data-custom-bg]（theme-init.js 首帧前可预置，body class 做不到），
+   变量 --bg-image/--bg-blur/--bg-opacity 由 theme-init 与 applyAppearance 挂在 html 上 */
+html[data-custom-bg] body::before { content: ''; position: fixed; inset: -30px; background-image: var(--bg-image); background-size: cover; background-position: center; filter: var(--bg-blur); opacity: var(--bg-opacity, .3); z-index: -1; pointer-events: none; }
 .random-wallpaper-hint { font-size: var(--text-md); color: var(--text-secondary); margin-bottom: 16px; }
 @media (min-width: 1100px) {
   .appearance-page { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; }

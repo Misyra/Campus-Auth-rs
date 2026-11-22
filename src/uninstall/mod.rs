@@ -30,24 +30,35 @@ use std::path::{Path, PathBuf};
 
 /// 用户数据目录名（`base_path` 下）：勾选「保留配置与任务」时这些整棵保留
 ///
-/// 名字**取自** `utils::paths` 的目录常量而不是另写一份字面量：这五个名字是"保留数据"
+/// 名字**取自** `utils::paths` 的目录常量而不是另写一份字面量：这些名字是"保留数据"
 /// 与"删除其余一切"之间的分界线，两边各写一份时改一处漏一处，后果是用户勾了保留却丢掉
 /// 那一项（`remove_children_except` 把不认识的子项照删）。`test_data_dir_names_match_paths`
 /// 把这条关系钉住。
-pub const DATA_DIR_NAMES: [&str; 5] = [
+///
+/// 清单按目录粒度渲染，目录内部不单列条目：`config/` 内含 `.trash/` 回滚区
+/// （已删方案的 ENC: 密文文件，见 `config::service::cleanup_expired_trash_entries`
+/// 的 30 天轮转），purge 时随 `config/` 整目录删除、保留时随 `config/` 一并留下。
+///
+/// `browser_profiles/` 与 `config/` 同进退：里面是门户「记住密码」的持久会话数据
+/// （cookie/localStorage），正是用户勾选「保留配置与任务」时明确要求留下的东西。
+pub const DATA_DIR_NAMES: [&str; 7] = [
     crate::utils::paths::CONFIG_DIR,
     crate::utils::paths::TASKS_DIR,
     crate::utils::paths::LOGS_DIR,
+    crate::utils::paths::EVENTS_DIR,
     crate::utils::paths::ENV_DIR,
+    crate::utils::paths::BROWSER_PROFILES_DIR,
     crate::utils::paths::UPDATE_DIR,
 ];
 
 /// 用户数据目录的中文名（界面展示用，与 [`DATA_DIR_NAMES`] 同序）
-pub const DATA_DIR_LABELS: [(&str, &str); 5] = [
+pub const DATA_DIR_LABELS: [(&str, &str); 7] = [
     ("config", "配置与方案"),
     ("tasks", "任务与脚本"),
     ("logs", "日志"),
+    ("events", "事件流"),
     ("environment", "Python 环境"),
+    ("browser_profiles", "持久浏览器会话"),
     ("update", "更新缓存"),
 ];
 
@@ -206,7 +217,8 @@ pub struct UninstallPlan {
     pub install_dir: PathBuf,
     /// 数据根目录（数据目录的父目录）
     pub base_path: PathBuf,
-    /// 是否保留用户数据（`config/` `tasks/` `logs/` `environment/` `update/`）
+    /// 是否保留用户数据（`config/` `tasks/` `logs/` `events/` `environment/`
+    /// `browser_profiles/` `update/`）
     pub keep_user_data: bool,
     /// `install_dir` 与 `base_path` 是否同一目录（便携版常态）
     pub same_dir: bool,
@@ -586,7 +598,7 @@ mod tests {
         dir
     }
 
-    /// 五个数据目录名必须与 `utils::paths` 的常量逐字对应。
+    /// 七个数据目录名必须与 `utils::paths` 的常量逐字对应。
     ///
     /// 失败模式是不可逆的：`DATA_DIR_NAMES` 少一项（或 `paths` 里改了名）时，那个目录会被
     /// 当成"不认识的子项"照删——用户勾了「保留配置与任务」，丢的却是其中一项。
@@ -599,7 +611,9 @@ mod tests {
                 paths::CONFIG_DIR,
                 paths::TASKS_DIR,
                 paths::LOGS_DIR,
+                paths::EVENTS_DIR,
                 paths::ENV_DIR,
+                paths::BROWSER_PROFILES_DIR,
                 paths::UPDATE_DIR
             ]
         );

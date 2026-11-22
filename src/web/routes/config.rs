@@ -8,19 +8,71 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::config::{ConfigApi, ProfileApi, ProfileMergeFn, SettingsMergeFn};
 use crate::tasks::TaskApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::routes::profiles::validate_login_task_binding;
+
+// ---- 契约 DTO（T5-1a config 域）----
+//
+// 命名与引用规范见 `crate::web::openapi::schemas`：成功响应一律
+// `body = DataEnvelope<XxxData>`，非 2xx 一律 `body = ErrorResponse`。
+// GET/PATCH /api/config 的扁平设置大对象暂以 `body = Value` 标注（形状由
+// 前端 `frontend/src/api/types.ts` 护航，且含 monitor 前后端字段名映射），
+// 待强类型化批次收敛为具名 DTO。
+
+/// GET /api/config/log-levels 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LogLevelData {
+    /// 当前落盘的日志级别（TRACE/DEBUG/INFO/WARN/ERROR）
+    pub level: String,
+}
+
+/// GET /api/config/default-stealth-script 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DefaultStealthScriptData {
+    /// 默认反检测脚本全文（JavaScript，任务页「恢复默认」的数据源）
+    pub script: String,
+}
+
+/// GET /api/pure-mode 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PureModeData {
+    /// 纯净模式是否启用（config.browser.pure_mode）
+    pub enabled: bool,
+}
+
+/// POST /api/pure-mode 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PureModeToggleData {
+    /// 切换后的终值（并发 toggle 下以落盘结果为准）
+    pub enabled: bool,
+    /// 面向用户的提示消息
+    pub message: String,
+}
 
 /// GET /api/config — 获取当前全局设置
 ///
 /// 返回扁平结构，前端期望的格式：
 /// { browser, monitor, pause, logging, retry, app_settings, credentials, active_task }
 /// monitor 字段做后端→前端字段名映射
+///
+/// 契约注解：扁平设置大对象暂以 `body = Value` 标注（待强类型化批次收敛）；
+/// password 不回传，仅 `has_password` 布尔位。
+#[utoipa::path(
+    get,
+    path = "/api/config",
+    operation_id = "get_api_config",
+    tag = "config",
+    responses(
+        (status = 200, description = "全局设置 + 活跃方案凭据的扁平结构；password 不回传，仅 has_password 布尔位", body = Value),
+    )
+)]
 pub async fn get_settings(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -50,12 +102,116 @@ pub async fn get_settings(
 /// 后端 SettingsData 结构为 { global: { browser, monitor, ... }, active_profile_id, ... }
 /// 扁平 key → global 子结构 / 活跃 Profile 的映射由
 /// [`apply_flat_settings_patch`] 统一实现（与 PUT 共用）
+///
+/// 过渡期说明：单段更新推荐改用 [`patch_settings_section`]（PATCH /api/config/{section}），
+/// 语义与把该段包成单键全量 PATCH 完全一致；本端点在过渡期原样保留，现有客户端
+/// （引导向导 / 运行模式预设 / 登录渠道绑定切换）不受影响。
+///
+/// 契约注解：请求体为宽松 `Value`（未知键交由 schema 丢弃、历史字段
+/// `carrier_custom` 显式忽略），响应与 GET 同形，均待强类型化批次收敛。
+#[utoipa::path(
+    patch,
+    path = "/api/config",
+    operation_id = "patch_api_config",
+    tag = "config",
+    request_body(content = Value, description = "扁平设置 patch：全局域（browser/monitor/pause/logging/retry/app_settings/worker/updater/notification）与凭证域（username/password/auth_url/trigger_url/isp/active_task/login_channel/active_http_task/active_script_task/active_profile_id）按 key 分拣；password 三态：null 保留、空串清除、非空字符串加密更新"),
+    responses(
+        (status = 200, description = "合并保存并重载后回读的扁平设置（与 GET 同形）", body = Value),
+        (status = 400, description = "字段类型或取值非法（monitor patch 未知字段、端口越界、悬空 active_profile_id、渠道任务绑定缺失、推送通知校验失败等）", body = ErrorResponse),
+        (status = 500, description = "配置事务提交或重载失败", body = ErrorResponse),
+    )
+)]
 pub async fn patch_settings(
     State(config): State<Arc<dyn ConfigApi>>,
     State(profiles): State<Arc<dyn ProfileApi>>,
     State(tasks): State<Arc<dyn TaskApi>>,
     Json(patch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
+    apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await?;
+    reload_and_flat_response(&config).await
+}
+
+/// PATCH /api/config/{section} 的合法段名集合（T5-3）
+///
+/// 即 [`split_patch_keys`] 识别的扁平键全集（["按实际键集"]口径）：
+/// - 全局设置段：browser / monitor / pause / logging / retry / app_settings /
+///   worker / updater / notification（连同后端别名 retry_settings / app，
+///   二者分别映射到 retry_settings / app 段，与全量 PATCH 同口径）；
+/// - 凭证域段（写入活跃 Profile）：network / username / password / auth_url /
+///   trigger_url / isp / active_task / login_channel / active_http_task /
+///   active_script_task；
+/// - active_profile_id（settings 顶层键）。
+///
+/// 历史字段 carrier_custom 不在列：后端已无对应存储，全量 PATCH 亦显式忽略。
+const CONFIG_PATCH_SECTIONS: [&str; 22] = [
+    "browser",
+    "monitor",
+    "pause",
+    "logging",
+    "retry",
+    "app_settings",
+    "retry_settings",
+    "app",
+    "worker",
+    "updater",
+    "notification",
+    "network",
+    "username",
+    "password",
+    "auth_url",
+    "trigger_url",
+    "isp",
+    "active_task",
+    "login_channel",
+    "active_http_task",
+    "active_script_task",
+    "active_profile_id",
+];
+
+/// PATCH /api/config/{section} — 单设置段局部更新（T5-3）
+///
+/// 请求体即该段的局部对象（如 `PATCH /api/config/monitor` 的 body 为 monitor
+/// 段自己的 JSON），实现上把 body 包装成 `{"<section>": body}` 后走
+/// [`apply_flat_settings_patch`] 全链——原子性（拒绝即整体不落盘）、字段校验
+/// 与合并语义全部继承自既有全量 PATCH，本端点不重写任何合并逻辑。
+///
+/// 未知 section 返回 404；响应与全量 PATCH 同形（重载后回读的完整扁平设置
+/// 快照，与 GET /api/config 字节一致），保证客户端可以像全量 PATCH 一样用
+/// 响应整体刷新本地状态。
+///
+/// 契约注解：请求体为宽松 `Value`（形状随段而异，与全量 PATCH 同口径），
+/// 响应同 [`patch_settings`]，均待强类型化批次收敛。
+#[utoipa::path(
+    patch,
+    path = "/api/config/{section}",
+    operation_id = "patch_api_config_section",
+    tag = "config",
+    params(
+        ("section" = String, Path, description = "设置段名：全局段 browser/monitor/pause/logging/retry/app_settings/worker/updater/notification（含别名 retry_settings/app）；凭证域段 network/username/password/auth_url/trigger_url/isp/active_task/login_channel/active_http_task/active_script_task；或 active_profile_id"),
+    ),
+    request_body(content = Value, description = "该段的局部对象（凭证域段为标量字段值，如 username 的 body 为字符串；password 三态：null 保留、空串清除、非空字符串加密更新）"),
+    responses(
+        (status = 200, description = "合并保存并重载后回读的扁平设置（与 GET / PATCH /api/config 同形）", body = Value),
+        (status = 400, description = "段名合法但字段类型或取值非法（同全量 PATCH 口径：monitor patch 未知字段、端口越界、悬空 active_profile_id、渠道任务绑定缺失、推送通知校验失败等）", body = ErrorResponse),
+        (status = 404, description = "未知设置段（合法段名见 path 参数说明）", body = ErrorResponse),
+        (status = 500, description = "配置事务提交或重载失败", body = ErrorResponse),
+    )
+)]
+pub async fn patch_settings_section(
+    State(config): State<Arc<dyn ConfigApi>>,
+    State(profiles): State<Arc<dyn ProfileApi>>,
+    State(tasks): State<Arc<dyn TaskApi>>,
+    axum::extract::Path(section): axum::extract::Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    if !CONFIG_PATCH_SECTIONS.contains(&section.as_str()) {
+        return Err(ApiError::NotFound(format!(
+            "未知的设置段: {section}（合法段名见 PATCH /api/config 顶层键集合）"
+        )));
+    }
+    // 包装成全量 PATCH 的单键载荷，走同一条 apply 链：原子性 / 校验 / 合并
+    // 语义自动继承（本函数只做段名分发，不做任何字段级处理）
+    let patch = Value::Object([(section, body)].into_iter().collect());
     apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await?;
     reload_and_flat_response(&config).await
 }
@@ -70,17 +226,20 @@ pub async fn patch_settings(
 ///
 /// `tasks` 仅用于校验直连任务绑定（见 [`validate_login_task_binding`]）——这里不复用
 /// `ProfileApi`，因为绑定校验是**任务域的事实**，与方案业务无关。
-async fn apply_flat_settings_patch(
-    config: &Arc<dyn ConfigApi>,
-    profiles: &Arc<dyn ProfileApi>,
-    tasks: &Arc<dyn TaskApi>,
-    patch: &Value,
-) -> Result<(), ApiError> {
-    let Some(obj) = patch.as_object() else {
-        // 非对象 patch：无字段可合并（与旧实现一致，不落盘直接成功）
-        return Ok(());
-    };
+/// 扁平 patch 按 key 分类后的产物（[`split_patch_keys`] 输出）
+struct FlatPatchParts {
+    global_patch: serde_json::Map<String, Value>,
+    profile_patch: serde_json::Map<String, Value>,
+    other_patch: serde_json::Map<String, Value>,
+    /// 变更字段名（仅字段名，绝不记录值：payload 可能含密码/密钥）
+    changed_fields: Vec<String>,
+}
 
+/// 按前端字段名把扁平 patch 分拣到 global / Profile / 其它三个桶
+///
+/// monitor 字段在此完成前端→后端 DTO 映射；未知字段进 other 桶由合并闭包
+/// 写到 settings 顶层（历史字段 `carrier_custom` 显式忽略）。
+fn split_patch_keys(obj: &serde_json::Map<String, Value>) -> Result<FlatPatchParts, ApiError> {
     let mut global_patch = serde_json::Map::new();
     let mut profile_patch = serde_json::Map::new();
     let mut other_patch = serde_json::Map::new();
@@ -123,6 +282,7 @@ async fn apply_flat_settings_patch(
         "app",
         "worker",
         "updater",
+        "notification",
     ];
 
     for (k, v) in obj {
@@ -150,10 +310,247 @@ async fn apply_flat_settings_patch(
         }
     }
 
+    Ok(FlatPatchParts {
+        global_patch,
+        profile_patch,
+        other_patch,
+        changed_fields,
+    })
+}
+
+/// 构造活跃 Profile 的合并事务（含 WEB-7 字段类型预检与活跃 Profile 预检）
+///
+/// `profile_patch` 为空时返回 `None`（无可提交内容）。
+async fn build_profile_tx(
+    config: &Arc<dyn ConfigApi>,
+    profiles: &Arc<dyn ProfileApi>,
+    tasks: &Arc<dyn TaskApi>,
+    profile_patch: serde_json::Map<String, Value>,
+    active_profile_id: Option<&str>,
+) -> Result<Option<(String, ProfileMergeFn)>, ApiError> {
+    if profile_patch.is_empty() {
+        return Ok(None);
+    }
+
+    // WEB-7：profile 字段类型错误显式 400（与 password 口径对齐），不再静默
+    // 跳过——静默丢字段会让用户误以为已保存
+    for key in [
+        "username",
+        "auth_url",
+        "trigger_url",
+        "isp",
+        "active_task",
+        "active_http_task",
+        "active_script_task",
+    ] {
+        if profile_patch.get(key).is_some_and(|v| !v.is_string()) {
+            return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
+        }
+    }
+
+    let active_id = match active_profile_id {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => config.load_settings_async().await.active_profile_id,
+    };
+    // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
+    // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
+    // （事务内会在锁内重新加载，此处预检仅为保留既有的 400 文案口径）
+    config.load_profile(&active_id).map_err(|e| {
+        ApiError::BadRequest(format!(
+            "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
+        ))
+    })?;
+
+    let profiles = profiles.clone();
+    let tasks = tasks.clone();
+    Ok(Some((
+        active_id,
+        Box::new(move |mut profile| {
+            let tasks = tasks.clone();
+            Box::pin(async move {
+                if let Some(network) = profile_patch.get("network") {
+                    profile.network = Some(
+                        serde_json::from_value(network.clone())
+                            .map_err(|_| "网络出口配置格式无效")?,
+                    );
+                }
+                if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
+                    profile.username = username.to_string();
+                }
+                if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
+                    let trimmed = auth_url.trim();
+                    if !trimmed.is_empty() {
+                        validate_auth_url(trimmed).map_err(|e| e.to_string())?;
+                    }
+                    profile.auth_url = trimmed.to_string();
+                }
+                if let Some(trigger_url) = profile_patch.get("trigger_url").and_then(|v| v.as_str())
+                {
+                    let trimmed = trigger_url.trim();
+                    if !trimmed.is_empty() {
+                        validate_trigger_url(trimmed).map_err(|e| e.to_string())?;
+                    }
+                    profile.trigger_url = trimmed.to_string();
+                }
+                if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
+                    profile.isp = isp.to_string();
+                }
+                if let Some(active_task) = profile_patch.get("active_task").and_then(|v| v.as_str())
+                {
+                    profile.active_task = active_task.to_string();
+                }
+                // 登录渠道是枚举（"browser"/"http"/"script"），不走字符串校验分支；
+                // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
+                if let Some(channel) = profile_patch.get("login_channel") {
+                    profile.login_channel =
+                        serde_json::from_value::<crate::config::LoginChannel>(channel.clone())
+                            .map_err(|_| {
+                                ApiError::BadRequest(
+                                    "login_channel 仅支持 browser、http 或 script".into(),
+                                )
+                            })
+                            .map_err(|e| e.to_string())?;
+                }
+                // 任务绑定：字符串（空串 = 未绑定）
+                if let Some(v) = profile_patch
+                    .get("active_http_task")
+                    .and_then(|v| v.as_str())
+                {
+                    profile.active_http_task = v.to_string();
+                }
+                if let Some(v) = profile_patch
+                    .get("active_script_task")
+                    .and_then(|v| v.as_str())
+                {
+                    profile.active_script_task = v.to_string();
+                }
+                // 直连 / 脚本渠道必须有可用的任务绑定。**与 `POST/PUT /api/profiles/{id}`
+                // 完全同一口径**（共用 `validate_login_task_binding`）：三条保存路径若只有一条
+                // 放宽，用户从设置页存一次就能把方案改成登录时必失败的状态，且毫无提示。
+                // 校验的是**合并后**的渠道与绑定，故只改渠道不改绑定（或反之）同样整体判定。
+                validate_login_task_binding(
+                    &tasks,
+                    profile.login_channel,
+                    &profile.active_http_task,
+                    &profile.active_script_task,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                if let Some(password) = profile_patch.get("password") {
+                    // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
+                    // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
+                    match password {
+                        Value::Null => {}
+                        Value::String(pwd_str) if pwd_str.is_empty() => profile.password.clear(),
+                        Value::String(pwd_str) => {
+                            profile.password =
+                                profiles.save_password(Some(pwd_str), &profile.password);
+                        }
+                        _ => return Err("password 必须是字符串或 null".to_string()),
+                    }
+                }
+                super::profiles::validate_profile_network(&profile)?;
+                Ok(profile)
+            })
+        }),
+    )))
+}
+
+/// 构造全局设置的合并闭包（持锁读-改-写，闭包失败不落盘）
+///
+/// 两个桶均为空时返回 `None`（无可提交内容）。
+fn build_settings_merge(
+    global_patch: serde_json::Map<String, Value>,
+    other_patch: serde_json::Map<String, Value>,
+) -> Option<SettingsMergeFn> {
+    if global_patch.is_empty() && other_patch.is_empty() {
+        return None;
+    }
+    // 空否以前置 Map 判定为准：Value::Object 包裹后 as_object() 恒为 Some，
+    // 此处不再 unwrap（此前写法正确但制造 panic 观感）
+    let global_empty = global_patch.is_empty();
+    let other_empty = other_patch.is_empty();
+    // monitor 的 url_expected_responses 必须整体替换而非深合并：url_check_urls 是
+    // 前端回传的**完整** URL 检测清单（url_targets 数组同批整体替换），而 json_merge
+    // 对空对象是 no-op、对新对象是按键合并——清空列表清不掉旧映射、换列表会残留
+    // 被移除 URL 的旧期望条目。合并前取出补丁值，合并后整体覆盖。
+    let monitor_expected = global_patch
+        .get("monitor")
+        .and_then(|m| m.get("url_expected_responses"))
+        .cloned();
+    let global_patch = Value::Object(global_patch);
+    let other_patch = Value::Object(other_patch);
+    Some(Box::new(move |settings| {
+        let mut current_value =
+            serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
+        // 合并 global 字段
+        if !global_empty && let Some(global) = current_value.get_mut("global") {
+            json_merge(global, &global_patch);
+        }
+        // 合并其他字段（如 active_profile_id 等）
+        if !other_empty {
+            json_merge(&mut current_value, &other_patch);
+        }
+        // monitor 期望响应映射整体替换（深合并无法表达「清空/移除条目」）
+        if let Some(expected) = monitor_expected
+            && let Some(monitor) = current_value
+                .get_mut("global")
+                .and_then(|g| g.get_mut("monitor"))
+                .and_then(Value::as_object_mut)
+        {
+            monitor.insert("url_expected_responses".to_string(), expected);
+        }
+        serde_json::from_value::<crate::config::SettingsData>(current_value)
+            .map_err(|e| format!("设置合并后校验失败: {e}"))
+            // 推送通知节保存侧全量校验（URL scheme / 超时与重试上下界 / 事件类型
+            // 白名单 / 通道结构与凭据）；任何全局保存路径都会跑到这里，保证
+            // notification 不会以非法状态落盘
+            .and_then(|settings| {
+                settings
+                    .global
+                    .notification
+                    .validate()
+                    .map(|()| settings)
+                    .map_err(|msg| format!("推送通知配置无效: {msg}"))
+            })
+    }))
+}
+
+/// 将前端扁平 patch 应用并保存（PATCH /api/config）
+///
+/// 凭证字段（username/password/auth_url/isp/active_task/active_http_task）直接写入
+/// 活跃 Profile；全局设置经 [`ConfigApi::modify_settings_tx`] 的提交事务落盘——
+/// 「读取→合并→校验→持久化」在同一 `settings_lock` 临界区内完成。历史实现锁外读取
+/// 合并整份设置再 `save_settings`（仅锁最终写入），两个并发修改不同字段的请求
+/// 会相互覆盖（丢更新）。
+///
+/// `tasks` 仅用于校验直连任务绑定（见 [`validate_login_task_binding`]）——这里不复用
+/// `ProfileApi`，因为绑定校验是**任务域的事实**，与方案业务无关。
+/// 编排顺序：`split_patch_keys` 分拣 → WEB-9 / 端口预检 → `build_profile_tx` /
+/// `build_settings_merge` → 双域或单域事务提交。
+async fn apply_flat_settings_patch(
+    config: &Arc<dyn ConfigApi>,
+    profiles: &Arc<dyn ProfileApi>,
+    tasks: &Arc<dyn TaskApi>,
+    patch: &Value,
+) -> Result<(), ApiError> {
+    let Some(obj) = patch.as_object() else {
+        // 非对象 patch：无字段可合并（与旧实现一致，不落盘直接成功）
+        return Ok(());
+    };
+
+    let FlatPatchParts {
+        global_patch,
+        profile_patch,
+        other_patch,
+        changed_fields,
+    } = split_patch_keys(obj)?;
+
     // WEB-9：active_profile_id 切换必须在合并前校验目标 Profile 存在——悬空 id
     // 落盘后读取配置会加载失败并静默回退 ProfileData::default()（空凭据），
     // 用户看到与设置不符且无错误提示
-    if let Some(id) = obj.get("active_profile_id").and_then(|v| v.as_str()) {
+    let explicit_profile_id = obj.get("active_profile_id").and_then(|v| v.as_str());
+    if let Some(id) = explicit_profile_id {
         if id.is_empty() {
             return Err(ApiError::BadRequest("active_profile_id 不能为空".into()));
         }
@@ -177,166 +574,10 @@ async fn apply_flat_settings_patch(
 
     // 先在内存中构造待提交 Profile；若同一请求还包含全局字段，必须等全局合并校验
     // 成功后由 ConfigService 双域事务一起落盘，禁止先写凭证形成半提交。
-    // WEB-7：profile 字段类型错误显式 400（与 password 口径对齐），不再静默
-    // 跳过——静默丢字段会让用户误以为已保存
-    for key in [
-        "username",
-        "auth_url",
-        "trigger_url",
-        "isp",
-        "active_task",
-        "active_http_task",
-        "active_script_task",
-    ] {
-        if profile_patch.get(key).is_some_and(|v| !v.is_string()) {
-            return Err(ApiError::BadRequest(format!("{key} 必须是字符串")));
-        }
-    }
-    // Profile 合并事务（F7 Profile 侧）：合并/校验/密码语义整体移入
-    // ConfigService 的 profiles_lock 临界区执行——旧实现锁外 load→合并→校验→
-    // 落盘，并发保存同一 Profile 时整文档后写覆盖先写（丢字段）。若同一请求
-    // 还包含全局字段，由双域事务一起落盘，禁止先写凭证形成半提交。
-    let profile_tx: Option<(String, ProfileMergeFn)> = if !profile_patch.is_empty() {
-        let active_id = match obj.get("active_profile_id").and_then(|v| v.as_str()) {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => config.load_settings_async().await.active_profile_id,
-        };
-        // Profile 加载失败必须显式报错：旧实现 if let Ok 静默丢弃整个
-        // profile_patch 仍返回成功，用户以为密码已保存实际未生效。
-        // （事务内会在锁内重新加载，此处预检仅为保留既有的 400 文案口径）
-        config.load_profile(&active_id).map_err(|e| {
-            ApiError::BadRequest(format!(
-                "Profile {active_id} 加载失败（{e}），凭证修改未生效，请重试"
-            ))
-        })?;
-        let profiles = profiles.clone();
-        let tasks = tasks.clone();
-        let profile_patch = profile_patch;
-        Some((
-            active_id,
-            Box::new(move |mut profile| {
-                let tasks = tasks.clone();
-                Box::pin(async move {
-                    if let Some(network) = profile_patch.get("network") {
-                        profile.network = Some(
-                            serde_json::from_value(network.clone())
-                                .map_err(|_| "网络出口配置格式无效")?,
-                        );
-                    }
-                    if let Some(username) = profile_patch.get("username").and_then(|v| v.as_str()) {
-                        profile.username = username.to_string();
-                    }
-                    if let Some(auth_url) = profile_patch.get("auth_url").and_then(|v| v.as_str()) {
-                        let trimmed = auth_url.trim();
-                        if !trimmed.is_empty() {
-                            validate_auth_url(trimmed).map_err(|e| e.to_string())?;
-                        }
-                        profile.auth_url = trimmed.to_string();
-                    }
-                    if let Some(trigger_url) =
-                        profile_patch.get("trigger_url").and_then(|v| v.as_str())
-                    {
-                        let trimmed = trigger_url.trim();
-                        if !trimmed.is_empty() {
-                            validate_trigger_url(trimmed).map_err(|e| e.to_string())?;
-                        }
-                        profile.trigger_url = trimmed.to_string();
-                    }
-                    if let Some(isp) = profile_patch.get("isp").and_then(|v| v.as_str()) {
-                        profile.isp = isp.to_string();
-                    }
-                    if let Some(active_task) =
-                        profile_patch.get("active_task").and_then(|v| v.as_str())
-                    {
-                        profile.active_task = active_task.to_string();
-                    }
-                    // 登录渠道是枚举（"browser"/"http"/"script"），不走字符串校验分支；
-                    // 非法值显式 400，避免静默保留旧渠道让用户以为已切换
-                    if let Some(channel) = profile_patch.get("login_channel") {
-                        profile.login_channel =
-                            serde_json::from_value::<crate::config::LoginChannel>(channel.clone())
-                                .map_err(|_| {
-                                    ApiError::BadRequest(
-                                        "login_channel 仅支持 browser、http 或 script".into(),
-                                    )
-                                })
-                                .map_err(|e| e.to_string())?;
-                    }
-                    // 任务绑定：字符串（空串 = 未绑定）
-                    if let Some(v) = profile_patch
-                        .get("active_http_task")
-                        .and_then(|v| v.as_str())
-                    {
-                        profile.active_http_task = v.to_string();
-                    }
-                    if let Some(v) = profile_patch
-                        .get("active_script_task")
-                        .and_then(|v| v.as_str())
-                    {
-                        profile.active_script_task = v.to_string();
-                    }
-                    // 直连 / 脚本渠道必须有可用的任务绑定。**与 `POST/PUT /api/profiles/{id}`
-                    // 完全同一口径**（共用 `validate_login_task_binding`）：三条保存路径若只有一条
-                    // 放宽，用户从设置页存一次就能把方案改成登录时必失败的状态，且毫无提示。
-                    // 校验的是**合并后**的渠道与绑定，故只改渠道不改绑定（或反之）同样整体判定。
-                    validate_login_task_binding(
-                        &tasks,
-                        profile.login_channel,
-                        &profile.active_http_task,
-                        &profile.active_script_task,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                    if let Some(password) = profile_patch.get("password") {
-                        // 全局设置页使用三态契约：null 保留、空串清除、非空字符串加密更新。
-                        // Profile 编辑接口仍沿用其既有的“空串保留”语义，避免改变旧客户端行为。
-                        match password {
-                            Value::Null => {}
-                            Value::String(pwd_str) if pwd_str.is_empty() => {
-                                profile.password.clear()
-                            }
-                            Value::String(pwd_str) => {
-                                profile.password =
-                                    profiles.save_password(Some(pwd_str), &profile.password);
-                            }
-                            _ => return Err("password 必须是字符串或 null".to_string()),
-                        }
-                    }
-                    super::profiles::validate_profile_network(&profile)?;
-                    Ok(profile)
-                })
-            }),
-        ))
-    } else {
-        None
-    };
+    let profile_tx =
+        build_profile_tx(config, profiles, tasks, profile_patch, explicit_profile_id).await?;
 
-    // 全局设置合并闭包（持锁读-改-写，闭包失败不落盘）
-    let settings_merge: Option<SettingsMergeFn> = if !global_patch.is_empty()
-        || !other_patch.is_empty()
-    {
-        // 空否以前置 Map 判定为准：Value::Object 包裹后 as_object() 恒为 Some，
-        // 此处不再 unwrap（此前写法正确但制造 panic 观感）
-        let global_empty = global_patch.is_empty();
-        let other_empty = other_patch.is_empty();
-        let global_patch = Value::Object(global_patch);
-        let other_patch = Value::Object(other_patch);
-        Some(Box::new(move |settings| {
-            let mut current_value =
-                serde_json::to_value(&settings).map_err(|e| format!("设置序列化失败: {e}"))?;
-            // 合并 global 字段
-            if !global_empty && let Some(global) = current_value.get_mut("global") {
-                json_merge(global, &global_patch);
-            }
-            // 合并其他字段（如 active_profile_id 等）
-            if !other_empty {
-                json_merge(&mut current_value, &other_patch);
-            }
-            serde_json::from_value(current_value).map_err(|e| format!("设置合并后校验失败: {e}"))
-        }))
-    } else {
-        None
-    };
+    let settings_merge = build_settings_merge(global_patch, other_patch);
 
     // 提交：Profile 与全局设置同时变更走双域事务；仅其一走各自单域事务
     let result = match profile_tx {
@@ -402,6 +643,7 @@ fn settings_flat_response(
         "app_settings": settings.global.app,
         "worker": settings.global.worker,
         "updater": settings.global.updater,
+        "notification": settings.global.notification,
         "network": crate::network::settings::NetworkSettings::effective(profile, &settings.global),
         "username": profile.username,
         "auth_url": profile.auth_url,
@@ -440,6 +682,16 @@ pub(crate) fn effective_has_password(
 }
 
 /// POST /api/config/reload — 重新加载配置
+#[utoipa::path(
+    post,
+    path = "/api/config/reload",
+    operation_id = "post_api_config_reload",
+    tag = "config",
+    responses(
+        (status = 200, description = "配置已重新加载并发布 RuntimeConfig", body = DataEnvelope<String>),
+        (status = 500, description = "配置重载失败", body = ErrorResponse),
+    )
+)]
 pub async fn reload_settings(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -448,6 +700,15 @@ pub async fn reload_settings(
 }
 
 /// GET /api/config/log-levels — 返回当前日志级别
+#[utoipa::path(
+    get,
+    path = "/api/config/log-levels",
+    operation_id = "get_api_config_log_levels",
+    tag = "config",
+    responses(
+        (status = 200, description = "当前落盘的日志级别", body = DataEnvelope<LogLevelData>),
+    )
+)]
 pub async fn get_log_levels(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -457,12 +718,26 @@ pub async fn get_log_levels(
     ))
 }
 
-#[derive(Deserialize)]
+/// PUT /api/config/log-level 请求体
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SetLogLevelBody {
+    /// 目标日志级别（TRACE/DEBUG/INFO/WARN/ERROR，大小写不敏感，WARNING 归一为 WARN）
     pub level: String,
 }
 
 /// PUT /api/config/log-level — 设置日志级别
+#[utoipa::path(
+    put,
+    path = "/api/config/log-level",
+    operation_id = "put_api_config_log_level",
+    tag = "config",
+    request_body(content = SetLogLevelBody, description = "目标日志级别（大小写不敏感）"),
+    responses(
+        (status = 200, description = "归一化后的日志级别字符串（大写）", body = DataEnvelope<String>),
+        (status = 400, description = "级别名仅支持 TRACE、DEBUG、INFO、WARN、ERROR，或落盘校验失败", body = ErrorResponse),
+        (status = 500, description = "配置事务提交失败", body = ErrorResponse),
+    )
+)]
 pub async fn set_log_level(
     State(config): State<Arc<dyn ConfigApi>>,
     Json(body): Json<SetLogLevelBody>,
@@ -500,6 +775,15 @@ pub async fn set_log_level(
 }
 
 /// GET /api/config/default-stealth-script — 默认反检测脚本
+#[utoipa::path(
+    get,
+    path = "/api/config/default-stealth-script",
+    operation_id = "get_api_config_default_stealth_script",
+    tag = "config",
+    responses(
+        (status = 200, description = "默认反检测脚本全文", body = DataEnvelope<DefaultStealthScriptData>),
+    )
+)]
 pub async fn get_default_stealth_script() -> Result<Json<Value>, ApiError> {
     Ok(data(serde_json::json!({
         "script": r#"// Campus-Auth 默认反检测脚本
@@ -543,6 +827,15 @@ pub async fn get_default_stealth_script() -> Result<Json<Value>, ApiError> {
 }
 
 /// GET /api/pure-mode — 获取纯净模式状态
+#[utoipa::path(
+    get,
+    path = "/api/pure-mode",
+    operation_id = "get_api_pure_mode",
+    tag = "config",
+    responses(
+        (status = 200, description = "纯净模式当前开关状态", body = DataEnvelope<PureModeData>),
+    )
+)]
 pub async fn get_pure_mode(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -555,6 +848,17 @@ pub async fn get_pure_mode(
 /// POST /api/pure-mode — 切换纯净模式（toggle，无需请求体）
 ///
 /// 前端不发送请求体，后端读取当前值取反后保存。
+#[utoipa::path(
+    post,
+    path = "/api/pure-mode",
+    operation_id = "post_api_pure_mode",
+    tag = "config",
+    responses(
+        (status = 200, description = "切换后的终值（并发 toggle 下以落盘结果为准）", body = DataEnvelope<PureModeToggleData>),
+        (status = 400, description = "落盘校验失败", body = ErrorResponse),
+        (status = 500, description = "配置事务提交失败", body = ErrorResponse),
+    )
+)]
 pub async fn set_pure_mode(
     State(config): State<Arc<dyn ConfigApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -712,35 +1016,17 @@ fn monitor_frontend_to_backend(value: &Value) -> Result<Value, ApiError> {
 
 /// 校验认证地址：仅 http/https，已通过 DNS 钉扎防护的内网/保留地址需前置拒收
 fn validate_auth_url(url: &str) -> Result<(), ApiError> {
-    validate_http_url(url, "认证地址")
+    validate_http_url("认证地址", url)
 }
 
 /// 校验重定向触发地址：与认证地址同口径（仅 http/https + 主机名），标签区分报错文案
 fn validate_trigger_url(url: &str) -> Result<(), ApiError> {
-    validate_http_url(url, "重定向触发地址")
+    validate_http_url("重定向触发地址", url)
 }
 
-/// http/https URL 通用校验（认证地址与触发地址共用，G2 单点语义）
-fn validate_http_url(url: &str, label: &str) -> Result<(), ApiError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|_| ApiError::BadRequest(format!("{label}格式非法: {url}")))?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        _ => {
-            return Err(ApiError::BadRequest(format!(
-                "{label}仅支持 http/https，当前为: {}",
-                parsed.scheme()
-            )));
-        }
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ApiError::BadRequest(format!("{label}缺少主机名: {url}")))?;
-    if host.is_empty() {
-        return Err(ApiError::BadRequest(format!("{label}缺少主机名: {url}")));
-    }
-    Ok(())
-}
+// http/https URL 通用校验（scheme + 主机名两级判定）已上提至
+// `crate::web::validate`，与 profiles 域共用同一实现（G2 单点语义）
+use crate::web::validate::validate_http_url;
 
 /// 浅合并：将 patch 中的所有 key 递归覆盖到 target
 fn json_merge(target: &mut Value, patch: &Value) {
@@ -923,6 +1209,87 @@ mod tests {
         assert_eq!(
             back["url_expected_responses"]["http://a.com"],
             serde_json::json!("OK")
+        );
+    }
+
+    /// url_check_urls 是前端回传的**完整**清单：换列表必须移除被删 URL 的旧期望
+    /// 条目、清空列表必须清空整张映射（深合并做不到「清空/移除」，属性测试 P2 挖出）。
+    #[tokio::test]
+    async fn test_patch_monitor_url_check_urls_replaces_expected_map() {
+        let (app, inner) = mock_app();
+        // 预置两个旧条目
+        {
+            let mut g = inner.lock().unwrap();
+            g.settings.global.monitor.url_targets =
+                vec!["http://old.com".into(), "http://keep.com".into()];
+            g.settings
+                .global
+                .monitor
+                .url_expected_responses
+                .insert("http://old.com".into(), "OLD".into());
+            g.settings
+                .global
+                .monitor
+                .url_expected_responses
+                .insert("http://keep.com".into(), "KEEP".into());
+        }
+        // 换成只含 keep.com 的清单：old 条目必须消失、keep 值更新
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "monitor": { "url_check_urls": ["http://keep.com|KEEP2"] }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        {
+            let g = inner.lock().unwrap();
+            let m = &g.settings.global.monitor;
+            assert_eq!(m.url_targets, vec!["http://keep.com".to_string()]);
+            assert_eq!(
+                m.url_expected_responses.len(),
+                1,
+                "被移除 URL 的旧条目必须消失"
+            );
+            assert_eq!(
+                m.url_expected_responses
+                    .get("http://keep.com")
+                    .map(String::as_str),
+                Some("KEEP2")
+            );
+        }
+        // 清空列表：整张期望响应映射必须为空
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "monitor": { "url_check_urls": [] } }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let g = inner.lock().unwrap();
+        let m = &g.settings.global.monitor;
+        assert!(m.url_targets.is_empty());
+        assert!(
+            m.url_expected_responses.is_empty(),
+            "清空 url_check_urls 必须清空期望响应映射，实际: {:?}",
+            m.url_expected_responses
         );
     }
 
@@ -1236,6 +1603,12 @@ mod tests {
         };
         let app = axum::Router::new()
             .route("/api/config", get(get_settings).patch(patch_settings))
+            // section 端点（T5-3）：仅挂测试路由——正式路由表与 openapi 注册由
+            // 集成批统一收，不影响 web::mod 的契约测试
+            .route(
+                "/api/config/{section}",
+                axum::routing::patch(patch_settings_section),
+            )
             .route("/api/config/log-levels", get(get_log_levels))
             .route("/api/config/log-level", axum::routing::put(set_log_level))
             .route("/api/pure-mode", get(get_pure_mode).post(set_pure_mode))
@@ -2006,5 +2379,1183 @@ mod tests {
         // 默认值调整后 mock 的初始状态本身就是 true，断言改盯落盘计数即可）
         assert!(g.settings.global.pause.enabled);
         assert_eq!(g.save_calls, 0);
+    }
+
+    // ============ section PATCH 端点（T5-3） ============
+
+    /// 发送一次 section PATCH 并返回（状态码, 响应 JSON）
+    async fn section_patch(app: axum::Router, section: &str, body: &Value) -> (StatusCode, Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/config/{section}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        (status, body_json(resp).await)
+    }
+
+    /// 逐 section 生效断言：每个合法段的最小合法载荷都必须 200 且精确生效
+    ///（覆盖 CONFIG_PATCH_SECTIONS 全集，含 retry_settings / app 两个后端别名）。
+    /// 每段独立 mock 实例，避免段间状态串扰。
+    #[tokio::test]
+    async fn test_section_patch_applies_every_section() {
+        // (段名, 请求体, 生效位置路径, 期望值)；生效位置相对 settings/profile 的
+        // 序列化 JSON（与属性测试的断言基准同口径）
+        let cases: Vec<(&str, Value, &str, Value, bool)> = vec![
+            // ---- 全局设置段 ----
+            (
+                "browser",
+                json!({"headless": true}),
+                "/global/browser/headless",
+                json!(true),
+                false,
+            ),
+            (
+                "monitor",
+                json!({"check_interval_seconds": 30}),
+                "/global/monitor/check_interval",
+                json!(30),
+                false,
+            ),
+            (
+                "pause",
+                json!({"enabled": false}),
+                "/global/pause/enabled",
+                json!(false),
+                false,
+            ),
+            (
+                "logging",
+                json!({"level": "DEBUG"}),
+                "/global/logging/level",
+                json!("DEBUG"),
+                false,
+            ),
+            (
+                "retry",
+                json!({"max_retries": 5}),
+                "/global/retry_settings/max_retries",
+                json!(5),
+                false,
+            ),
+            (
+                "app_settings",
+                json!({"port": 50799}),
+                "/global/app/port",
+                json!(50799),
+                false,
+            ),
+            // 后端别名：与全量 PATCH 同口径映射到 retry_settings / app
+            (
+                "retry_settings",
+                json!({"max_retries": 3}),
+                "/global/retry_settings/max_retries",
+                json!(3),
+                false,
+            ),
+            (
+                "app",
+                json!({"port": 50798}),
+                "/global/app/port",
+                json!(50798),
+                false,
+            ),
+            (
+                "worker",
+                json!({"keep_alive": false}),
+                "/global/worker/keep_alive",
+                json!(false),
+                false,
+            ),
+            (
+                "updater",
+                json!({"channel": "all", "check_interval_hours": 12}),
+                "/global/updater/channel",
+                json!("all"),
+                false,
+            ),
+            (
+                "notification",
+                json!({"enabled": true}),
+                "/global/notification/enabled",
+                json!(true),
+                false,
+            ),
+            // ---- 凭证域段（写入活跃 Profile） ----
+            (
+                "network",
+                json!({"mode": "direct", "interface_id": "", "proxy_url": "", "dns_servers": []}),
+                "/network/mode",
+                json!("direct"),
+                true,
+            ),
+            (
+                "username",
+                json!("sec-user"),
+                "/username",
+                json!("sec-user"),
+                true,
+            ),
+            (
+                "password",
+                json!("sec-pass"),
+                "/password",
+                json!("ENC:mock:sec-pass"),
+                true,
+            ),
+            (
+                "auth_url",
+                json!("http://auth.example.edu/"),
+                "/auth_url",
+                json!("http://auth.example.edu/"),
+                true,
+            ),
+            (
+                "trigger_url",
+                json!("http://trigger.example.edu/"),
+                "/trigger_url",
+                json!("http://trigger.example.edu/"),
+                true,
+            ),
+            ("isp", json!("sec-isp"), "/isp", json!("sec-isp"), true),
+            (
+                "active_task",
+                json!("portal-browser"),
+                "/active_task",
+                json!("portal-browser"),
+                true,
+            ),
+            // 默认渠道即 browser（无绑定要求），单改绑定合法
+            (
+                "login_channel",
+                json!("browser"),
+                "/login_channel",
+                json!("browser"),
+                true,
+            ),
+            (
+                "active_http_task",
+                json!("portal-http"),
+                "/active_http_task",
+                json!("portal-http"),
+                true,
+            ),
+            (
+                "active_script_task",
+                json!("portal-login"),
+                "/active_script_task",
+                json!("portal-login"),
+                true,
+            ),
+            // ---- settings 顶层键 ----
+            (
+                "active_profile_id",
+                json!("default"),
+                "/active_profile_id",
+                json!("default"),
+                false,
+            ),
+        ];
+        assert_eq!(
+            cases.len(),
+            CONFIG_PATCH_SECTIONS.len(),
+            "生效断言必须覆盖 CONFIG_PATCH_SECTIONS 全集"
+        );
+        for (section, body, pointer, expected, is_profile) in cases {
+            let (app, inner) = mock_app();
+            let (status, resp) = section_patch(app, section, &body).await;
+            assert_eq!(status, StatusCode::OK, "section {section} 应保存成功");
+            // 响应与全量 PATCH 同形：扁平快照（含 browser 等顶层键）
+            assert!(
+                resp.get("data").and_then(|d| d.get("browser")).is_some(),
+                "section {section} 响应必须是完整扁平快照: {resp}"
+            );
+            // 落盘状态精确生效
+            let g = inner.lock().unwrap();
+            let state = serde_json::to_value(&g.settings).unwrap();
+            let state = if is_profile {
+                serde_json::to_value(&g.profile).unwrap()
+            } else {
+                state
+            };
+            assert_eq!(
+                state.pointer(pointer).unwrap(),
+                &expected,
+                "section {section} 的 {pointer} 必须精确生效"
+            );
+        }
+    }
+
+    /// 未知 section 404，且不落盘（历史字段 carrier_custom 也不作为段名开放）
+    #[tokio::test]
+    async fn test_section_patch_unknown_section_404() {
+        for section in ["nonexistent", "carrier_custom", "credentials", "global"] {
+            let (app, inner) = mock_app();
+            let (status, resp) = section_patch(app, section, &json!({"x": 1})).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "section {section} 应 404");
+            let msg = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(msg.contains("未知的设置段"), "404 文案应指明未知段: {msg}");
+            let g = inner.lock().unwrap();
+            assert_eq!(g.save_calls, 0, "未知段不得落盘");
+        }
+    }
+
+    /// 原子性继承（P3 口径）：段内非法载荷整体拒绝，两域状态与落盘计数完全不变
+    #[tokio::test]
+    async fn test_section_patch_rejection_is_atomic() {
+        // monitor 未知字段（DTO deny_unknown_fields）与端口越界两类必拒载荷
+        for (section, body) in [
+            ("monitor", json!({"bogus_field": 1})),
+            ("app_settings", json!({"port": 0})),
+        ] {
+            let (app, inner) = mock_app();
+            // 预置哨兵：被拒段之外的可见状态必须原样保持
+            let settings_before = serde_json::to_value(&inner.lock().unwrap().settings).unwrap();
+            let profile_before = serde_json::to_value(&inner.lock().unwrap().profile).unwrap();
+
+            let (status, _) = section_patch(app, section, &body).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "section {section} 非法载荷应 400"
+            );
+            let g = inner.lock().unwrap();
+            assert_eq!(
+                serde_json::to_value(&g.settings).unwrap(),
+                settings_before,
+                "拒绝路径不得改动全局设置（{section}）"
+            );
+            assert_eq!(
+                serde_json::to_value(&g.profile).unwrap(),
+                profile_before,
+                "拒绝路径不得改动活跃 Profile（{section}）"
+            );
+            assert_eq!(g.save_calls, 0, "拒绝路径不得落盘（{section}）");
+        }
+    }
+
+    /// 与全量 PATCH 等价性（抽样）：同载荷走 section 端点与全量端点，两域终态一致。
+    /// mock 全内存且两段无键重叠，逐段独立提交的合并终态与单次全量提交可比。
+    #[tokio::test]
+    async fn test_section_patch_equivalent_to_full_patch() {
+        let monitor = json!({"check_interval_seconds": 45, "ping_targets": ["10.0.0.53:53"]});
+        let updater = json!({"channel": "prerelease", "auto_check_enabled": false});
+
+        // 路径 A：section 端点逐段提交（monitor / updater 各一份实例）
+        let (app_a1, inner_a1) = mock_app();
+        let (s1, _) = section_patch(app_a1, "monitor", &monitor).await;
+        assert_eq!(s1, StatusCode::OK);
+        let (app_a2, inner_a2) = mock_app();
+        let (s2, _) = section_patch(app_a2, "updater", &updater).await;
+        assert_eq!(s2, StatusCode::OK);
+
+        // 路径 B：全量 PATCH 单次提交（同载荷合并）
+        let (app_b, inner_b) = mock_app();
+        let resp = app_b
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/config")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"monitor": monitor, "updater": updater}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 终态等价：settings 与 Profile 逐字段一致（经序列化 JSON 比较：
+        // MonitorSettings 等未派生 PartialEq，与属性测试的断言基准同口径）
+        let ga1 = inner_a1.lock().unwrap();
+        let ga2 = inner_a2.lock().unwrap();
+        let gb = inner_b.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(&ga1.settings.global.monitor).unwrap(),
+            serde_json::to_value(&gb.settings.global.monitor).unwrap(),
+            "monitor 段终态必须与全量 PATCH 等价"
+        );
+        assert_eq!(
+            serde_json::to_value(&ga2.settings.global.updater).unwrap(),
+            serde_json::to_value(&gb.settings.global.updater).unwrap(),
+            "updater 段终态必须与全量 PATCH 等价"
+        );
+        assert_eq!(
+            serde_json::to_value(&ga1.profile).unwrap(),
+            serde_json::to_value(&gb.profile).unwrap(),
+            "Profile 不得被全局段改动"
+        );
+    }
+
+    // ============ 属性测试：PATCH 合并语义（proptest，T4-2b） ============
+    //
+    // 被测对象为 apply_flat_settings_patch 编排链（split_patch_keys 分拣 →
+    // build_profile_tx / build_settings_merge → 双域或单域事务），以模块上方
+    // 的内存 mock 承载。proptest 用例保持同步外壳、每个用例内建
+    // current_thread 运行时驱动 async：mock 全内存、开销微秒级；不能在
+    // #[tokio::test] 里嵌套 block_on（运行时内禁止再起运行时），故不采用外层
+    // 异步测试。
+    //
+    // 生成器覆盖面：
+    // - 合法字段族：全局各段（pause/logging/retry/app_settings/browser/worker/
+    //   updater/monitor DTO）+ 凭证（username/isp/auth_url/trigger_url/
+    //   active_task/password 三态/network）+ active_profile_id + 渠道与绑定的
+    //   复合族（browser 单独 / http+portal-http / script+portal-login）
+    // - 必拒条目：monitor DTO 违例、各段类型错位、端口越界、非法更新通道、
+    //   非字符串凭证、非法 URL、非法网络出口、空 active_profile_id
+    // - 未知键与 carrier_custom：前者交由 schema 丢弃（无字段污染），后者显式忽略
+    // - 顶层非对象（数组/字符串/数字/null）：无字段可合并，直接成功不落盘
+    //
+    // 生成器排除的跨族冲突：网卡出口（interface）× 脚本渠道的互斥单独由
+    // reject 条目与既有单测覆盖，合法族生成器不混出该组合，保证「合法 patch
+    // 必成功」的前提可被精确断言。
+
+    use proptest::prelude::*;
+    use serde_json::json;
+
+    /// 属性测试统一口径：512 cases（CI 亲和；随机失败必可 shrink 复现）
+    fn prop_config() -> proptest::test_runner::Config {
+        proptest::test_runner::Config::with_cases(512)
+    }
+
+    /// proptest 用例内驱动 async 合并路径（每个用例独立 current_thread 运行时）
+    fn prop_block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试运行时构建失败")
+            .block_on(fut)
+    }
+
+    /// 合法字段族（可含多个顶层键：渠道族同时携带绑定）
+    type PropFamily = Vec<(String, Value)>;
+
+    /// 预置非默认初始状态：让「指定字段生效 / 未指定字段保持」都可观测
+    ///（逐字段赋值而非结构体字面量：预设的是深层嵌套字段，字面量写法更冗长）
+    #[allow(clippy::field_reassign_with_default)]
+    fn prop_preset() -> MockInner {
+        let mut settings = crate::config::SettingsData::default();
+        settings.global.pause.enabled = false;
+        settings.global.pause.start_hour = 1;
+        settings.global.monitor.check_interval = 123;
+        settings.global.monitor.tcp_enabled = false;
+        settings.global.monitor.url_enabled = false;
+        settings.global.monitor.post_login_delay = 9;
+        settings.global.monitor.tcp_targets = vec!["8.8.8.8:53".into()];
+        settings.global.logging.level = "WARN".into();
+        settings.global.logging.retention_days = 3;
+        settings.global.retry_settings.max_retries = 7;
+        settings.global.app.port = 50722;
+        settings.global.app.show_tray = false;
+        settings.global.updater.channel = crate::config::UpdateChannel::All;
+        settings.global.updater.auto_check_enabled = false;
+        settings.global.browser.headless = false;
+        settings.global.worker.keep_alive = true;
+        settings.global.worker.idle_timeout_seconds = 777;
+        let mut profile = ProfileData::default();
+        profile.username = "orig-user".into();
+        profile.isp = "orig-isp".into();
+        profile.active_task = "orig-task".into();
+        MockInner {
+            settings,
+            profile,
+            save_calls: 0,
+            reload_calls: 0,
+            profile_load_fails: false,
+        }
+    }
+
+    /// 属性测试的内存三域 mock 句柄（ConfigApi / ProfileApi / TaskApi + 状态内省）
+    type PropHandles = (
+        Arc<dyn ConfigApi>,
+        Arc<dyn ProfileApi>,
+        Arc<dyn TaskApi>,
+        Arc<std::sync::Mutex<MockInner>>,
+    );
+
+    fn prop_state() -> PropHandles {
+        let inner = Arc::new(std::sync::Mutex::new(prop_preset()));
+        (
+            Arc::new(MockConfigApi(inner.clone())),
+            Arc::new(MockProfileApi),
+            Arc::new(MockTaskApi),
+            inner,
+        )
+    }
+
+    fn prop_settings_json(inner: &std::sync::Mutex<MockInner>) -> Value {
+        serde_json::to_value(&inner.lock().unwrap().settings).unwrap()
+    }
+
+    fn prop_profile_json(inner: &std::sync::Mutex<MockInner>) -> Value {
+        serde_json::to_value(&inner.lock().unwrap().profile).unwrap()
+    }
+
+    /// monitor 前端键（与 MonitorPatch DTO 字段一一对应；往返保真字段不在此列）
+    const PROP_MONITOR_FRONT_KEYS: [&str; 11] = [
+        "check_interval_seconds",
+        "enable_tcp_check",
+        "enable_http_check",
+        "enable_url_check",
+        "strict_login_mode",
+        "disable_proxy",
+        "network_check_timeout",
+        "post_login_delay",
+        "ping_targets",
+        "test_urls",
+        "url_check_urls",
+    ];
+
+    /// monitor DTO 的随机合法局部载荷（1..=4 个子字段，值合法）
+    fn prop_arb_monitor_payload() -> impl proptest::strategy::Strategy<Value = Value> {
+        proptest::collection::vec(
+            prop_oneof![
+                (1u32..=600).prop_map(|v| (0u8, json!(v))),
+                any::<bool>().prop_map(|v| (1u8, json!(v))),
+                any::<bool>().prop_map(|v| (2u8, json!(v))),
+                any::<bool>().prop_map(|v| (3u8, json!(v))),
+                any::<bool>().prop_map(|v| (4u8, json!(v))),
+                any::<bool>().prop_map(|v| (5u8, json!(v))),
+                (1u64..=30).prop_map(|v| (6u8, json!(v))),
+                (0u64..=60).prop_map(|v| (7u8, json!(v))),
+                proptest::collection::vec(
+                    prop_oneof![
+                        Just("10.0.0.53:53".to_owned()),
+                        Just("192.168.1.1:53".to_owned()),
+                    ],
+                    1..=2,
+                )
+                .prop_map(|v| (8u8, json!(v))),
+                proptest::collection::vec(Just("http://portal.edu.cn".to_owned()), 1..=2)
+                    .prop_map(|v| (9u8, json!(v))),
+                proptest::collection::vec(
+                    prop_oneof![
+                        Just("http://a.com|OK".to_owned()),
+                        Just("http://b.com".to_owned()),
+                        Just("http://c.com|成功|备用".to_owned()),
+                    ],
+                    0..=2,
+                )
+                .prop_map(|v| (10u8, json!(v))),
+            ],
+            1..=4,
+        )
+        .prop_map(|entries| {
+            // 子字段去重：Map 后写覆盖先写会让断言与生效条目失去一一对应
+            let mut obj = serde_json::Map::new();
+            let mut seen = std::collections::HashSet::new();
+            for (idx, v) in entries {
+                if seen.insert(idx) {
+                    obj.insert(PROP_MONITOR_FRONT_KEYS[idx as usize].to_owned(), v);
+                }
+            }
+            Value::Object(obj)
+        })
+    }
+
+    /// 网络出口的随机合法载荷。
+    /// interface 模式刻意不进合法族池：它与脚本渠道互斥（validate_profile_network），
+    /// 属跨族冲突，由 reject 条目与既有单测覆盖。
+    fn prop_arb_network_payload() -> impl proptest::strategy::Strategy<Value = Value> {
+        prop_oneof![
+            Just(json!({"mode": "direct", "interface_id": "", "proxy_url": "", "dns_servers": []})),
+            Just(json!({"mode": "system", "interface_id": "", "proxy_url": "", "dns_servers": []})),
+            (0u8..=2).prop_map(|i| {
+                let url = [
+                    "http://127.0.0.1:7890",
+                    "socks5://10.0.0.1:1080",
+                    "socks5h://127.0.0.1:1080",
+                ][i as usize];
+                json!({
+                    "mode": "proxy",
+                    "interface_id": "",
+                    "proxy_url": url,
+                    "dns_servers": [],
+                })
+            }),
+        ]
+    }
+
+    /// 单个必拒条目（每一条在现行口径下都必须整体拒绝且不落盘）
+    fn prop_arb_reject_entry() -> impl proptest::strategy::Strategy<Value = (String, Value)> {
+        prop_oneof![
+            // monitor DTO：未知字段 / 类型错位 / 非对象
+            (0u8..=4).prop_map(|i| (
+                "monitor".to_owned(),
+                match i {
+                    0 => json!({"bogus_field": 1}),
+                    1 => json!({"check_interval_seconds": "soon"}),
+                    2 => json!(5),
+                    3 => Value::Null,
+                    _ => json!({"ping_targets": "not-array"}),
+                },
+            )),
+            // pause：布尔错位 / 整段标量替换 / 子字段类型错位
+            (0u8..=2).prop_map(|i| (
+                "pause".to_owned(),
+                match i {
+                    0 => json!({"enabled": "yes"}),
+                    1 => json!(5),
+                    _ => json!({"start_hour": "7"}),
+                },
+            )),
+            // 端口越界 / 非数值
+            (0u8..=3).prop_map(|i| (
+                "app_settings".to_owned(),
+                match i {
+                    0 => json!({"port": 0}),
+                    1 => json!({"port": 65536}),
+                    2 => json!({"port": -1}),
+                    _ => json!({"port": "8080"}),
+                },
+            )),
+            // updater 非法通道 / 负间隔 / 非字符串通道
+            (0u8..=2).prop_map(|i| (
+                "updater".to_owned(),
+                match i {
+                    0 => json!({"channel": "nightly"}),
+                    1 => json!({"check_interval_hours": -5}),
+                    _ => json!({"channel": 3}),
+                },
+            )),
+            // 各段类型错位
+            Just(("logging".to_owned(), json!({"retention_days": "x"}))),
+            Just(("worker".to_owned(), json!({"idle_timeout_seconds": -1}))),
+            Just(("browser".to_owned(), json!({"headless": "yes"}))),
+            Just(("retry".to_owned(), json!({"max_retries": -2}))),
+            // 渠道与凭证
+            prop_oneof![Just("weird"), Just("")]
+                .prop_map(|v| { ("login_channel".to_owned(), json!(v)) }),
+            (0u8..=3).prop_map(|i| (
+                "username".to_owned(),
+                match i {
+                    0 => json!(123),
+                    1 => Value::Null,
+                    2 => json!([1]),
+                    _ => json!({"u": 1}),
+                },
+            )),
+            (0u8..=2).prop_map(|i| (
+                "password".to_owned(),
+                match i {
+                    0 => json!(42),
+                    1 => json!(true),
+                    _ => json!(["p"]),
+                },
+            )),
+            prop_oneof![Just("ftp://x"), Just("not a url")]
+                .prop_map(|v| { ("auth_url".to_owned(), json!(v)) }),
+            Just(("trigger_url".to_owned(), json!("mailto:a@b"))),
+            (0u8..=3).prop_map(|i| (
+                "network".to_owned(),
+                match i {
+                    0 => json!({"mode": "interface", "dns_servers": ["bad-dns"]}),
+                    1 => json!({"mode": "interface"}),
+                    2 => json!({"mode": "proxy"}),
+                    _ => json!(5),
+                },
+            )),
+            // 空 active_profile_id（WEB-9）
+            Just(("active_profile_id".to_owned(), json!(""))),
+        ]
+    }
+
+    /// 随机合法字段族
+    fn prop_arb_valid_family() -> impl proptest::strategy::Strategy<Value = PropFamily> {
+        prop_oneof![
+            2 => (any::<bool>(), 0u8..=23, 0u8..=59, 0u8..=23, 0u8..=59).prop_map(
+                |(e, sh, sm, eh, em)| {
+                    vec![(
+                        "pause".to_owned(),
+                        json!({
+                            "enabled": e,
+                            "start_hour": sh,
+                            "start_minute": sm,
+                            "end_hour": eh,
+                            "end_minute": em,
+                        }),
+                    )]
+                },
+            ),
+            2 => (
+                prop_oneof![Just("INFO"), Just("DEBUG"), Just("WARN"), Just("ERROR")],
+                1u32..=90,
+                any::<bool>(),
+            )
+                .prop_map(|(lvl, days, fe)| {
+                    vec![(
+                        "logging".to_owned(),
+                        json!({"level": lvl, "retention_days": days, "file_enabled": fe}),
+                    )]
+                }),
+            2 => (0u32..=10, 0u32..=60).prop_map(|(mr, ri)| {
+                vec![("retry".to_owned(), json!({"max_retries": mr, "retry_interval": ri}))]
+            }),
+            2 => (1u16..=65535, any::<bool>(), any::<bool>(), 0u32..=48).prop_map(
+                |(port, asb, st, arh)| {
+                    vec![(
+                        "app_settings".to_owned(),
+                        json!({
+                            "port": port,
+                            "auto_start_browser": asb,
+                            "show_tray": st,
+                            "auto_restart_hours": arh,
+                        }),
+                    )]
+                },
+            ),
+            1 => (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+                |(h, pm, lrm, pc)| {
+                    vec![(
+                        "browser".to_owned(),
+                        json!({
+                            "headless": h,
+                            "pure_mode": pm,
+                            "low_resource_mode": lrm,
+                            "persistent_context": pc,
+                        }),
+                    )]
+                },
+            ),
+            1 => (60u32..=3600, any::<bool>()).prop_map(|(it, ka)| {
+                vec![(
+                    "worker".to_owned(),
+                    json!({"idle_timeout_seconds": it, "keep_alive": ka}),
+                )]
+            }),
+            2 => (
+                prop_oneof![Just("stable"), Just("prerelease"), Just("all")],
+                any::<bool>(),
+                0u32..=72,
+                any::<bool>(),
+            )
+                .prop_map(|(ch, ace, cih, up)| {
+                    vec![(
+                        "updater".to_owned(),
+                        json!({
+                            "channel": ch,
+                            "auto_check_enabled": ace,
+                            "check_interval_hours": cih,
+                            "use_proxy": up,
+                        }),
+                    )]
+                }),
+            3 => prop_arb_monitor_payload().prop_map(|v| vec![("monitor".to_owned(), v)]),
+            2 => prop_oneof![
+                Just("alice".to_owned()),
+                Just("20230001".to_owned()),
+                Just(String::new()),
+            ].prop_map(
+                |v| vec![("username".to_owned(), json!(v))],
+            ),
+            1 => prop_oneof![Just("cmcc"), Just("电信")].prop_map(|v| {
+                vec![("isp".to_owned(), json!(v))]
+            }),
+            1 => prop_oneof![
+                Just("http://10.0.0.1/".to_owned()),
+                Just("https://portal.edu.cn/login".to_owned()),
+                Just(String::new()),
+            ]
+                .prop_map(|v| vec![("auth_url".to_owned(), json!(v))]),
+            1 => prop_oneof![Just("http://detect.edu.cn/".to_owned()), Just(String::new())].prop_map(|v| {
+                vec![("trigger_url".to_owned(), json!(v))]
+            }),
+            1 => prop_oneof![Just("t1".to_owned()), Just(String::new())].prop_map(|v| {
+                vec![("active_task".to_owned(), json!(v))]
+            }),
+            // 密码三态契约：null 保留 / 空串清除 / 非空串加密更新
+            2 => (0u8..=2).prop_map(|i| {
+                vec![(
+                    "password".to_owned(),
+                    match i {
+                        0 => Value::Null,
+                        1 => json!(""),
+                        _ => json!("new-pass-123"),
+                    },
+                )]
+            }),
+            1 => prop_arb_network_payload().prop_map(|v| vec![("network".to_owned(), v)]),
+            1 => prop_oneof![Just("default"), Just("secondary")].prop_map(|v| {
+                vec![("active_profile_id".to_owned(), json!(v))]
+            }),
+            // 渠道与绑定复合族：单独改渠道会因绑定校验被拒，必须成对出现
+            2 => prop_oneof![
+                Just(vec![("login_channel".to_owned(), json!("browser"))]),
+                Just(vec![
+                    ("login_channel".to_owned(), json!("http")),
+                    ("active_http_task".to_owned(), json!("portal-http")),
+                ]),
+                Just(vec![
+                    ("login_channel".to_owned(), json!("script")),
+                    ("active_script_task".to_owned(), json!("portal-login")),
+                ]),
+            ],
+        ]
+    }
+
+    /// 混生条目（P1）：合法族 / 必拒条目 / 未知键 / carrier_custom
+    fn prop_arb_any_entry() -> impl proptest::strategy::Strategy<Value = PropFamily> {
+        prop_oneof![
+            4 => prop_arb_valid_family(),
+            3 => prop_arb_reject_entry().prop_map(|e| vec![e]),
+            2 => (
+                prop_oneof![
+                    Just("future_field".to_owned()),
+                    Just("hidden_flag".to_owned()),
+                    Just("x_setting".to_owned()),
+                ],
+                prop_oneof![
+                    Just(Value::Null),
+                    any::<bool>().prop_map(|b| json!(b)),
+                    (0i64..=1000).prop_map(|n| json!(n)),
+                    Just(json!({"nested": true})),
+                    Just(json!(["a", 1])),
+                ],
+            )
+                .prop_map(|(k, v)| vec![(k, v)]),
+            1 => Just(vec![("carrier_custom".to_owned(), json!("历史字段"))]),
+        ]
+    }
+
+    /// 未知键不得进入配置：settings 顶层键集恒为 schema 四键（无字段污染）
+    fn prop_assert_no_pollution(
+        settings_out: &Value,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        let keys: Vec<&str> = settings_out
+            .as_object()
+            .map(|o| o.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        let expected = [
+            "active_profile_id",
+            "auto_switch",
+            "config_version",
+            "global",
+        ];
+        prop_assert!(
+            keys.len() == expected.len() && keys.iter().all(|k| expected.contains(k)),
+            "settings 顶层出现未知键污染: {:?}",
+            keys
+        );
+        Ok(())
+    }
+
+    /// 断言单个合法键精确生效（深度断言，含前端→后端字段名映射）
+    fn prop_assert_valid_entry(
+        key: &str,
+        payload: &Value,
+        settings_out: &Value,
+        profile_out: &Value,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        match key {
+            // 1:1 段（retry/app_settings 完成前端名映射后逐子键对照）
+            "pause" | "logging" | "retry" | "app_settings" | "browser" | "worker" | "updater" => {
+                let target_key = match key {
+                    "retry" => "retry_settings",
+                    "app_settings" => "app",
+                    other => other,
+                };
+                let section = &settings_out["global"][target_key];
+                let obj = payload.as_object().expect("合法族载荷必为对象");
+                for (k, v) in obj {
+                    prop_assert_eq!(&section[k], v, "合法键 {}.{} 必须精确生效", target_key, k);
+                }
+            }
+            "monitor" => {
+                let mon = &settings_out["global"]["monitor"];
+                let obj = payload.as_object().expect("monitor 载荷必为对象");
+                // 前端名 → 后端名的 1:1 映射子集
+                const MAP: [(&str, &str); 8] = [
+                    ("check_interval_seconds", "check_interval"),
+                    ("enable_tcp_check", "tcp_enabled"),
+                    ("enable_http_check", "http_enabled"),
+                    ("enable_url_check", "url_enabled"),
+                    ("strict_login_mode", "strict_login_mode"),
+                    ("disable_proxy", "disable_proxy"),
+                    ("network_check_timeout", "tcp_timeout"),
+                    ("post_login_delay", "post_login_delay"),
+                ];
+                for (front, back) in MAP {
+                    if let Some(v) = obj.get(front) {
+                        prop_assert_eq!(&mon[back], v, "monitor.{} → {} 必须精确生效", front, back);
+                    }
+                }
+                if let Some(v) = obj.get("ping_targets") {
+                    prop_assert_eq!(&mon["tcp_targets"], v, "monitor.ping_targets → tcp_targets");
+                }
+                if let Some(v) = obj.get("test_urls") {
+                    prop_assert_eq!(&mon["http_targets"], v, "monitor.test_urls → http_targets");
+                }
+                if let Some(items_v) = obj.get("url_check_urls") {
+                    let items = items_v.as_array().expect("url_check_urls 必为数组");
+                    let mut targets = Vec::new();
+                    let mut expected = serde_json::Map::new();
+                    for raw in items {
+                        let raw = raw.as_str().expect("url_check_urls 条目必为字符串");
+                        if let Some((u, e)) = raw.split_once('|') {
+                            let u = u.trim();
+                            targets.push(Value::String(u.to_owned()));
+                            expected.insert(u.to_owned(), Value::String(e.trim().to_owned()));
+                        } else {
+                            targets.push(Value::String(raw.trim().to_owned()));
+                        }
+                    }
+                    prop_assert_eq!(
+                        &mon["url_targets"],
+                        &Value::Array(targets.clone()),
+                        "url_check_urls → url_targets 拆分"
+                    );
+                    prop_assert_eq!(
+                        &mon["url_expected_responses"],
+                        &Value::Object(expected),
+                        "url_check_urls → url_expected_responses 拆分"
+                    );
+                    // 显式 enable_url_check 优先；缺省时沿用「非空即启用」兼容派生
+                    let expected_enabled = obj
+                        .get("enable_url_check")
+                        .cloned()
+                        .unwrap_or_else(|| json!(!targets.is_empty()));
+                    prop_assert_eq!(
+                        &mon["url_enabled"],
+                        &expected_enabled,
+                        "url_enabled 派生口径"
+                    );
+                }
+                // 未指定的子字段不得被历史默认值覆盖（预设哨兵保持）
+                let sentinels: [(&str, &str, Value); 5] = [
+                    ("check_interval_seconds", "check_interval", json!(123)),
+                    ("enable_tcp_check", "tcp_enabled", json!(false)),
+                    ("enable_url_check", "url_enabled", json!(false)),
+                    ("post_login_delay", "post_login_delay", json!(9)),
+                    ("ping_targets", "tcp_targets", json!(["8.8.8.8:53"])),
+                ];
+                for (front, back, preset) in sentinels {
+                    // url_check_urls 在场时 url_enabled 走派生口径（上面已断言），跳过哨兵
+                    let skip = front == "enable_url_check" && obj.contains_key("url_check_urls");
+                    if !obj.contains_key(front) && !skip {
+                        prop_assert_eq!(
+                            &mon[back],
+                            &preset,
+                            "未指定的 monitor.{} 必须保持预设值",
+                            front
+                        );
+                    }
+                }
+            }
+            "username" | "isp" | "auth_url" | "trigger_url" | "active_task" => {
+                prop_assert_eq!(
+                    &profile_out[key],
+                    payload,
+                    "凭证字段 {} 必须写入活跃 Profile",
+                    key
+                );
+            }
+            "password" => match payload {
+                Value::Null => {
+                    prop_assert_eq!(
+                        &profile_out["password"],
+                        &json!(""),
+                        "password=null 保留原值（预设本就为空）"
+                    );
+                }
+                Value::String(s) if s.is_empty() => {
+                    prop_assert_eq!(
+                        &profile_out["password"],
+                        &json!(""),
+                        "password=\"\" 清除密码"
+                    );
+                }
+                Value::String(s) => {
+                    prop_assert_eq!(
+                        &profile_out["password"],
+                        &json!(format!("ENC:mock:{s}")),
+                        "非空密码经 save_password 加密语义"
+                    );
+                }
+                _ => unreachable!("合法族不含非法 password"),
+            },
+            "network" => {
+                prop_assert_eq!(
+                    &profile_out["network"],
+                    payload,
+                    "network 必须写入活跃 Profile"
+                );
+            }
+            "active_profile_id" => {
+                prop_assert_eq!(&settings_out["active_profile_id"], payload);
+            }
+            "login_channel" | "active_http_task" | "active_script_task" => {
+                prop_assert_eq!(
+                    &profile_out[key],
+                    payload,
+                    "渠道/绑定必须写入活跃 Profile（{}）",
+                    key
+                );
+            }
+            other => unreachable!("未知合法族 {}", other),
+        }
+        Ok(())
+    }
+
+    /// 把合法族去重后合成一个 patch，返回（patch, 生效条目）
+    fn prop_build_patch(families: Vec<PropFamily>) -> (Value, PropFamily) {
+        let mut obj = serde_json::Map::new();
+        let mut applied: PropFamily = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for fam in families {
+            if fam.iter().all(|(k, _)| !seen.contains(k.as_str())) {
+                for (k, v) in fam {
+                    seen.insert(k.clone());
+                    obj.insert(k.clone(), v.clone());
+                    applied.push((k, v));
+                }
+            }
+        }
+        (Value::Object(obj), applied)
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        /// 【属性 P1·①④】任意 patch（合法/必拒/未知键混生，含顶层非对象）：
+        /// 永不 panic，仅产出 Ok 或 4xx 类错误；Ok 时 settings 顶层无未知键污染；
+        /// Err 时两域状态与落盘计数完全不变（原子语义的对外面）。
+        #[test]
+        fn prop_patch_mixed_never_panics(
+            entries in proptest::collection::vec(prop_arb_any_entry(), 0..=6),
+            root_shape in 0u8..=4,
+        ) {
+            prop_block_on(async move {
+                let (config, profiles, tasks, inner) = prop_state();
+                let settings_before = prop_settings_json(&inner);
+                let profile_before = prop_profile_json(&inner);
+                let save_before = inner.lock().unwrap().save_calls;
+
+                // 顶层形状：0=对象 / 1..=4=非对象（数组/字符串/数字/null）
+                let patch = if root_shape == 0 {
+                    let mut obj = serde_json::Map::new();
+                    for fam in entries {
+                        for (k, v) in fam {
+                            obj.insert(k, v);
+                        }
+                    }
+                    Value::Object(obj)
+                } else {
+                    match root_shape {
+                        1 => json!([1, 2, 3]),
+                        2 => json!("not-an-object"),
+                        3 => json!(42),
+                        _ => Value::Null,
+                    }
+                };
+
+                let result = apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await;
+                match result {
+                    Ok(()) => {
+                        if root_shape == 0 {
+                            prop_assert_no_pollution(&prop_settings_json(&inner))?;
+                        } else {
+                            // 非对象 patch：无字段可合并，直接成功不落盘
+                            prop_assert_eq!(
+                                prop_settings_json(&inner),
+                                settings_before,
+                                "非对象 patch 不得改动全局设置"
+                            );
+                            prop_assert_eq!(
+                                prop_profile_json(&inner),
+                                profile_before,
+                                "非对象 patch 不得改动活跃 Profile"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        prop_assert!(
+                            e.status().is_client_error(),
+                            "拒绝必须为 4xx 类错误，实际 {e:?}"
+                        );
+                        prop_assert_eq!(
+                            prop_settings_json(&inner),
+                            settings_before,
+                            "拒绝路径不得改动全局设置"
+                        );
+                        prop_assert_eq!(
+                            prop_profile_json(&inner),
+                            profile_before,
+                            "拒绝路径不得改动活跃 Profile"
+                        );
+                        prop_assert_eq!(
+                            inner.lock().unwrap().save_calls,
+                            save_before,
+                            "拒绝路径不得落盘"
+                        );
+                    }
+                }
+                Ok(())
+            })?;
+        }
+
+        /// 【属性 P2·②】合法 patch 精确生效：随机选定字段深度断言新值（含
+        /// monitor 前后端映射与「非空即启用」派生），未指定字段保持预设；
+        /// settings 顶层无未知键污染。
+        #[test]
+        fn prop_valid_patch_precise_effect(
+            families in proptest::collection::vec(prop_arb_valid_family(), 1..=4),
+        ) {
+            prop_block_on(async move {
+                let (config, profiles, tasks, inner) = prop_state();
+                let (patch, applied) = prop_build_patch(families);
+
+                if let Err(e) = apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await {
+                    return Err(proptest::test_runner::TestCaseError::fail(format!(
+                        "合法 patch 必须成功: {e:?}\npatch: {patch:?}"
+                    )));
+                }
+
+                let settings_out = prop_settings_json(&inner);
+                let profile_out = prop_profile_json(&inner);
+                for (k, v) in &applied {
+                    prop_assert_valid_entry(k, v, &settings_out, &profile_out)?;
+                }
+                prop_assert_no_pollution(&settings_out)?;
+                Ok(())
+            })?;
+        }
+
+        /// 【属性 P3·③】含必拒条目的 patch 一律整体拒绝（4xx），且两域状态与
+        /// 落盘计数完全不变——合并是原子语义，绝不部分生效。
+        #[test]
+        fn prop_patch_rejection_is_atomic(
+            rejects in proptest::collection::vec(prop_arb_reject_entry(), 1..=2),
+            extras in proptest::collection::vec(prop_arb_any_entry(), 0..=3),
+        ) {
+            prop_block_on(async move {
+                let (config, profiles, tasks, inner) = prop_state();
+                let settings_before = prop_settings_json(&inner);
+                let profile_before = prop_profile_json(&inner);
+                let save_before = inner.lock().unwrap().save_calls;
+
+                // 与必拒条目同顶层键的额外条目必须剔除：Map 后写覆盖会让
+                // 「必拒」被合法值顶掉，破坏「必拒」前提
+                let mut obj = serde_json::Map::new();
+                let mut reject_keys = std::collections::HashSet::new();
+                for (k, v) in rejects {
+                    reject_keys.insert(k.clone());
+                    obj.insert(k, v);
+                }
+                for fam in extras {
+                    if fam.iter().any(|(k, _)| reject_keys.contains(k.as_str())) {
+                        continue;
+                    }
+                    for (k, v) in fam {
+                        obj.insert(k, v);
+                    }
+                }
+                let patch = Value::Object(obj);
+
+                let result = apply_flat_settings_patch(&config, &profiles, &tasks, &patch).await;
+                match result {
+                    Ok(()) => Err(proptest::test_runner::TestCaseError::fail(format!(
+                        "含必拒条目的 patch 必须被整体拒绝\npatch: {patch:?}"
+                    ))),
+                    Err(e) => {
+                        prop_assert!(
+                            e.status().is_client_error(),
+                            "拒绝必须为 4xx 类错误，实际 {e:?}"
+                        );
+                        prop_assert_eq!(
+                            prop_settings_json(&inner),
+                            settings_before,
+                            "拒绝路径不得改动全局设置（原子性）"
+                        );
+                        prop_assert_eq!(
+                            prop_profile_json(&inner),
+                            profile_before,
+                            "拒绝路径不得改动活跃 Profile（原子性）"
+                        );
+                        prop_assert_eq!(
+                            inner.lock().unwrap().save_calls,
+                            save_before,
+                            "拒绝路径不得落盘（原子性）"
+                        );
+                        Ok(())
+                    }
+                }
+            })?;
+        }
+
+        /// 【属性 P5·⑤】两次合法 patch 的先后应用 ≡ 等价单次合并应用
+        /// （顶层键不相交的族划分抽样；两域终态逐字段相等）。
+        #[test]
+        fn prop_two_valid_patches_associative(
+            families in proptest::collection::vec(prop_arb_valid_family(), 2..=5),
+        ) {
+            prop_block_on(async move {
+                // 全局去重后按奇偶划分到两个不相交 patch（≥2 条保证两侧非空）
+                let mut seen = std::collections::HashSet::new();
+                let mut distinct: Vec<PropFamily> = Vec::new();
+                for fam in families {
+                    if fam.iter().all(|(k, _)| !seen.contains(k.as_str())) {
+                        for (k, _) in &fam {
+                            seen.insert(k.clone());
+                        }
+                        distinct.push(fam);
+                    }
+                }
+                if distinct.len() < 2 {
+                    // 族去重后不足两条：划分退化，跳过本轮抽样（生成器权重下极少发生）
+                    return Ok(());
+                }
+                let mut map1 = serde_json::Map::new();
+                let mut map2 = serde_json::Map::new();
+                for (i, fam) in distinct.iter().enumerate() {
+                    let target = if i % 2 == 0 { &mut map1 } else { &mut map2 };
+                    for (k, v) in fam {
+                        target.insert(k.clone(), v.clone());
+                    }
+                }
+                let p1 = Value::Object(map1);
+                let p2 = Value::Object(map2);
+                let mut merged = serde_json::Map::new();
+                for (k, v) in p1.as_object().unwrap() {
+                    merged.insert(k.clone(), v.clone());
+                }
+                for (k, v) in p2.as_object().unwrap() {
+                    merged.insert(k.clone(), v.clone());
+                }
+                let merged = Value::Object(merged);
+
+                // 状态 A：先后应用两次
+                let (c1, pr1, t1, inner1) = prop_state();
+                apply_flat_settings_patch(&c1, &pr1, &t1, &p1)
+                    .await
+                    .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("P1 合法必须成功: {e:?}")))?;
+                apply_flat_settings_patch(&c1, &pr1, &t1, &p2)
+                    .await
+                    .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("P2 合法必须成功: {e:?}")))?;
+                // 状态 B：单次合并应用
+                let (c2, pr2, t2, inner2) = prop_state();
+                apply_flat_settings_patch(&c2, &pr2, &t2, &merged)
+                    .await
+                    .map_err(|e| proptest::test_runner::TestCaseError::fail(format!("合并 patch 合法必须成功: {e:?}")))?;
+
+                prop_assert_eq!(
+                    prop_settings_json(&inner1),
+                    prop_settings_json(&inner2),
+                    "settings 终态必须等价（先后应用 ≡ 单次合并）"
+                );
+                prop_assert_eq!(
+                    prop_profile_json(&inner1),
+                    prop_profile_json(&inner2),
+                    "Profile 终态必须等价（先后应用 ≡ 单次合并）"
+                );
+                Ok(())
+            })?;
+        }
     }
 }

@@ -127,7 +127,7 @@ async function restoreAppearance(): Promise<void> {
               max="1"
               step="0.05"
             />
-            <output for="card-opacity">{{ Math.round(appearance.card_opacity * 100) }}%</output>
+            <output for="card-opacity" aria-label="卡片不透明度当前值">{{ Math.round(appearance.card_opacity * 100) }}%</output>
           </div>
         </SettingsRow>
         <SettingsRow>
@@ -143,7 +143,7 @@ async function restoreAppearance(): Promise<void> {
               max="2"
               step="0.1"
             />
-            <output for="border-intensity">{{ appearance.border_intensity.toFixed(1) }}×</output>
+            <output for="border-intensity" aria-label="边框强度当前值">{{ appearance.border_intensity.toFixed(1) }}×</output>
           </div>
         </SettingsRow>
         <SettingsRow label="毛玻璃效果" description="模糊卡片背后的内容；设备性能有限时可关闭">
@@ -167,7 +167,7 @@ async function restoreAppearance(): Promise<void> {
               step="1"
               :disabled="!appearance.backdrop_filter"
             />
-            <output for="card-blur">{{ appearance.card_blur }}px</output>
+            <output for="card-blur" aria-label="玻璃模糊度当前值">{{ appearance.card_blur }}px</output>
           </div>
         </SettingsRow>
       </div>
@@ -252,7 +252,7 @@ async function restoreAppearance(): Promise<void> {
               step="1"
               :disabled="!appearance.background_url"
             />
-            <output for="bg-blur">{{ appearance.background_blur }}px</output>
+            <output for="bg-blur" aria-label="背景模糊度当前值">{{ appearance.background_blur }}px</output>
           </div>
         </SettingsRow>
         <SettingsRow :class="{ disabled: !appearance.background_url }">
@@ -269,7 +269,7 @@ async function restoreAppearance(): Promise<void> {
               step="0.05"
               :disabled="!appearance.background_url"
             />
-            <output for="bg-opacity">{{ Math.round(appearance.background_opacity * 100) }}%</output>
+            <output for="bg-opacity" aria-label="图片可见度当前值">{{ Math.round(appearance.background_opacity * 100) }}%</output>
           </div>
         </SettingsRow>
       </div>
@@ -302,7 +302,7 @@ async function restoreAppearance(): Promise<void> {
               max="1"
               step="0.05"
             />
-            <output for="sidebar-opacity">{{ Math.round(appearance.sidebar_opacity * 100) }}%</output>
+            <output for="sidebar-opacity" aria-label="导航不透明度当前值">{{ Math.round(appearance.sidebar_opacity * 100) }}%</output>
           </div>
         </SettingsRow>
       </div>

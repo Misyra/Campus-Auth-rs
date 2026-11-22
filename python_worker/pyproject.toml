@@ -24,17 +24,14 @@ campus-auth-worker = "worker_main:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# wheel 打包面：仓库根全部 .py 模块（组装门面 + 伴生 Mixin）直落 wheel 根，
+# 供 entry point `worker_main:main` 与 Rust 环境探针导入。hatchling 两个语义坑
+# （tests/test_wheel_packaging.py 钉住）：
+# - packages / only-include 会整体压掉 include——先前 `packages = ["."]` 配
+#   只列 7 个文件的 include 时 include 是死配置，实际打进的是全部跟踪文件；
+# - 通配 * 可跨越路径分隔符，未锚定的 *.py 会把 tests/ 一并带入，故用 / 锚定顶层
 [tool.hatch.build.targets.wheel]
-packages = ["."]
-include = [
-    "worker_main.py",
-    "playwright_worker.py",
-    "step_handlers.py",
-    "variable_resolver.py",
-    "models.py",
-    "ocr_runtime.py",
-    "debug_session.py",
-]
+include = ["/*.py"]
 
 # uv 镜像源配置：使用清华大学 PyPI 镜像加速依赖下载
 [tool.uv]

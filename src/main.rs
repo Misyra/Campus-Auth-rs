@@ -85,8 +85,11 @@ fn main() -> anyhow::Result<()> {
         return handle_autostart(action, &base_path);
     }
 
-    // 控制平面以网络等待为主，限制常驻线程开销；低核设备按实际可用核数创建。
-    let worker_threads = std::thread::available_parallelism().map_or(1, |cpus| cpus.get().min(8));
+    // 单用户本地控制面以网络等待为主，少量 worker 即可承载全站异步任务：
+    // 探测 / 登录 / WS 的并发是 I/O 多路复用而非 CPU 并行，磁盘等重活本就
+    // 走 spawn_blocking 的独立阻塞池、不占 worker；上限 3 已含「登录重试 +
+    // 更新下载 + Web 服务」同跑的余量。低核设备按实际可用核数创建。
+    let worker_threads = std::thread::available_parallelism().map_or(1, |cpus| cpus.get().min(3));
 
     // 4. 构建 tokio Runtime -> block_on(launcher::run)
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -94,19 +97,90 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
 
-    if let Err(e) = runtime.block_on(campus_auth::launcher::run(cli, base_path)) {
-        // launcher 在日志 guard 存活期间已记录并 flush 最终错误；此处只保留
-        // 同步 stderr 兜底，覆盖日志系统尚未初始化或注册失败的极早期错误。
-        eprintln!("启动失败: {e:#}");
-        std::process::exit(1);
+    // macOS 架构（2026-11-21 托盘启用批）：AppKit 要求托盘/菜单构建与事件分发
+    // 都发生在**进程主线程**，且主线程持续运行 NSApplication 事件循环——与
+    // 「主线程 block_on tokio runtime」互斥。故 macOS 下把 launcher 交给专用
+    // 线程执行，主线程接管 AppKit 事件循环（见 run_macos_with_appkit_main_loop）。
+    // Windows 的 GUI 子系统 / attach_parent_console 等分支不受本改动牵连。
+    #[cfg(target_os = "macos")]
+    {
+        run_macos_with_appkit_main_loop(runtime, cli, base_path)
     }
-    // 显式有界关闭，替代 Runtime 的隐式 drop：drop 会无限期等待在途
-    // spawn_blocking 任务完成——启动期后台任务（如环境检查的子进程探测）
-    // 若因外部原因挂起，进程会"已关闭但迟迟不退出"，只能等 30s 退出
-    // watchdog 强杀。优雅关闭已完成、日志已 flush（WorkerGuard 由 launcher::run
-    // 在最终成功/失败日志之后释放），此处仅需给在途阻塞任务一个有限
-    // 的收尾窗口（对齐全项目 stop_with_timeout 的有界关闭哲学）。
-    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Err(e) = runtime.block_on(campus_auth::launcher::run(cli, base_path)) {
+            // launcher 在日志 guard 存活期间已记录并 flush 最终错误；此处只保留
+            // 同步 stderr 兜底，覆盖日志系统尚未初始化或注册失败的极早期错误。
+            eprintln!("启动失败: {e:#}");
+            std::process::exit(1);
+        }
+        // 显式有界关闭，替代 Runtime 的隐式 drop：drop 会无限期等待在途
+        // spawn_blocking 任务完成——启动期后台任务（如环境检查的子进程探测）
+        // 若因外部原因挂起，进程会"已关闭但迟迟不退出"，只能等 30s 退出
+        // watchdog 强杀。优雅关闭已完成、日志已 flush（WorkerGuard 由 launcher::run
+        // 在最终成功/失败日志之后释放），此处仅需给在途阻塞任务一个有限
+        // 的收尾窗口（对齐全项目 stop_with_timeout 的有界关闭哲学）。
+        runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+        Ok(())
+    }
+}
+
+/// macOS 主线程编排：launcher 交专用线程，主线程进入 NSApplication 事件循环
+///
+/// 进程生命周期结构与 AppKit 线程模型的和解（此前 macOS 托盘因此整体禁用）：
+/// - **专用线程**：`runtime.block_on(launcher::run)`。run 返回（无论成败，
+///   优雅关闭已完成、日志已 flush）后做有界 runtime 收尾，随后**由本线程
+///   直接 `std::process::exit` 终结进程**。不押注主线程退出 run loop——
+///   真机实测：`NSApp.stop` 经主队列同步投递确认已执行，但无事件输入的
+///   run loop 永远停在 mach_msg（AppKit 的 stop 标志只在事件 pass 之间被
+///   检查；唤醒需构造 NSEvent 投递，收益纯装饰性）。exit 在任意线程直接
+///   终结全进程，含停留在 run() 中的主线程——与优雅关闭卡死时既有
+///   `spawn_exit_watchdog` 的兜底同机制（成文确认其在本架构下成立）。
+/// - **主线程**：`NSApplication::sharedApplication` + `setActivationPolicy(Accessory)`
+///   （防 Dock 图标，仅保留菜单栏托盘形态）+ `run()` 阻塞接管事件循环，
+///   托盘/菜单的一切 AppKit 调用经主队列投递到本线程执行（见 `src/tray/mod.rs`）。
+/// - run loop 自行退出的极少场景（系统注销等）不主动终结进程：join 等
+///   launcher 线程完成其退出编排，进程终结点始终唯一。
+#[cfg(target_os = "macos")]
+fn run_macos_with_appkit_main_loop(
+    runtime: tokio::runtime::Runtime,
+    cli: CliArgs,
+    base_path: PathBuf,
+) -> anyhow::Result<()> {
+    use objc2::MainThreadMarker;
+
+    let launcher = std::thread::Builder::new()
+        .name("launcher-main".to_string())
+        .spawn(move || {
+            let code = match runtime.block_on(campus_auth::launcher::run(cli, base_path)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    // 与非 macOS 分支同口径：launcher 已记录并 flush 最终错误，
+                    // 此处仅保留同步 stderr 兜底
+                    eprintln!("启动失败: {e:#}");
+                    1
+                }
+            };
+            // 显式有界关闭（口径同非 macOS 分支：给在途 spawn_blocking 一个
+            // 有限收尾窗口，不无限期等待）
+            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+            // 优雅关闭已完成、日志已 flush：直接终结进程（语义见函数 doc）。
+            // launcher 线程的存在让这里不经过 main 返回路径，退出码语义不变
+            std::process::exit(code);
+        })?;
+
+    // 主线程：接管 AppKit（此处在 main() 所在线程，必然是进程主线程）。
+    // sharedApplication/setActivationPolicy/run 均为安全绑定
+    // （MainThreadMarker 已在类型层面证明主线程）
+    let mtm = MainThreadMarker::new().expect("main() 所在线程即进程主线程");
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    app.run();
+
+    // 兜底：run loop 自行退出（罕见）——不终结进程，等 launcher 线程的
+    // 退出编排落地（正常情况下本 join 不会返回：launcher 线程以 exit 收尾）
+    let _ = launcher.join();
     Ok(())
 }
 
@@ -162,9 +236,10 @@ fn handle_stop(base_path: &Path) -> anyhow::Result<()> {
 /// 注册 / 取消开机自启动
 fn handle_autostart(action: &AutostartAction, _base_path: &Path) -> anyhow::Result<()> {
     let enabled = matches!(action, AutostartAction::Enable);
-    #[cfg(windows)]
+    // Windows/macOS 同口径：把数据目录与来源标记一并登记，便于启动状态复核
+    #[cfg(any(windows, target_os = "macos"))]
     campus_auth::utils::platform::set_self_start_for_base(enabled, _base_path)?;
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     campus_auth::utils::platform::set_self_start(enabled)?;
     if enabled {
         println!("已注册开机自启动");

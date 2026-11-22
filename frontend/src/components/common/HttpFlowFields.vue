@@ -209,8 +209,8 @@ function setResultStep(event: Event): void {
           placeholder="http://10.0.0.1/（留空时使用方案的认证地址）" />
       </div>
       <div class="form-group flow-cert">
-        <label>HTTPS 证书</label>
-        <CustomSelect v-model="certPolicy" :options="HTTP_CERT_POLICY_OPTIONS" />
+        <label :for="`${uid}-cert-policy`">HTTPS 证书</label>
+        <CustomSelect v-model="certPolicy" :options="HTTP_CERT_POLICY_OPTIONS" :trigger-id="`${uid}-cert-policy`" />
       </div>
       </div>
     </details>
@@ -259,15 +259,24 @@ function setResultStep(event: Event): void {
       <template v-if="step.kind === 'request'">
         <div class="form-row flow-address-row">
           <div class="form-group flow-method">
-            <label>请求方式</label>
-            <CustomSelect :model-value="step.method" :options="HTTP_METHOD_OPTIONS" aria-label="请求方式" @update:model-value="setStepMethod(step, $event)" />
+            <label :for="`${uid}-${step.id}-method`">请求方式</label>
+            <CustomSelect :model-value="step.method" :options="HTTP_METHOD_OPTIONS" :trigger-id="`${uid}-${step.id}-method`" @update:model-value="setStepMethod(step, $event)" />
           </div>
           <div class="form-group">
             <label :for="`${uid}-${step.id}-url`">请求地址</label>
-            <input :id="`${uid}-${step.id}-url`" v-model.trim="step.url" type="text" placeholder="http://10.0.0.1/login" @focus="activeFields[step.id] = 'url'" @input="enableFlow" />
+            <!-- 密码进 URL 的风险提示经 aria-describedby 直连本输入框（危险操作提示→触发控件） -->
+            <input
+              :id="`${uid}-${step.id}-url`"
+              v-model.trim="step.url"
+              type="text"
+              placeholder="http://10.0.0.1/login"
+              :aria-describedby="isCredentialExposedViaGet(step.method, step.url) ? `${uid}-${step.id}-url-risk` : undefined"
+              @focus="activeFields[step.id] = 'url'"
+              @input="enableFlow"
+            />
           </div>
         </div>
-        <p v-if="isCredentialExposedViaGet(step.method, step.url)" class="note note--warn">
+        <p v-if="isCredentialExposedViaGet(step.method, step.url)" :id="`${uid}-${step.id}-url-risk`" class="note note--warn">
           此步骤把密码放进 URL，网关或代理的日志可能记录完整地址；门户支持时优先使用 POST。
         </p>
         <p class="flow-help">{{ step.method === 'POST' ? 'POST：地址填写接口，请求内容写在下面。' : 'GET：参数直接写在地址里，例如 /login?username={username}。' }}</p>
@@ -303,10 +312,12 @@ function setResultStep(event: Event): void {
           </label>
         <div class="form-row">
           <div class="form-group">
-            <label>请求失败时</label>
-            <CustomSelect :model-value="step.on_error" :options="errorOptions" :disabled="step.id === model.result_step_id"
+            <label :for="`${uid}-${step.id}-on-error`">请求失败时</label>
+            <CustomSelect :model-value="step.on_error" :options="errorOptions" :trigger-id="`${uid}-${step.id}-on-error`" :disabled="step.id === model.result_step_id"
+              :aria-describedby="step.id === model.result_step_id ? `${uid}-${step.id}-on-error-why` : undefined"
               @update:model-value="setStepError(step, $event)" />
-            <span v-if="step.id === model.result_step_id" class="hint">结果来源步骤必须停止并报告失败。</span>
+            <!-- 禁用原因直连控件：屏读器聚焦禁用态时仍能读到"为什么不可改" -->
+            <span v-if="step.id === model.result_step_id" :id="`${uid}-${step.id}-on-error-why`" class="hint">结果来源步骤必须停止并报告失败。</span>
           </div>
           <div class="form-group">
             <label :for="`${uid}-${step.id}-wait`">请求后等待（秒）</label>
@@ -354,8 +365,8 @@ function setResultStep(event: Event): void {
           </select>
         </div>
         <div class="form-group">
-          <label>判断方式</label>
-          <CustomSelect v-model="successCheck" :options="successOptions" aria-label="判断方式" />
+          <label :for="`${uid}-success-check`">判断方式</label>
+          <CustomSelect v-model="successCheck" :options="successOptions" :trigger-id="`${uid}-success-check`" />
         </div>
       </div>
       <p v-if="successCheck === 'network'" class="flow-help flow-result-help">正式登录后检查能否访问外网。下方试运行只检查请求与响应，联网结果需要在方案中登录确认。</p>
@@ -372,8 +383,8 @@ function setResultStep(event: Event): void {
           <span class="hint">如果同时出现成功与失败提示，优先按失败处理。</span>
         </div>
         <div class="form-group">
-          <label>出现该提示后</label>
-          <CustomSelect v-model="failureAction" :options="HTTP_FAILURE_ACTION_OPTIONS" aria-label="失败处理方式" />
+          <label :for="`${uid}-failure-action`">出现该提示后</label>
+          <CustomSelect v-model="failureAction" :options="HTTP_FAILURE_ACTION_OPTIONS" :trigger-id="`${uid}-failure-action`" />
         </div>
       </details>
     </section>
@@ -384,6 +395,8 @@ function setResultStep(event: Event): void {
 
 <style scoped>
 .flow-editor { display: flex; flex-direction: column; gap: 22px; }
+.flow-connection { border: 0; }
+.flow-connection > summary { padding-top: 0; }
 .flow-editor > .flow-connection { max-width: 1280px; }
 .flow-workspace { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 24px; }
 .flow-sequence { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
@@ -391,7 +404,6 @@ function setResultStep(event: Event): void {
 .flow-list-heading > div { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .flow-list-heading strong { font-size: 15px; font-weight: 700; }
 .flow-step-count { padding: 3px 8px; border-radius: 999px; background: rgba(var(--accent-rgb), .1); color: var(--text-primary); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 650; }
-.flow-list-heading .hint { font-size: 12px; }
 .flow-collapse-all { flex: none; padding: 6px 9px; border: 0; border-radius: 7px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
 .flow-collapse-all:hover { color: var(--text-primary); background: var(--bg-card-elevated); }
 .flow-step { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-card); }
@@ -401,6 +413,9 @@ function setResultStep(event: Event): void {
 .flow-step:not(.flow-step--open) .flow-step-head { border-radius: 11px; }
 .flow-step-toggle { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 16px; align-self: stretch; padding: 16px 15px 16px 18px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .flow-step-toggle:hover { background: rgba(var(--accent-rgb), .045); }
+.flow-action { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.flow-action :deep(svg) { width: 17px; height: 17px; }
+.flow-action:disabled { opacity: .35; cursor: not-allowed; }
 .flow-step-toggle:focus-visible, .flow-action:focus-visible, .flow-collapse-all:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .flow-step-number { display: inline-flex; flex: 0 0 38px; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 11px; color: var(--on-accent); background: var(--accent); font-size: 15px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .flow-step-copy { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; gap: 6px; }
@@ -412,10 +427,7 @@ function setResultStep(event: Event): void {
 .flow-step-chevron { flex: none; color: var(--text-secondary); transition: transform .16s ease; }
 .flow-step-chevron--open { transform: rotate(180deg); }
 .flow-step-actions { display: flex; flex: none; align-items: center; gap: 3px; padding: 0 13px 0 6px; }
-.flow-action { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
-.flow-action :deep(svg) { width: 17px; height: 17px; }
 .flow-action:hover:not(:disabled) { color: var(--text-primary); background: rgba(var(--accent-rgb), .1); }
-.flow-action:disabled { opacity: .35; cursor: not-allowed; }
 .flow-action--danger:hover:not(:disabled) { color: var(--danger); background: rgba(239, 68, 68, .09); }
 .flow-action-divider { width: 1px; height: 18px; margin: 0 4px; background: var(--border); }
 .flow-step-body { display: flex; flex-direction: column; gap: 14px; padding: 20px 24px 24px; border-top: 1px solid var(--border); }
@@ -434,36 +446,37 @@ function setResultStep(event: Event): void {
 .flow-result-heading p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .flow-result > .form-row, .flow-result > .form-group { max-width: 940px; }
 .flow-result--side { position: static; padding: 20px; }
-.flow-result--side .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
-.flow-result--side > .form-group:last-child { margin-bottom: 0; }
+.flow-result--side .form-row { --form-row-cols: minmax(0, 1fr); --form-row-gap: 0; }
+.flow-step-body .form-group { --form-group-margin: 0; }
+.flow-result--side > .form-group:last-child { --form-group-margin: 0; }
 .flow-intro, .flow-help { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .flow-intro { max-width: 75ch; margin-bottom: 4px; }
-.flow-step-body .form-group { margin-bottom: 0; }
 .flow-options { border-top: 1px solid var(--border); }
 .flow-options > summary { padding: 15px 0; cursor: pointer; font-size: 13px; font-weight: 650; }
 .flow-options > summary span { margin-left: 8px; color: var(--text-secondary); font-size: 12px; font-weight: 400; }
-.flow-connection { border: 0; }
-.flow-connection > summary { padding-top: 0; }
+.flow-other-values summary { font-size: 12px; cursor: pointer; color: var(--text-secondary); }
+.flow-other-values[open] { display: flex; flex-direction: column; gap: 8px; }
 .flow-advanced[open] { display: flex; flex-direction: column; gap: 14px; }
 .flow-advanced[open] > summary { padding-bottom: 0; }
-.flow-failure .form-group:last-child { margin-bottom: 0; }
+.flow-failure .form-group:last-child { --form-group-margin: 0; }
 .flow-result-help { margin-bottom: 16px; }
 .flow-values { display: flex; flex-direction: column; gap: 8px; }
 .flow-value-buttons { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 12px; color: var(--text-secondary); }
 .flow-value-button { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card); color: var(--text-primary); font: inherit; font-size: 12px; cursor: pointer; }
 .flow-value-button:hover { border-color: var(--accent); }
 .flow-value-button code { font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere; }
-.flow-other-values summary { font-size: 12px; cursor: pointer; color: var(--text-secondary); }
-.flow-other-values[open] { display: flex; flex-direction: column; gap: 8px; }
 .flow-options > summary:focus-visible, .flow-other-values summary:focus-visible, .flow-value-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .flow-script { font-family: var(--font-mono); }
 .flow-script-hint code { font-family: var(--font-mono); color: var(--text-primary); }
 @media (min-width: 1800px) {
   .flow-workspace:has(> .flow-result) { grid-template-columns: minmax(0, 1.35fr) minmax(360px, .85fr); }
   .flow-workspace > .flow-result { position: sticky; top: 104px; }
-  .flow-workspace > .flow-result .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .flow-workspace > .flow-result .form-row { --form-row-cols: minmax(0, 1fr); --form-row-gap: 0; }
 }
-@media (max-width: 700px) {
+/* 700 并入全局 768 档（index.css 断点约定清单）：步骤头紧凑化与其他表单块的
+   窄屏降级同档触发，768–701 区间提前进入紧凑态，避免两档之间夹 22px 的
+   「半窄带」；降级只早不晚 */
+@media (max-width: 768px) {
   .flow-step-head { align-items: stretch; flex-wrap: wrap; }
   .flow-step-toggle { min-height: 72px; }
   .flow-step-titleline { flex-wrap: wrap; row-gap: 4px; }

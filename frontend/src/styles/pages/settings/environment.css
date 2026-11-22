@@ -92,17 +92,9 @@
   justify-content: center;
 }
 
-@media (min-width: 1100px) {
-  .environment-page.settings-panel-grid--cols2 > .settings-panel:not(.settings-panel--wide) {
-    display: flex;
-    flex-direction: column;
-  }
-  .environment-page.settings-panel-grid--cols2 > .settings-panel:not(.settings-panel--wide) .card-body {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-  }
-}
+/* `.environment-page.settings-panel-grid--cols2` 窄卡拉伸规则已于 2026-11-13 删除：
+   settings-panel-grid--cols2 在模板中零引用（P2-1 死规则群，与 settings/common.css
+   的清理同批） */
 
 /* Python 环境可折叠卡：头部即切换按钮，就绪自动折叠、异常自动展开；chevron 展开朝下、折叠朝右 */
 .env-collapse-header {

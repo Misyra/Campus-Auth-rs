@@ -12,16 +12,158 @@ use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 use crate::bridge::BridgeApi;
 use crate::browser::{is_chrome_installed, is_edge_installed};
 use crate::updater::UpdaterApi;
 use crate::web::error::{ApiError, data};
+use crate::web::openapi::schemas::{DataEnvelope, ErrorResponse};
 use crate::web::state::AppState;
 
+// ---- 契约 DTO（T5-0 样板域）----
+//
+// 以下 `XxxData` 是 openapi 生成管线的 schema 载荷（信封与引用规范见
+// `crate::web::openapi::schemas` 模块说明）。样板阶段以「注解 + DTO」声明
+// 契约，handler 仍走 `data(json!({...}))` 组装；后续批次以 [`health_check`]
+// 为模板逐步把 handler 换成强类型返回 `Json<DataEnvelope<XxxData>>`。
+
+/// GET /api/health 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HealthData {
+    /// 固定为 "ok"
+    pub status: String,
+    /// 主程序版本
+    pub version: String,
+}
+
+/// GET /api/init-status 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InitStatusData {
+    /// 用户是否已同意使用协议（`config/.agreed` 标记文件）
+    pub agreed: bool,
+    /// 环境能力是否整体就绪（等价 `environment.capability_ready`）
+    pub ready: bool,
+    /// 方案密码解密是否失败（true 时前端提示重新输入密码）
+    pub password_decryption_failed: bool,
+    /// 环境就绪明细
+    pub environment: EnvReadiness,
+}
+
+/// 环境就绪明细（uv / Python / Worker / Playwright / OCR）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EnvReadiness {
+    /// uv 是否已下载就绪
+    pub uv_ready: bool,
+    /// Python 虚拟环境是否就绪
+    pub python_ready: bool,
+    /// Playwright Python 包与 Worker 模块是否可导入且版本匹配
+    pub worker_ready: bool,
+    /// 当前依赖清单是否已有成功验证过的同指纹状态
+    pub manifest_current: bool,
+    /// Playwright 浏览器是否已安装
+    pub playwright_ready: bool,
+    /// 系统 Edge/Chrome 是否可作为无需下载的浏览器后端
+    pub system_browser_ready: bool,
+    /// 用户是否希望启用 OCR 可选能力
+    pub ocr_enabled: bool,
+    /// ddddocr 是否已存在于当前 venv
+    pub ocr_ready: bool,
+    /// 浏览器自动化能力是否完全就绪
+    pub capability_ready: bool,
+    /// 当前安装阶段名（`BootstrapStage` 的 Debug 字面量，如 "Idle"）
+    pub stage: String,
+    /// 安装进度（进行中才有）
+    pub progress: Option<EnvProgress>,
+    /// 最后的错误消息
+    pub last_error: Option<String>,
+}
+
+/// 安装进度（对齐 `crate::status::snapshot::InstallProgress` 的线格式）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EnvProgress {
+    /// 阶段标识
+    pub phase: String,
+    /// 百分比 0~100
+    pub percent: u8,
+    /// 人类可读消息
+    pub message: String,
+}
+
+/// GET /api/system/info 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SystemInfoData {
+    /// 主程序版本
+    pub version: String,
+    /// 数据根目录（安装目录）
+    pub base_path: String,
+    /// 是否路由器版构建（openwrt feature）
+    pub openwrt: bool,
+    /// 实际监听端口（运行时端口文件优先，回退配置值）
+    pub port: u16,
+    /// 活跃方案 ID
+    pub active_profile_id: String,
+    /// 操作系统（`std::env::consts::OS`）
+    pub platform: String,
+    /// 运行指标快照
+    pub metrics: MetricsSummary,
+}
+
+/// 运行指标快照（`crate::utils::metrics::Metrics` 的原子计数读数）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MetricsSummary {
+    /// 累计登录次数
+    pub login_total: u64,
+    /// 累计登录成功次数
+    pub login_success_total: u64,
+    /// 累计登录失败次数
+    pub login_failure_total: u64,
+    /// 累计登录取消次数
+    pub login_cancel_total: u64,
+    /// 累计探测次数
+    pub probe_total: u64,
+    /// 探测平均耗时（毫秒）
+    pub probe_duration_ms_avg: u64,
+    /// Worker 启动次数
+    pub worker_spawn_total: u64,
+    /// Worker 崩溃次数
+    pub worker_crash_total: u64,
+    /// 文件日志丢弃行数（写入失败时的丢包计数）
+    pub file_log_dropped_lines: u64,
+    /// 运行时长（秒）
+    pub uptime_seconds: u64,
+}
+
+/// POST /api/worker/stop 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WorkerStopData {
+    /// 是否已触发停止
+    pub stopped: bool,
+}
+
+/// POST /api/install/playwright 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InstallPlaywrightData {
+    /// 实际安装的浏览器引擎名（归一化小写）
+    pub browser: String,
+    /// 恒为 true（失败直接走错误响应）
+    pub installed: bool,
+    /// 面向用户的提示消息
+    pub message: String,
+}
+
 /// GET /api/system/info — 系统基本信息
+#[utoipa::path(
+    get,
+    path = "/api/system/info",
+    operation_id = "get_api_system_info",
+    tag = "system",
+    responses(
+        (status = 200, description = "版本、数据目录、监听端口与运行指标", body = DataEnvelope<SystemInfoData>),
+    )
+)]
 pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 读无锁运行时快照，避免每次请求走磁盘 mtime 校验（A2）
     let rt = state.config.runtime_snapshot();
@@ -31,6 +173,7 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
         "version": env!("CARGO_PKG_VERSION"),
         "base_path": base_path.to_string_lossy(),
         "openwrt": cfg!(feature = "openwrt"),
+        "android": cfg!(feature = "android"),
         // 实际监听端口优先读运行时端口文件：`--port` CLI 覆盖与冲突重试
         // 只体现在该文件；无文件（如轻量模式未启动 Web）时回退配置值。
         "port": crate::utils::paths::read_runtime_port(&base_path).unwrap_or(rt.app.port),
@@ -52,6 +195,22 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
     Ok(data(info))
 }
 
+/// 安卓构建的端内重启/关闭拒绝文案（P2-9）：`Some` = 拒绝并返回 400，`None` = 放行
+///
+/// 桌面退出链（spawn 后继进程 + 30s exit watchdog 硬杀全进程）放在安卓上会带走
+/// 承载认证守护的前台服务、残留 `.runtime_port`，重启路径还会 spawn
+/// `app_process64 --restarting` 垃圾进程；应用的停止/重启一律经系统方式
+/// （最近任务划掉 / 系统设置强行停止），端内按钮必须拒绝。对照 uninstall /
+/// autostart 的 android 门先例。
+fn android_lifecycle_rejection() -> Option<String> {
+    if !cfg!(feature = "android") {
+        return None;
+    }
+    Some(String::from(
+        "安卓端不支持端内重启或关闭：请通过系统方式（最近任务或系统设置）停止应用",
+    ))
+}
+
 /// POST /api/system/restart — 重启应用（spawn 带 `--restarting` 的新进程后优雅退出）
 ///
 /// 新进程带 `--restarting` 标记，launcher 会先等待旧进程释放实例锁再启动，
@@ -65,7 +224,22 @@ pub async fn system_info(State(state): State<AppState>) -> Result<Json<Value>, A
 /// （os error 32，曾导致"下载完成却无法更新"）。此时走纯退出，由已等待的
 /// 更新助手完成替换并用新 exe 重启（关机路径 `ensure_helper_for_shutdown`
 /// 会兜底补唤醒助手）。
+#[utoipa::path(
+    post,
+    path = "/api/system/restart",
+    operation_id = "post_api_system_restart",
+    tag = "system",
+    responses(
+        (status = 200, description = "已开始优雅关闭，后继进程正在生成", body = DataEnvelope<String>),
+        (status = 500, description = "后继进程生成失败", body = ErrorResponse),
+    )
+)]
 pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    // P2-9 安卓门：桌面重启链对安卓是进程级硬杀（前台服务连坐 + 端口文件残留）
+    if let Some(message) = android_lifecycle_rejection() {
+        tracing::info!("安卓构建：拒绝端内重启请求");
+        return Err(ApiError::BadRequest(message));
+    }
     if state.updater.has_pending_update() {
         // 生命周期事件：重启是关键用户操作，info 留痕（分支措辞与实际行为一致，
         // 便于从日志区分"生成后继"与"助手替换后重启"两种重启路径）
@@ -86,7 +260,21 @@ pub async fn restart_app(State(state): State<AppState>) -> Result<Json<Value>, A
 /// 不再使用 exit(0)；launcher 收到 shutdown_tx 信号后依次停止 Engine/Scheduler/
 /// Bridge/Tray/Axum，所有服务在各自 event loop 内清理资源后再退出进程。
 /// 若 30s 后仍未退出（优雅关闭挂死），最后防线才是 exit(0)。
+#[utoipa::path(
+    post,
+    path = "/api/system/shutdown",
+    operation_id = "post_api_system_shutdown",
+    tag = "system",
+    responses(
+        (status = 200, description = "已开始优雅关闭", body = DataEnvelope<String>),
+    )
+)]
 pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    // P2-9 安卓门：exit watchdog 硬杀全进程会带走前台服务，停止应用交由系统方式
+    if let Some(message) = android_lifecycle_rejection() {
+        tracing::info!("安卓构建：拒绝端内关闭请求");
+        return Err(ApiError::BadRequest(message));
+    }
     // 生命周期事件：关闭是关键用户操作，info 留痕
     tracing::info!("收到关闭请求，开始优雅关闭");
     // 通知 launcher 开始优雅关闭
@@ -97,6 +285,16 @@ pub async fn shutdown_app(State(state): State<AppState>) -> Result<Json<Value>, 
 }
 
 /// POST /api/agree — 用户同意协议（设置向导完成）
+#[utoipa::path(
+    post,
+    path = "/api/agree",
+    operation_id = "post_api_agree",
+    tag = "system",
+    responses(
+        (status = 200, description = "同意时间已写入 config/.agreed", body = DataEnvelope<String>),
+        (status = 500, description = "标记文件写入失败", body = ErrorResponse),
+    )
+)]
 pub async fn agree_terms(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     // 标记用户已同意协议（写入配置或标记文件）
     let config_dir = state.config.base_path().join("config");
@@ -106,14 +304,38 @@ pub async fn agree_terms(State(state): State<AppState>) -> Result<Json<Value>, A
 }
 
 /// GET /api/health — 健康检查
-pub async fn health_check() -> Json<Value> {
-    data(serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
+///
+/// 样板域全链路参考实现：handler 直接返回强类型 `Json<DataEnvelope<HealthData>>`，
+/// 线格式与旧 `data(json!({...}))` 完全一致（`{"data":{"status":"ok","version":…}}`），
+/// 后续域批次可照此把注解 DTO 升级为真实返回类型。
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    operation_id = "get_api_health",
+    tag = "system",
+    responses(
+        (status = 200, description = "服务存活与版本信息", body = DataEnvelope<HealthData>),
+    )
+)]
+pub async fn health_check() -> Json<DataEnvelope<HealthData>> {
+    Json(DataEnvelope {
+        data: HealthData {
+            status: "ok".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    })
 }
 
 /// GET /api/init-status — 初始化状态
+#[utoipa::path(
+    get,
+    path = "/api/init-status",
+    operation_id = "get_api_init_status",
+    tag = "system",
+    responses(
+        (status = 200, description = "协议同意状态与环境就绪明细", body = DataEnvelope<InitStatusData>),
+    )
+)]
 pub async fn init_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let config_dir = state.config.base_path().join("config");
     let agreed = config_dir.join(".agreed").exists();
@@ -171,6 +393,17 @@ pub(crate) fn read_log_tail(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// 解析 GET /api/logs 的 `limit` 查询参数
+///
+/// 缺省 / 非数字 / `0` 一律回退默认 200——`0` 会让 `take(0)` 得到空数组，等同
+/// 坏参而非"真要 0 条"；超出上限时钳制到 2000，避免传 99999999 全量解析 MB 级日志。
+fn parse_limit_param(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(200)
+        .min(2000)
+}
+
 /// GET /api/logs — 读取最新日志文件内容（实时日志通过 WebSocket 推送）
 ///
 /// 日志文件为 tracing JSON 格式（每行一个 JSON 对象），解析后返回前端期望的
@@ -179,12 +412,7 @@ pub async fn fetch_logs(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(200)
-        // 钳制上限，避免传 99999999 全量解析 MB 级日志
-        .min(2000);
+    let limit = parse_limit_param(params.get("limit").map(String::as_str));
     let logs_dir = state.config.base_path().join("logs");
     // 日志文件可能达 MB 级，read_dir + 尾部读取 + JSON 解析为阻塞 I/O 与 CPU 密集操作，
     // 整体放入 spawn_blocking 避免阻塞 tokio worker 线程
@@ -437,9 +665,9 @@ pub async fn export_logs(
             .unix_permissions(0o644);
         let mut write_entry = |name: &str, bytes: &[u8]| -> Result<(), ApiError> {
             zw.start_file(name, opts)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+                .map_err(|e| ApiError::Internal(format!("写入日志包失败: {e}")))?;
             zw.write_all(bytes)
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+                .map_err(|e| ApiError::Internal(format!("写入日志包失败: {e}")))?;
             Ok(())
         };
         write_entry("README.txt", readme.as_bytes())?;
@@ -447,7 +675,8 @@ pub async fn export_logs(
         for (rel, bytes) in &files {
             write_entry(rel, bytes)?;
         }
-        zw.finish().map_err(|e| ApiError::Internal(e.to_string()))?;
+        zw.finish()
+            .map_err(|e| ApiError::Internal(format!("写入日志包失败: {e}")))?;
     }
     let bytes = buf.into_inner();
     let filename = format!("campus-auth-logs-{stamp}.zip");
@@ -488,10 +717,40 @@ pub async fn check_update(
     }
 }
 
+/// 上次更新检查状态载荷（`updater::LastCheckState` 的线格式镜像，字段一一对应；
+/// 漂移由 `update_state_data_matches_last_check_state_wire_shape` 守卫钉住）
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct UpdateStateData {
+    /// 上次检查时间（UTC RFC3339；从未检查过为空串）
+    pub last_check_at: String,
+    /// 是否发现更新（检查失败时为 false）
+    pub has_update: bool,
+    /// 远程最新版本号（检查失败或从未检查为空串）
+    pub latest_version: String,
+    /// 上次检查失败原因（成功时为空串）
+    pub error: String,
+    /// 远程发布是否缺少当前平台的安装包（区分"已是最新"与"无本平台包"）
+    pub platform_unavailable: bool,
+    /// 已见过的最高清单版本（版本回滚保护记忆；空串 = 尚无记录）
+    pub highest_seen_version: String,
+    /// `highest_seen_version` 对应的更新通道键（"stable"/"prerelease"/"all"）
+    pub highest_seen_channel: String,
+}
+
 /// GET /api/update-state — 上次更新检查状态（设置页"上次检查时间"数据源）
 ///
 /// 只读回放 `update/last_check.json`：手动"立即检查"与后台自动检查成功/失败
-/// 都会刷新；文件缺失（从未检查过）返回空对象，由前端显示"从未检查"。
+/// 都会刷新；文件缺失（从未检查过）时各字段为默认空值，由前端显示"从未检查"。
+#[utoipa::path(
+    get,
+    path = "/api/update-state",
+    operation_id = "get_api_update_state",
+    tag = "system",
+    responses(
+        (status = 200, description = "上次更新检查状态（从未检查过时字段为默认空值）", body = DataEnvelope<UpdateStateData>),
+        (status = 500, description = "状态序列化失败", body = ErrorResponse),
+    )
+)]
 pub async fn update_state(
     State(updater): State<Arc<dyn UpdaterApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -519,7 +778,8 @@ impl ApplyUpdateBody {
     /// 三项齐备且通过安全校验时，构造可直接下发的 [`UpdateInfo`]
     ///
     /// 任一校验不通过返回 `None`，调用方回退到服务端重新拉取清单。
-    fn into_pinned(self) -> Option<crate::updater::UpdateInfo> {
+    /// `updater` 用于查询版本单调闸门：pin 不走清单，但回滚保护记忆仍适用。
+    fn into_pinned(self, updater: &dyn UpdaterApi) -> Option<crate::updater::UpdateInfo> {
         let (version, url, sha256) = (self.version?, self.url?, self.sha256?);
         // 与下载路径同一白名单：https 放行，http 仅精确回环。
         // pin 允许任意 https host 并未放宽信任面——release_source_url 本就
@@ -540,6 +800,15 @@ impl ApplyUpdateBody {
         let remote = semver::Version::parse(&version).ok()?;
         if !crate::updater::check::compare_versions(&current, &remote) {
             tracing::warn!(%version, "拒绝固定版本更新：不高于当前版本");
+            return None;
+        }
+        // pin 不走清单（省一次全量清单 + sha 伴随文件拉取），因此天然绕过清单
+        // 路径的版本单调闸门；此处补同一闸门：pinned version 落在
+        // 「> 当前 && < 同通道已见最高」区间即疑似驱动降级安装（前端快照可能
+        // 是重放的旧版本），warn 后回退 `None` 走服务端重查——重查路径自带
+        // ensure_manifest_not_rollback 与签名校验
+        if !updater.pinned_version_allowed(&version) {
+            tracing::warn!(%version, "拒绝固定版本更新：低于同通道已见最高版本（疑似回滚），回退服务端重查");
             return None;
         }
         Some(crate::updater::UpdateInfo {
@@ -570,7 +839,7 @@ pub async fn apply_update(
     State(updater): State<Arc<dyn UpdaterApi>>,
     body: Option<Json<ApplyUpdateBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let info = match body.and_then(|Json(b)| b.into_pinned()) {
+    let info = match body.and_then(|Json(b)| b.into_pinned(updater.as_ref())) {
         Some(pinned) => {
             tracing::info!(version = %pinned.latest_version, "使用前端确认的固定版本");
             pinned
@@ -766,6 +1035,20 @@ async fn perform_playwright_install(
 ///
 /// `?browser=chromium|firefox|webkit`；省略参数保持旧行为，默认 Chromium。
 /// 请求会等待安装完成：后端失败直接返回错误，避免前端只能长时间轮询猜测结果。
+#[utoipa::path(
+    post,
+    path = "/api/install/playwright",
+    operation_id = "post_api_install_playwright",
+    tag = "system",
+    params(
+        ("browser" = Option<String>, Query, description = "要安装的浏览器引擎：chromium/firefox/webkit；省略或空值回退 chromium"),
+    ),
+    responses(
+        (status = 200, description = "安装完成", body = DataEnvelope<InstallPlaywrightData>),
+        (status = 400, description = "不支持的浏览器名", body = ErrorResponse),
+        (status = 500, description = "下载或安装失败", body = ErrorResponse),
+    )
+)]
 pub async fn install_playwright(
     State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
     Query(params): Query<InstallPlaywrightQuery>,
@@ -812,6 +1095,124 @@ pub async fn bootstrap_environment(
         "progress": st.progress,
         "last_error": st.last_error,
     })))
+}
+
+/// 下载源选择偏好线格式（`environment::MirrorChoice` 的镜像：`{"choice":"auto"}` /
+/// `{"choice":"direct"}` / `{"choice":"mirror","mirror":"<前缀>"}`）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorSelectionData {
+    /// 选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像）
+    pub choice: String,
+    /// 镜像前缀（choice=mirror 时必在镜像名单内；其余选择无该字段）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<String>,
+}
+
+/// 单个下载源的测速结果（`environment::MirrorProbeEntry` 线格式镜像）
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorProbeEntryData {
+    /// 源类型：direct（GitHub 直连）/ mirror（代理镜像）
+    pub kind: String,
+    /// 镜像前缀（直连为空串；选中偏好即存该值）
+    pub prefix: String,
+    /// 展示名（host，如 github.com / gh-proxy.com）
+    pub label: String,
+    /// 是否测得数据（false = 超时/失败/零字节，UI 显示「不可用」）
+    pub ok: bool,
+    /// 已测字节数
+    pub bytes: u64,
+    /// 总耗时（毫秒）
+    pub elapsed_ms: u64,
+    /// 实测吞吐（字节/秒，失败为 0）
+    pub throughput: u64,
+}
+
+/// POST /api/environment/mirror-probe 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorProbeData {
+    /// 当前选源偏好（与测速结果一并返回，弹窗打开即选中对应行）
+    pub selected: MirrorSelectionData,
+    /// 逐源实测吞吐结果
+    pub results: Vec<MirrorProbeEntryData>,
+}
+
+/// PUT /api/environment/mirror-preference 响应载荷
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MirrorPreferenceData {
+    /// 保存后的选源偏好（回显）
+    pub selected: MirrorSelectionData,
+}
+
+/// POST /api/environment/mirror-probe — 并发测速 GitHub 直连与各镜像源
+///
+/// 初始化弹窗镜像选择行的数据源：每次调用都实测（对 uv 发布资产 Range 拉取
+/// 256KiB），返回逐源吞吐结果与当前选源偏好（auto/direct/mirror）。
+#[utoipa::path(
+    post,
+    path = "/api/environment/mirror-probe",
+    operation_id = "post_api_environment_mirror_probe",
+    tag = "system",
+    responses(
+        (status = 200, description = "逐源实测吞吐结果与当前选源偏好", body = DataEnvelope<MirrorProbeData>),
+        (status = 500, description = "偏好序列化失败", body = ErrorResponse),
+    )
+)]
+pub async fn probe_environment_mirrors(
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+) -> Result<Json<Value>, ApiError> {
+    let results = environment.probe_mirrors().await;
+    let selected = environment.mirror_choice();
+    let selected = serde_json::to_value(&selected)
+        .map_err(|e| ApiError::Internal(format!("选源偏好序列化失败: {e}")))?;
+    Ok(data(serde_json::json!({
+        "selected": selected,
+        "results": results,
+    })))
+}
+
+/// PUT /api/environment/mirror-preference 载荷：下载源选择偏好
+#[derive(Debug, serde::Deserialize, ToSchema)]
+pub struct MirrorPreferencePayload {
+    /// 选择：auto（自动测速）/ direct（直连优先）/ mirror（固定镜像）
+    pub choice: String,
+    /// mirror 前缀（choice=mirror 时必填，须在镜像名单内）
+    pub mirror: Option<String>,
+}
+
+/// PUT /api/environment/mirror-preference — 保存下载源选择偏好
+///
+/// 偏好落盘 `environment/mirror.json`，随后的 uv 下载 / Python 解释器下载 /
+/// 镜像测速排序均按该偏好执行（显式选源跳过测速）。
+#[utoipa::path(
+    put,
+    path = "/api/environment/mirror-preference",
+    operation_id = "put_api_environment_mirror_preference",
+    tag = "system",
+    request_body(
+        content = MirrorPreferencePayload,
+        description = "下载源选择偏好（choice=mirror 时 mirror 必填且须在镜像名单内）",
+    ),
+    responses(
+        (status = 200, description = "保存后的选源偏好（回显）", body = DataEnvelope<MirrorPreferenceData>),
+        (status = 400, description = "choice 未知或 mirror 前缀不在名单内", body = ErrorResponse),
+        (status = 500, description = "偏好落盘或序列化失败", body = ErrorResponse),
+    )
+)]
+pub async fn set_mirror_preference(
+    State(environment): State<Arc<dyn crate::environment::EnvironmentApi>>,
+    Json(payload): Json<MirrorPreferencePayload>,
+) -> Result<Json<Value>, ApiError> {
+    let choice =
+        crate::environment::MirrorChoice::from_api(&payload.choice, payload.mirror.as_deref())
+            .map_err(ApiError::BadRequest)?;
+    environment
+        .set_mirror_choice(choice)
+        .await
+        .map_err(|e| ApiError::Internal(format!("保存镜像偏好失败: {e}")))?;
+    let selected = environment.mirror_choice();
+    let selected = serde_json::to_value(&selected)
+        .map_err(|e| ApiError::Internal(format!("选源偏好序列化失败: {e}")))?;
+    Ok(data(serde_json::json!({ "selected": selected })))
 }
 
 // ---- 文档 ----
@@ -955,6 +1356,15 @@ pub async fn http_login_guide(
 ///
 /// 停止当前运行的 Worker 进程及其浏览器实例。Supervisor 保持运行，
 /// 下次任务到来时会自动重新启动 Worker。
+#[utoipa::path(
+    post,
+    path = "/api/worker/stop",
+    operation_id = "post_api_worker_stop",
+    tag = "system",
+    responses(
+        (status = 200, description = "已通知关闭 Worker", body = DataEnvelope<WorkerStopData>),
+    )
+)]
 pub async fn stop_worker(
     State(bridge): State<Arc<dyn BridgeApi>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -965,6 +1375,28 @@ pub async fn stop_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P2-9 门钉住：端内重启/关闭必须且仅在 android 构建被拒
+    ///
+    /// 桌面退出链（spawn 后继 + exit watchdog）在安卓会硬杀承载前台服务的整个
+    /// 进程并残留 `.runtime_port`；移除该门会让 android 构建静默走桌面退出路径，
+    /// 此处以纯函数断言把「feature → 门」的映射锁定，供 `--features android`
+    /// 构建复核（桌面测试恒验证放行分支）
+    #[test]
+    fn android_gate_rejects_in_app_restart_shutdown() {
+        let rejection = android_lifecycle_rejection();
+        assert_eq!(
+            rejection.is_some(),
+            cfg!(feature = "android"),
+            "端内重启/关闭门必须且仅在 android 构建生效"
+        );
+        if let Some(message) = rejection {
+            assert!(
+                message.contains("系统方式"),
+                "拒绝文案须指明经系统方式停止应用: {message}"
+            );
+        }
+    }
 
     /// `/api/browsers` 的 custom 条目必须反映真实可用性
     ///
@@ -1280,6 +1712,23 @@ mod tests {
         assert_eq!(entry.message, "");
     }
 
+    /// limit 参数：缺省 / 非数字 / `0` / 超上限的回退与钳制
+    ///
+    /// 回归：`limit=0` 此前会 `take(0)` 返回空数组，等同坏参而非"要 0 条"。
+    #[test]
+    fn parse_limit_param_falls_back_on_zero_and_garbage() {
+        assert_eq!(parse_limit_param(None), 200, "缺省回退 200");
+        assert_eq!(parse_limit_param(Some("0")), 200, "0 视为坏参回退 200");
+        assert_eq!(parse_limit_param(Some("abc")), 200, "非数字回退 200");
+        assert_eq!(parse_limit_param(Some("")), 200, "空串回退 200");
+        assert_eq!(parse_limit_param(Some("5")), 5, "合法值原样保留");
+        assert_eq!(
+            parse_limit_param(Some("99999999")),
+            2000,
+            "超上限钳制到 2000"
+        );
+    }
+
     // ============ check_update handler 级单测（内存 MockUpdaterApi，M1） ============
 
     use axum::body::Body;
@@ -1295,7 +1744,8 @@ mod tests {
         Err(String),
     }
 
-    struct MockUpdaterApi(MockOutcome);
+    /// (check_update 结果, pin 闸门是否放行)
+    struct MockUpdaterApi(MockOutcome, bool);
 
     #[async_trait::async_trait]
     impl UpdaterApi for MockUpdaterApi {
@@ -1329,6 +1779,10 @@ mod tests {
             None
         }
 
+        fn pinned_version_allowed(&self, _version: &str) -> bool {
+            self.1
+        }
+
         fn has_pending_update(&self) -> bool {
             false
         }
@@ -1356,7 +1810,7 @@ mod tests {
     }
 
     async fn run_check(outcome: MockOutcome) -> Value {
-        let api: Arc<dyn UpdaterApi> = Arc::new(MockUpdaterApi(outcome));
+        let api: Arc<dyn UpdaterApi> = Arc::new(MockUpdaterApi(outcome, true));
         let app = axum::Router::new()
             .route("/api/check-update", route_get(check_update))
             .with_state(api);
@@ -1404,6 +1858,97 @@ mod tests {
         let d = &v["data"];
         assert_eq!(d["has_update"], false);
         assert!(d["error"].as_str().unwrap().contains("网络超时"));
+    }
+
+    // ============ POST /api/system/update pin 闸门（版本单调，T6-4 补口） ============
+
+    /// 三项齐备且各项校验通过的 pin 请求体（版本须高于当前 CARGO_PKG_VERSION）
+    fn pinned_body() -> ApplyUpdateBody {
+        ApplyUpdateBody {
+            version: Some("5.3.0".into()),
+            url: Some("https://example.com/app.zip".into()),
+            sha256: Some("a".repeat(64)),
+        }
+    }
+
+    /// into_pinned 单测：闸门放行 → 构造 pin 的 UpdateInfo；闸门拒绝 → None
+    #[test]
+    fn test_into_pinned_rollback_gate() {
+        let allowed = MockUpdaterApi(MockOutcome::None, true);
+        let info = pinned_body()
+            .into_pinned(&allowed)
+            .expect("闸门放行应构造 pin");
+        assert_eq!(info.latest_version, "5.3.0");
+        // 闸门拒绝（pinned 落在「> 当前 && < 同通道已见最高」区间）
+        let denied = MockUpdaterApi(MockOutcome::None, false);
+        assert!(pinned_body().into_pinned(&denied).is_none());
+    }
+
+    async fn run_apply(mock: Arc<dyn UpdaterApi>) -> axum::http::StatusCode {
+        let app = axum::Router::new()
+            .route("/api/system/update", axum::routing::post(apply_update))
+            .with_state(mock);
+        let sha = "a".repeat(64);
+        let body = format!(
+            r#"{{"version":"5.3.0","url":"https://example.com/app.zip","sha256":"{sha}"}}"#
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/system/update")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    /// pin 三项齐备且单调闸门放行 → 直接使用前端固定版本
+    #[tokio::test]
+    async fn test_apply_update_pin_accepted_uses_pinned_version() {
+        let api: Arc<dyn UpdaterApi> = Arc::new(MockUpdaterApi(MockOutcome::None, true));
+        assert_eq!(
+            run_apply(api).await,
+            axum::http::StatusCode::OK,
+            "pin 放行时无需服务端重查（mock 的 check_update 返回 None 会在重查路径上报 400）"
+        );
+    }
+
+    /// pin 被单调闸门拒绝（低于同通道已见最高版本）→ 回退服务端重查
+    #[tokio::test]
+    async fn test_apply_update_pin_rejected_falls_back_to_recheck() {
+        // 重查命中更高版本：证明确实走了重查而非沿用被拒的 pin
+        let mut rechecked = sample_info();
+        rechecked.latest_version = "9.9.9".into();
+        let api: Arc<dyn UpdaterApi> =
+            Arc::new(MockUpdaterApi(MockOutcome::Info(rechecked), false));
+        let app = axum::Router::new()
+            .route("/api/system/update", axum::routing::post(apply_update))
+            .with_state(api);
+        let sha = "a".repeat(64);
+        let body = format!(
+            r#"{{"version":"5.3.0","url":"https://example.com/app.zip","sha256":"{sha}"}}"#
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/system/update")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["data"]["version"], "9.9.9", "应使用重查结果而非被拒 pin");
     }
 
     // ============ GET /api/logs/export 日志导出包 ============
@@ -1613,6 +2158,11 @@ mod tests {
             None
         }
 
+        // 上传包路径不走 pin 闸门，mock 恒放行
+        fn pinned_version_allowed(&self, _version: &str) -> bool {
+            true
+        }
+
         fn has_pending_update(&self) -> bool {
             false
         }
@@ -1768,5 +2318,84 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    /// 契约镜像漂移守卫（2026-11-19 契约批次）：新注解三端点的 DTO 字段集
+    /// 必须与各自源类型的线格式逐键一致——源类型演化而镜像未跟随时本测试失败
+    ///（口径与 ws.rs 的 WsLogEntryData 守卫一致）
+    #[test]
+    fn contract_mirror_dtos_match_source_wire_shapes() {
+        use std::collections::BTreeSet;
+
+        fn keys(value: serde_json::Value) -> BTreeSet<String> {
+            value
+                .as_object()
+                .expect("载荷应序列化为对象")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        // update-state：LastCheckState ↔ UpdateStateData
+        let wire =
+            serde_json::to_value(crate::updater::LastCheckState::default()).expect("线格式序列化");
+        let mirror = serde_json::to_value(UpdateStateData::default()).expect("镜像序列化");
+        assert_eq!(
+            keys(wire),
+            keys(mirror),
+            "UpdateStateData 与 LastCheckState 线格式漂移"
+        );
+
+        // mirror-probe 逐源结果：MirrorProbeEntry ↔ MirrorProbeEntryData
+        let entry = crate::environment::MirrorProbeEntry {
+            kind: "direct",
+            prefix: String::new(),
+            label: String::new(),
+            ok: false,
+            bytes: 0,
+            elapsed_ms: 0,
+            throughput: 0,
+        };
+        let wire = serde_json::to_value(&entry).expect("线格式序列化");
+        let mirror = serde_json::to_value(MirrorProbeEntryData {
+            kind: "direct".to_string(),
+            prefix: String::new(),
+            label: String::new(),
+            ok: false,
+            bytes: 0,
+            elapsed_ms: 0,
+            throughput: 0,
+        })
+        .expect("镜像序列化");
+        assert_eq!(
+            keys(wire),
+            keys(mirror),
+            "MirrorProbeEntryData 与 MirrorProbeEntry 线格式漂移"
+        );
+
+        // 选源偏好：MirrorChoice 三变体 ↔ MirrorSelectionData（Auto/Direct 无
+        // mirror 字段，Mirror 携带前缀——skip_serializing_if 与 tag+content 对齐）
+        let variants = [
+            (crate::environment::MirrorChoice::Auto, "auto", None),
+            (crate::environment::MirrorChoice::Direct, "direct", None),
+            (
+                crate::environment::MirrorChoice::Mirror("https://m.example/".to_string()),
+                "mirror",
+                Some("https://m.example/".to_string()),
+            ),
+        ];
+        for (choice, choice_str, mirror_field) in variants {
+            let wire = serde_json::to_value(&choice).expect("线格式序列化");
+            let mirror = serde_json::to_value(MirrorSelectionData {
+                choice: choice_str.to_string(),
+                mirror: mirror_field,
+            })
+            .expect("镜像序列化");
+            assert_eq!(
+                keys(wire),
+                keys(mirror),
+                "MirrorSelectionData 与 MirrorChoice 线格式漂移（{choice_str}）"
+            );
+        }
     }
 }

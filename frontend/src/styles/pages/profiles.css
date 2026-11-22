@@ -1,5 +1,12 @@
 /* ==================== 配置方案页面 ==================== */
 
+/* 页面外壳差异（契约见 layout.css 的 .page-content）：flex 纵向由契约承担，
+   gap: 0 —— 顶层块的间距走各自 margin-bottom（topbar / 检测横幅），与契约 gap
+   并存会叠成双倍间距；末块不产生尾随空隙的行为也与旧块布局一致。 */
+.profiles-page {
+  gap: 0;
+}
+
 /* 顶部状态栏 */
 .profiles-topbar {
   display: flex;
@@ -62,7 +69,7 @@
 .profiles-topbar-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   flex-wrap: wrap;
 }
 
@@ -138,8 +145,8 @@
 }
 
 .profiles-guide-intro {
-  margin-bottom: 14px;
-  padding-bottom: 14px;
+  margin-bottom: var(--space-md);
+  padding-bottom: var(--space-md);
   border-bottom: 1px solid var(--border);
 }
 
@@ -163,7 +170,7 @@
 .guide-step {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   flex: 1;
   min-width: 0;
 }
@@ -217,7 +224,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-md);
-  padding: 14px 18px;
+  padding: var(--space-md);
   background: var(--bg-card-elevated);
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
@@ -259,7 +266,7 @@
 .profile-card-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-sm);
   margin-bottom: 2px;
 }
 
@@ -364,7 +371,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 3px 10px;
+  padding: var(--space-xs) var(--space-sm);
   border-radius: var(--radius-sm);
   background: rgba(var(--success-rgb), 0.08);
   border: 1px solid rgba(var(--success-rgb), 0.2);
@@ -442,7 +449,7 @@
    “两个网址 + 一个模式开关”的认知负担。 */
 .redirect-advanced {
   margin-top: calc(var(--space-sm) * -0.25);
-  padding: 10px 12px;
+  padding: var(--space-sm) 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: rgba(var(--slate-rgb), 0.04);
@@ -471,7 +478,7 @@
   justify-content: space-between;
   gap: var(--space-md);
   margin-bottom: var(--space-md);
-  padding: 12px 14px;
+  padding: 12px var(--space-md);
   border: 1px solid rgba(var(--accent-rgb), 0.22);
   border-radius: var(--radius-md);
   background: rgba(var(--accent-rgb), 0.06);
@@ -480,7 +487,7 @@
 .redirect-test-copy {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--space-xs);
   min-width: 0;
   color: var(--text-secondary);
   font-size: var(--text-sm);
@@ -512,12 +519,13 @@
   }
 }
 
-/* 区域标题：左侧 accent 竖线 + 加粗文字 */
+/* 区域标题：左侧 accent 竖线 + 加粗文字。
+   分叉通道：标题嵌入无下文距的 head 行时，组件在 scoped 声明 --editor-section-label-mb */
 .editor-section-label {
   font-size: var(--text-md);
   font-weight: 700;
   color: var(--text-primary);
-  margin-bottom: 12px;
+  margin-bottom: var(--editor-section-label-mb, 12px);
   padding-left: 12px;
   border-right: 0;
   border-top: 0;
@@ -601,7 +609,7 @@
 
 /* 文件名等宽显示：便于用户核对下载/收到的文件是哪一个 */
 .import-file-name {
-  padding: 8px 12px;
+  padding: var(--space-sm) 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-glass);
@@ -614,9 +622,9 @@
 .import-summary {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-xs);
   margin-top: var(--space-sm);
-  padding: 10px 12px;
+  padding: var(--space-sm) 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-card);
@@ -634,7 +642,7 @@
 
 .import-hint-box {
   margin-top: var(--space-sm);
-  padding: 10px 12px;
+  padding: var(--space-sm) 12px;
   border: 1px solid var(--border-accent);
   border-radius: var(--radius-md);
   background: var(--bg-glass-light);
@@ -647,9 +655,9 @@
 .import-script-warn {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
   margin-top: var(--space-sm);
-  padding: 10px 12px;
+  padding: var(--space-sm) 12px;
   border: 1px solid rgba(var(--warning-rgb), 0.35);
   border-radius: var(--radius-md);
   background: var(--warning-bg);

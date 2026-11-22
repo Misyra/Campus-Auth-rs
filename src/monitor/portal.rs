@@ -338,7 +338,16 @@ async fn ensure_redirect_target_via(
 ) -> Result<Option<reqwest::Client>, ()> {
     let host = url.host_str().ok_or(())?;
     let port = url.port_or_known_default().unwrap_or(80);
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // IPv6 字面量：`url::Url::host_str()` 返回带方括号形式（如 `[2001:db8::1]`），
+    // 而 `IpAddr` 解析不认方括号——先剥一层再按字面量解析（照 df6b26b 在
+    // `web::ssrf` 的同口径修法），否则 IPv6 原生校园网（CERNET2 类）的门户
+    // 重定向会被误当域名、落进解析失败分支恒拒绝。剥括号后仍非法的输入照旧
+    // 走域名解析，fail-closed 语义不因剥括号放行任何目标
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
         return if is_blocked_redirect_ip(&ip) {
             Err(())
         } else {
@@ -614,6 +623,69 @@ mod tests {
         assert!(r.portal_url.is_none());
     }
 
+    /// P2-13：跨主机跳转指向 IPv6 字面量（CERNET2 类原生 v6 门户）→ 剥方括号后
+    /// 按字面量放行；目标不可达不丢弃已拿到的候选地址（此前字面量被误当域名、
+    /// 解析失败而恒拒绝）。短超时兜底无路由环境下的连接等待
+    #[tokio::test]
+    async fn test_redirect_to_ipv6_literal_allowed() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 302 Found\r\nLocation: http://[2001:db8::1]/login\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let r = detect_portal(
+            &http_targets_of(&url),
+            Duration::from_millis(500),
+            &[],
+            &HashMap::new(),
+            Duration::from_millis(500),
+            true,
+        )
+        .await;
+        assert_eq!(r.status, PortalDetectStatus::Found);
+        assert_eq!(r.portal_url.as_deref(), Some("http://[2001:db8::1]/login"));
+    }
+
+    /// P2-13：受限 IPv6 字面量剥括号后仍拒——[::1] 解析成功且命中环回判定，
+    /// 按直接劫持收尾（回归保护：修剥括号不得放开拒绝分支）
+    #[tokio::test]
+    async fn test_redirect_to_ipv6_loopback_blocked() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 302 Found\r\nLocation: http://[::1]:1/blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let r = detect_portal(
+            &http_targets_of(&url),
+            Duration::from_secs(5),
+            &[],
+            &HashMap::new(),
+            Duration::from_secs(5),
+            true,
+        )
+        .await;
+        assert_eq!(r.status, PortalDetectStatus::CaptiveNoRedirect);
+        assert!(r.portal_url.is_none());
+    }
+
+    /// P2-13：链路本地 IPv6 字面量（fe80::/10）同口径拒绝
+    #[tokio::test]
+    async fn test_redirect_to_ipv6_link_local_blocked() {
+        let url = serve_responses(vec![
+            "HTTP/1.1 302 Found\r\nLocation: http://[fe80::1]/blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let r = detect_portal(
+            &http_targets_of(&url),
+            Duration::from_secs(5),
+            &[],
+            &HashMap::new(),
+            Duration::from_secs(5),
+            true,
+        )
+        .await;
+        assert_eq!(r.status, PortalDetectStatus::CaptiveNoRedirect);
+        assert!(r.portal_url.is_none());
+    }
+
     /// MON-4 单元：环回/链路本地/通配地址判定（IPv4/IPv6/IPv4-mapped；RFC1918 放行）
     #[test]
     fn test_blocked_redirect_ip() {
@@ -661,8 +733,8 @@ mod tests {
 
     /// MON-4 单元：`ensure_redirect_target` 的 IP 字面量分支（无解析面，可离线锁定）
     ///
-    /// IPv6 字面量在本函数中走 `lookup_host` 分支，其拒绝由
-    /// [`test_blocked_redirect_ip`] 与解析失败共同保证，不在此重复。
+    /// IPv6 字面量（含方括号形态，P2-13 剥括号后）同走本分支：受限地址的
+    /// 拒绝在下方与 IPv4 一并锁定，合法内网地址（ULA）按最小拒绝集合放行。
     #[tokio::test]
     async fn test_ensure_redirect_target_ip_literal() {
         let parse = |s: &str| url::Url::parse(s).unwrap();
@@ -682,6 +754,27 @@ mod tests {
                 "{s} 应被拒绝跟随"
             );
         }
+        // P2-13：方括号形态的受限 IPv6 字面量剥括号后判定不变，仍拒绝
+        for s in [
+            "http://[::1]:8080/login",
+            "http://[fe80::1]/login",
+            "http://[::]/login",
+        ] {
+            assert!(
+                ensure_redirect_target(&parse(s), true).await.is_err(),
+                "{s} 应被拒绝跟随"
+            );
+        }
+        // P2-13：方括号形态的合法字面量（ULA 与文档段）按最小拒绝集合放行——
+        // 口径与无括号字面量一致（is_blocked_redirect_ip 不拦内网段）
+        assert!(matches!(
+            ensure_redirect_target(&parse("http://[fc00::1]/login"), true).await,
+            Ok(None)
+        ));
+        assert!(matches!(
+            ensure_redirect_target(&parse("http://[2001:db8::1]/login"), true).await,
+            Ok(None)
+        ));
     }
 
     /// MON-4 单元：B5——放行分支的钉扎客户端确实按「已校验地址」连接

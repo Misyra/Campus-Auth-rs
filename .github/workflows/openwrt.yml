@@ -18,10 +18,10 @@ permissions:
 
 jobs:
   build:
-    permissions:
-      contents: write
     name: OpenWrt ${{ matrix.target }}
     runs-on: ubuntu-22.04
+    # QEMU 执行 / 交叉构建挂死时按 job 级超时止损，不拖满 runner 默认 6 小时
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +43,12 @@ jobs:
         with:
           toolchain: ${{ steps.rust.outputs.channel }}
           targets: ${{ matrix.target }}
-          components: clippy
+          # rustfmt 必须显式列入：rust-toolchain.toml 钉了 components=[rustfmt,
+          # clippy]，漏装时后续 cargo 调用会隐式同步并装 rustfmt，撞 hosted
+          # 镜像预装态的 bin/cargo-fmt 残留即 `detected conflict` 回滚失败
+          # （PR #33 round 5/10/12 三次不同 target 复现，非偶发）；在 action
+          # 安装阶段一次装齐，隐式同步无活可干
+          components: clippy,rustfmt
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -90,22 +95,50 @@ jobs:
             openwrt/dist/campus-auth_*
             openwrt/dist/luci-app-campus-auth_*
           if-no-files-found: error
-      - name: 上传已有 GitHub Release
-        if: inputs['publish-release'] == true
+
+  # Release 上传从 build 矩阵拆出：build 只需读权限，发布写权限收敛到本 job；
+  # workflow_call 的 publish-release 为 true 才跑（push/PR 触发时 inputs 为空，
+  # 条件为 false 直接跳过，与原内联步骤语义一致）
+  upload-release:
+    name: 上传 OpenWrt 包到 GitHub Release
+    needs: build
+    if: inputs['publish-release'] == true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      # 三个矩阵产物各含同名 luci-app-campus-auth_<ver>_all.ipk（arch 恒 all，
+      # package_ipk.py 对所有 target 无条件产出）——必须分目录下载后去重合并：
+      # gh run download 非 isolate 模式解压 O_EXCL，直接下到同一目录会在第二
+      # 个产物撞名断发布
+      - name: 下载矩阵产物
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # LuCI 为架构无关包，只由 x86_64 任务上传，避免矩阵并发覆盖。
-          assets=(openwrt/dist/campus-auth-* openwrt/dist/campus-auth_*)
-          if [ '${{ matrix.target }}' = x86_64-unknown-linux-musl ]; then
-            assets+=(openwrt/dist/luci-app-campus-auth_*)
-          fi
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf; do
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "campus-auth-openwrt-$target" --dir "openwrt/dist-$target"
+          done
+          mkdir -p openwrt/dist
+          # 主包按 arch 命名天然不同名，直接合并；LuCI _all.ipk 同名只取一份
+          # （内容架构无关，任意产物等价）
+          cp openwrt/dist-*/campus-auth-* openwrt/dist/
+          cp openwrt/dist-*/campus-auth_* openwrt/dist/
+          cp -n openwrt/dist-*/luci-app-campus-auth_* openwrt/dist/
+      - name: 上传已有 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(openwrt/dist/campus-auth-* openwrt/dist/campus-auth_* openwrt/dist/luci-app-campus-auth_*)
           gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
 
   sdk-packages:
     name: SDK ${{ matrix.version }} x86_64
     needs: build
     runs-on: ubuntu-22.04
+    # SDK 下载 / feeds / make 全链路最重，与 build 同档预算
+    timeout-minutes: 60
     permissions:
       actions: read
       contents: write

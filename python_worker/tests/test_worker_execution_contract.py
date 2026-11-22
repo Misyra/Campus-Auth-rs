@@ -12,8 +12,12 @@ from pathlib import Path
 import pytest
 
 from debug_session import DebugSession, _build_steps_info
-from models import Outcome, StepConfig, TaskConfig
+from models import Outcome, StepConfig, StructuredResult, TaskConfig
+import capture_commands
 import playwright_worker
+import step_engine
+import step_handlers
+import worker_paths
 from playwright_worker import WorkerCore
 from step_handlers import StepCancelled, StepContext, WorkerError
 
@@ -45,7 +49,7 @@ def test_optional_failure_is_reported_in_formal_result(monkeypatch):
     async def fail(*_args, **_kwargs):
         raise WorkerError(Outcome.SELECTOR_FAILED, "missing")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fail)
+    monkeypatch.setattr(step_handlers, "run_step_async", fail)
     context = StepContext(page=object())
     result = asyncio.run(
         playwright_worker.run_steps(
@@ -70,7 +74,7 @@ def test_debug_step_uses_current_command_cancel_id(monkeypatch):
             await asyncio.sleep(0.01)
         raise StepCancelled("调试步骤已取消")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", wait_for_cancel)
+    monkeypatch.setattr(step_handlers, "run_step_async", wait_for_cancel)
 
     async def run():
         pending = asyncio.create_task(
@@ -119,7 +123,7 @@ def test_navigation_wait_uses_cancellable_sleep(monkeypatch):
     async def fake_sleep(seconds: float, ctx: StepContext) -> None:
         calls.append((seconds, ctx))
 
-    monkeypatch.setattr(playwright_worker, "_sleep_cancellable", fake_sleep)
+    monkeypatch.setattr(step_handlers, "_sleep_cancellable", fake_sleep)
     asyncio.run(WorkerCore._wait_after_navigation(task, context))
 
     assert calls == [(2.5, context)]
@@ -134,7 +138,7 @@ def test_navigation_wait_zero_skips_sleep(monkeypatch):
         nonlocal called
         called = True
 
-    monkeypatch.setattr(playwright_worker, "_sleep_cancellable", fake_sleep)
+    monkeypatch.setattr(step_handlers, "_sleep_cancellable", fake_sleep)
     asyncio.run(WorkerCore._wait_after_navigation(task, context))
 
     assert called is False
@@ -278,7 +282,7 @@ def test_redirect_test_forces_visible_isolated_browser(monkeypatch, pure_mode, c
         return FakeBrowser()
 
     monkeypatch.setattr(core, "_launch_browser", fake_launch)
-    monkeypatch.setattr(playwright_worker, "_REDIRECT_TEST_SETTLE_SECS", 0.0)
+    monkeypatch.setattr(capture_commands, "_REDIRECT_TEST_SETTLE_SECS", 0.0)
     result = asyncio.run(
         core.handle_test_redirect(
             {
@@ -358,7 +362,7 @@ def test_login_bypasses_system_proxy_unless_explicitly_bound(
     monkeypatch.setattr(core, "_launch_browser", fake_launch)
     monkeypatch.setattr(core, "_launch_persistent_context", fake_persistent)
     monkeypatch.setattr(core, "_new_page", lambda: asyncio.sleep(0, result=object()))
-    monkeypatch.setattr(playwright_worker, "_browser_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_browser_data_dir", lambda: tmp_path)
     asyncio.run(core._start_browser({"browser_settings": {
         "browser_channel": channel,
         "custom_browser_engine": engine,
@@ -405,7 +409,7 @@ def test_unified_network_policy_overrides_legacy_proxy(monkeypatch, tmp_path, pe
     monkeypatch.setattr(core, "_launch_browser", launch)
     monkeypatch.setattr(core, "_launch_persistent_context", launch_persistent)
     monkeypatch.setattr(core, "_new_page", lambda: asyncio.sleep(0, result=object()))
-    monkeypatch.setattr(playwright_worker, "_browser_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_browser_data_dir", lambda: tmp_path)
     asyncio.run(core._start_browser({"browser_settings": {
         "browser_channel": "msedge", "pure_mode": pure_mode, "persistent_context": persistent,
         "bind_proxy": "http://obsolete-proxy:7890",
@@ -678,7 +682,7 @@ def _debug_start_core(monkeypatch, tmp_path, page):
     monkeypatch.setattr(core, "ensure_browser", fake_ensure_browser)
     monkeypatch.setattr(core, "_prepare_session_page", fake_prepare_session_page)
     monkeypatch.setattr(core, "_make_context", fake_make_context)
-    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
     return core
 
 
@@ -726,6 +730,46 @@ def test_debug_start_skips_navigation_when_no_start_url(monkeypatch, tmp_path):
     assert core._debug_sessions, "会话应正常建成（不再因无效 URL 中断启动）"
 
 
+def test_debug_start_rejected_while_profile_session_alive(monkeypatch, tmp_path):
+    """配置会话存续期启动调试会话 → 结构化拒绝（对齐 _ensure_no_debug_session 模式）。
+
+    调试启动会重建共享浏览器并改写会话类型标记，与配置会话的独占浏览器
+    双开互扰；反向（调试会话存续期 profile_session_start）已被 Rust 会话矩阵
+    拦截，此处钉住 Python 半边的单向缺口补齐。
+    """
+    from config_session import ProfileSessionState, RecorderSink
+
+    page = _FakeDebugPage()
+    core = _debug_start_core(monkeypatch, tmp_path, page)
+    core._profile_session = ProfileSessionState(
+        session_id="occupied",
+        user_data_dir=str(tmp_path / "udd"),
+        portal_url="http://portal.example/",
+        record=True,
+        sink=RecorderSink(),
+    )
+
+    with pytest.raises(WorkerError) as ei:
+        asyncio.run(
+            core.handle_debug_start(
+                {"task_config": {"task_id": "t", "url": "", "steps": [], "variables": {}}}
+            )
+        )
+    assert "配置会话进行中" in ei.value.message
+    assert "调试" in ei.value.message
+    assert not core._debug_sessions, "拒绝时不得建立任何调试会话"
+    assert core._profile_session is not None, "占用方不受影响"
+
+    # 槽位释放后即可正常启动（守卫不残留副作用）
+    core._profile_session = None
+    asyncio.run(
+        core.handle_debug_start(
+            {"task_config": {"task_id": "t", "url": "", "steps": [], "variables": {}}}
+        )
+    )
+    assert core._debug_sessions, "槽位释放后调试会话正常建成"
+
+
 def test_login_system_variables_skip_missing_keys(monkeypatch):
     """登录命令未提供的 Profile 键不注入（避免空串覆盖任务自定义变量）。
 
@@ -770,6 +814,158 @@ def test_login_system_variables_skip_missing_keys(monkeypatch):
     }
 
 
+def test_system_variables_skip_none_values():
+    """P2-7：serde null 的 Profile 字段不注入字面 "None"。
+
+    Rust 侧字段可为 null（如直连渠道 ISP 留空经 JSON 传 null），str(None)
+    会把 "None" 当成凭据/地址注入任务模板；None 与缺失同等跳过，空串原样注入。
+    """
+    out = WorkerCore._system_variables(
+        {"username": None, "password": "p", "isp": None, "auth_url": None, "trigger_url": None}
+    )
+    assert out == {"PASSWORD": "p"}
+    # trigger_url 为 null 时 LOGIN_URL 不注入（auth_url 也为 None 无回落值）
+    out2 = WorkerCore._system_variables(
+        {"username": "u", "auth_url": "http://10.0.0.1/login", "trigger_url": None}
+    )
+    assert out2 == {"USERNAME": "u", "LOGIN_URL": "http://10.0.0.1/login"}
+
+
+# ── P2 缺口④：_run_task 失败/取消 cookie 清理矩阵 ──
+
+
+def _run_task_core(monkeypatch, run_steps_impl):
+    """装配 _run_task：浏览器/建页为空实现，context.clear_cookies 可计数。"""
+    core = WorkerCore()
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.clear_cookies_calls = 0
+
+        async def clear_cookies(self) -> None:
+            self.clear_cookies_calls += 1
+
+    ctx = FakeContext()
+
+    async def fake_ensure_browser(*_args, **_kwargs):
+        return None
+
+    async def fake_prepare_session_page():
+        core._page = None
+        core._context = ctx
+
+    def fake_make_context(*_args, **_kwargs):
+        return StepContext(page=None)
+
+    monkeypatch.setattr(core, "ensure_browser", fake_ensure_browser)
+    monkeypatch.setattr(core, "_prepare_session_page", fake_prepare_session_page)
+    monkeypatch.setattr(core, "_make_context", fake_make_context)
+    monkeypatch.setattr(step_engine, "run_steps", run_steps_impl)
+    return core, ctx
+
+
+def test_run_task_clears_cookies_on_failure_result(monkeypatch):
+    """矩阵①：步骤结果失败（非 success/cancelled）→ 清 cookies。"""
+
+    async def failing(_page, _steps, _context):
+        return StructuredResult(outcome=Outcome.UNKNOWN_ERROR.value, message="失败")
+
+    core, ctx = _run_task_core(monkeypatch, failing)
+    result = asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert result.outcome == Outcome.UNKNOWN_ERROR.value
+    assert ctx.clear_cookies_calls == 1, "失败结果必须清除 context cookies"
+
+
+def test_run_task_keeps_cookies_on_success_and_cancelled(monkeypatch):
+    """矩阵②：成功与取消结果 → 不清 cookies（登录态/取消现场保留）。"""
+
+    async def succeed(_page, _steps, _context):
+        return StructuredResult(outcome=Outcome.SUCCESS.value, message="成功")
+
+    core, ctx = _run_task_core(monkeypatch, succeed)
+    asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx.clear_cookies_calls == 0
+
+    async def cancelled(_page, _steps, _context):
+        return StructuredResult(outcome=Outcome.CANCELLED.value, message="已取消")
+
+    core2, ctx2 = _run_task_core(monkeypatch, cancelled)
+    asyncio.run(core2._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx2.clear_cookies_calls == 0
+
+
+def test_run_task_clears_cookies_on_worker_error_except_cancel(monkeypatch):
+    """矩阵③：WorkerError 异常路径 → 非 cancelled 清 cookies，cancelled 不清。"""
+
+    async def raise_failure(_page, _steps, _context):
+        raise WorkerError(Outcome.SELECTOR_FAILED, "选择器失败")
+
+    core, ctx = _run_task_core(monkeypatch, raise_failure)
+    with pytest.raises(WorkerError):
+        asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx.clear_cookies_calls == 1
+
+    async def raise_cancelled(_page, _steps, _context):
+        raise StepCancelled("步骤已取消")
+
+    core2, ctx2 = _run_task_core(monkeypatch, raise_cancelled)
+    with pytest.raises(StepCancelled):
+        asyncio.run(core2._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx2.clear_cookies_calls == 0, "取消不得清除 cookies（保留现场）"
+
+
+def test_run_task_clears_cookies_on_unexpected_exception(monkeypatch):
+    """矩阵④：未预期异常 → 清 cookies 并原样上抛。"""
+
+    async def raise_boom(_page, _steps, _context):
+        raise RuntimeError("boom")
+
+    core, ctx = _run_task_core(monkeypatch, raise_boom)
+    with pytest.raises(RuntimeError):
+        asyncio.run(core._run_task(TaskConfig(), {}, {}, None, None))
+    assert ctx.clear_cookies_calls == 1
+
+
+def test_debug_start_cancelled_after_establish_tears_down_ghost_session(monkeypatch, tmp_path):
+    """P2 缺口①：取消恰好在会话建成后到达 → 幽灵会话收尾。
+
+    会话写入字典与响应返回之间取消事件置位时，debug_start 必须弹出会话、
+    释放截图/取消注册、关闭会话页，并以 cancelled 语义上抛——不能留下
+    Rust 已判定取消、Worker 却仍视为活跃的调试会话。
+    """
+    from playwright_worker import cancel_registry
+
+    class GhostPage(_FakeDebugPage):
+        async def close(self):
+            pass
+
+    page = GhostPage()
+    core = _debug_start_core(monkeypatch, tmp_path, page)
+
+    async def fake_capture(_session, *, step_index=None, full_page=False):
+        # 模拟取消落在"会话已建成、初始截图"窗口内
+        cancel_registry.trigger("ghost-cancel-p27")
+        return True
+
+    monkeypatch.setattr(core, "_capture_debug_frame", fake_capture)
+
+    with pytest.raises(StepCancelled) as ei:
+        asyncio.run(
+            core.handle_debug_start(
+                {
+                    "task_config": {"task_id": "ghost", "url": "", "steps": [], "variables": {}},
+                    "auth_url": "",
+                    "trigger_url": "",
+                    "cancel_id": "ghost-cancel-p27",
+                }
+            )
+        )
+
+    assert "已取消" in ei.value.message
+    assert core._debug_sessions == {}, "幽灵调试会话必须被收尾弹出"
+    assert core._page is None, "会话页应随幽灵会话一并关闭"
+
+
 def test_debug_run_all_continues_after_optional_failure_and_applies_delay(monkeypatch):
     task = TaskConfig(
         task_id="debug-contract",
@@ -794,8 +990,8 @@ def test_debug_run_all_continues_after_optional_failure_and_applies_delay(monkey
     async def fake_sleep(seconds: float, _context: StepContext) -> None:
         delays.append(seconds)
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
-    monkeypatch.setattr(playwright_worker, "_sleep_cancellable", fake_sleep)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "_sleep_cancellable", fake_sleep)
 
     response = asyncio.run(core.handle_debug_run_all({"session_id": session.session_id}))
 
@@ -821,7 +1017,7 @@ def test_debug_run_all_stops_after_required_failure(monkeypatch):
         if step.id == "required":
             raise WorkerError(Outcome.SELECTOR_FAILED, "必需步骤失败")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
 
     response = asyncio.run(core.handle_debug_run_all({"session_id": session.session_id}))
 
@@ -842,7 +1038,7 @@ def test_debug_run_all_records_unexpected_exception_and_stops(monkeypatch):
     async def fake_run_step(_page, _step, _context, **_kwargs) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
 
     response = asyncio.run(core.handle_debug_run_all({"session_id": session.session_id}))
 
@@ -880,12 +1076,12 @@ def _framing_core(monkeypatch, tmp_path, page, events):
         steps_info=_build_steps_info(task),
     )
     core._debug_sessions[session.session_id] = session
-    monkeypatch.setattr(playwright_worker, "_debug_screenshot_dir", lambda: tmp_path)
+    monkeypatch.setattr(worker_paths, "_debug_screenshot_dir", lambda: tmp_path)
 
     async def fake_run_step(_page, _step, _context, **_kwargs) -> None:
         return None
 
-    monkeypatch.setattr(playwright_worker, "run_step_async", fake_run_step)
+    monkeypatch.setattr(step_handlers, "run_step_async", fake_run_step)
     return core, session
 
 

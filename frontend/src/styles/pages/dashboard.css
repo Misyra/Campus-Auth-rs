@@ -1,7 +1,15 @@
-/* 仪表板整体布局：填满容器，不滚动 */
-.page-content:has(.stats-grid) {
-  display: flex;
-  flex-direction: column;
+/* ═══ 仪表盘页面差异（外壳契约见 layout.css 的 .page-content）═══
+   flex 纵向与滚动模型（V1：随外层 content-wrapper 整体滚动，页面根无内部滚动容器）
+   均由契约承担；本文件只声明两处差异：
+   ① gap: 0 —— 块间距走各子块自身的 margin-bottom（--space-md），不消费契约 gap。
+      子块（环境横幅 / 统计栅格 / 双栏行）随状态条件增删，margin 跟着子块走，
+      不依赖相邻兄弟存在；末块也不产生契约 gap 会省掉的尾随空隙。
+   ② min-height: 100% —— 极矮内容下页面根仍占满滚动视口（旧 :has(.stats-grid)
+      高度豁免三处重申的 height:auto/overflow:visible 本就是 UA 默认值，已随
+      契约化退役；stats-grid 仅本页渲染，类选择器化后守卫不再需要）。 */
+.dashboard-page {
+  gap: 0;
+  min-height: 100%;
 }
 
 .stats-grid {
@@ -16,7 +24,7 @@
   background: var(--bg-card-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 20px;
+  padding: 16px 20px;
   display: flex;
   align-items: center;
   gap: var(--space-md);
@@ -28,40 +36,23 @@
   background: var(--bg-card);
 }
 
+/* 图标块中性化：原 48px 四色圆角底块收敛为 28px 中性描边小方块，
+   彩色语义只留给数值副文案（连续失败 / 重试中的警示色） */
 .stat-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: var(--radius-lg);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform var(--dur-slow) var(--ease-out);
+  color: var(--text-secondary);
+  flex: none;
 }
-
 
 .stat-icon svg {
-  width: 24px;
-  height: 24px;
-}
-
-.stat-icon.green {
-  background: rgba(var(--success-rgb), 0.15);
-  color: var(--success);
-}
-
-.stat-icon.blue {
-  background: rgba(var(--accent-rgb), 0.15);
-  color: var(--accent-text, var(--accent));
-}
-
-.stat-icon.orange {
-  background: rgba(var(--warning-rgb), 0.15);
-  color: var(--warning);
-}
-
-.stat-icon.purple {
-  background: rgba(var(--purple-rgb), 0.15);
-  color: var(--purple);
+  width: 16px;
+  height: 16px;
 }
 
 .stat-info {
@@ -91,38 +82,74 @@
   color: var(--warning);
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: minmax(280px, 320px) 1fr;
-  gap: var(--space-md);
-  flex: 1;
-  min-height: 0;
+/* 主操作行（启动检测；登录中为取消登录）：紧邻网络状态结论，自顶栏迁入首页。
+   手动登录/网络测试已移至右下角悬浮工具条（DashboardView 的 .dash-dock） */
+.hero-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-left: auto;
+  flex: none;
 }
 
-.dashboard-left {
+/* 诊断 + 实时日志双栏行：等宽并排、grid 默认 stretch 等高——右列日志卡固定高度
+   主导行高（--dash-split-h），左列诊断卡上限钉在同一变量上（内容超出转卡内滚动，
+   行高不被撑破），两卡上下缘零偏差；间距交给网格 gap，≤1100px 折回单列恢复自然
+   高度（见文件尾媒体查询） */
+.dashboard-split {
+  --dash-split-h: 420px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+/* 诊断卡：stretch 吃满行高（与右列日志卡同高）；min-height:0 压掉内容最小高度，
+   超高由卡内滚动兜底——这是双卡上下缘严格对齐的另一半保证 */
+.dashboard-split > .diag-card {
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
   min-height: 0;
+  max-height: var(--dash-split-h);
+}
+
+/* 诊断卡 body：flex column 吃满卡内剩余高度（头部/贴底 footer 之外的区间全部归
+   它）；常规内容不溢出、溢出（展开检查细节等）时整体就地滚动，footer 恒贴卡底。
+   min-height:0 是卡内对齐的另一半保证——body 可收缩到行高以内，行高不被内容撑破 */
+.diag-card .card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.diag-card .card-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.diag-card .card-body::-webkit-scrollbar-thumb {
+  background: rgba(var(--slate-rgb), 0.15);
+  border-radius: var(--radius-xs);
 }
 
 .history-card {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.history-card .card-body {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
+/* 实时日志：诊断/日志双栏行的右列，固定高度内部滚动（高度与诊断卡上限共用
+   --dash-split-h，保证行内两卡上下缘严格对齐） */
 .log-card {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.dashboard-split > .log-card {
+  height: var(--dash-split-h);
 }
 
 .log-card .card-body {
@@ -137,6 +164,7 @@
 .log-viewer {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
   min-height: 0;
   font-family: var(--font-mono);
   font-size: var(--text-md);
@@ -182,9 +210,11 @@
   border-left-color: var(--accent);
 }
 
-/* 级别左边框色条：一眼识别严重程度 */
-.log-entry.log-error { border-left-color: var(--error); }
-.log-entry.log-warn, .log-entry.log-warning { border-left-color: var(--warning); }
+/* 级别左边框色条：一眼识别严重程度。error/warn 走 --log-* 语义 token
+   （base.css 定义，与 log-viewer.css 的级别徽标同源）；info 透明、debug 弱化
+   slate 是刻意的弱化设计，不走 token（改这两个需与徽标侧核对观感） */
+.log-entry.log-error { border-left-color: var(--log-error); }
+.log-entry.log-warn, .log-entry.log-warning { border-left-color: var(--log-warn); }
 .log-entry.log-info { border-left-color: transparent; }
 .log-entry.log-debug, .log-entry.log-trace { border-left-color: rgba(var(--slate-rgb), 0.35); }
 
@@ -202,8 +232,8 @@
   color: var(--text-secondary);
 }
 
-.log-entry.log-error .log-message { color: var(--error); }
-.log-entry.log-warn .log-message, .log-entry.log-warning .log-message { color: var(--warning); }
+.log-entry.log-error .log-message { color: var(--log-error); }
+.log-entry.log-warn .log-message, .log-entry.log-warning .log-message { color: var(--log-warn); }
 .log-entry.log-success .log-message { color: var(--success); }
 
 /* 消息 + 截图容器 */
@@ -238,13 +268,16 @@
   box-shadow: var(--shadow-hover);
 }
 
-/* 登录历史卡片 */
+/* 登录历史列表：全宽卡下唯一的滚动容器，单一限高（与上方日志卡同 420px 视距节
+   奏，宽卡面下单条记录更矮、可见条数更多），旧的 card-body 520px 双重限高已随
+   双栏布局移除 */
 .history-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 400px;
+  max-height: 420px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .history-item {
@@ -304,25 +337,7 @@
   gap: 10px;
 }
 
-.quick-actions-card { flex: none; }
-.quick-actions-card .card-header { padding: 10px 16px; }
-.quick-actions-card .card-body { padding: 12px 16px; }
-
-.action-buttons {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.action-buttons .btn {
-  min-width: 0;
-  min-height: 36px;
-  padding: 6px;
-  gap: 6px;
-  font-size: var(--text-md);
-}
-
-.action-buttons .btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.network-status-symbol svg { width: 20px; height: 20px; }
 
 .history-actions {
   display: flex;
@@ -422,6 +437,11 @@
 }
 
 /* 环境提示只保留两个明确的操作入口，避免横幅本身也承担隐含点击行为。 */
+.network-status-banner .status-text {
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+
 .network-status-banner.env-banner {
   min-height: 0;
   padding: 10px 16px;
@@ -447,15 +467,16 @@
   cursor: pointer;
 }
 
+/* 禁用态先于 hover 态（升序特异度）；hover 规则带 :not(:disabled) 本就不会命中禁用按钮 */
+.network-status-banner.env-banner .env-banner-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .network-status-banner.env-banner .env-banner-action:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
   box-shadow: none;
   transform: none;
-}
-
-.network-status-banner.env-banner .env-banner-action:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 .network-status-banner.env-banner .env-banner-detail {
@@ -483,11 +504,6 @@
 .network-status-banner.checking .status-dot {
   background: var(--primary);
   animation: pulse 2s ease-in-out infinite;
-}
-
-.network-status-banner .status-text {
-  font-size: var(--text-base);
-  font-weight: 500;
 }
 
 .network-status-banner .status-detail {
@@ -524,7 +540,6 @@
   color: var(--text-secondary);
 }
 
-.network-status-symbol svg { width: 20px; height: 20px; }
 .connected .network-status-symbol { background: var(--success-bg); color: var(--success); }
 .disconnected .network-status-symbol { background: var(--error-bg); color: var(--error); }
 .checking .network-status-symbol { background: rgba(var(--primary-rgb), 0.12); color: var(--primary); }
@@ -548,7 +563,8 @@
   line-height: 1.25;
 }
 
-.network-status-hero .status-dot {
+/* 与本组其余规则同为 .dashboard-page > 前缀（特异度不低于横幅状态变体，覆盖其 pulse 动画） */
+.dashboard-page > .network-status-hero .status-dot {
   width: 7px;
   height: 7px;
   animation: none;
@@ -563,16 +579,15 @@
 }
 
 @media (max-width: 1100px) {
-  .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
-  .dashboard-page .dashboard-grid { flex: none; }
+  .dashboard-split { grid-template-columns: 1fr; }
+  /* 单列恢复自然高度：诊断卡解除行高上限与 stretch，只留空态下限（不至于塌成一条） */
+  .dashboard-split > .diag-card { max-height: none; min-height: 300px; }
   .dashboard-page .history-card,
   .dashboard-page .log-card { min-height: 300px; }
   .dashboard-page .log-card { min-height: 420px; }
 }
 
 @media (max-height: 700px) {
-  .content-wrapper > .dashboard-page:has(.stats-grid) { height: auto; overflow: visible; }
-  .dashboard-page .dashboard-grid { flex: none; }
   .dashboard-page .history-card { min-height: 280px; }
   .dashboard-page .log-card { min-height: 340px; }
 }
@@ -596,8 +611,6 @@
   .network-status-banner.env-banner .btn { min-height: 30px; padding: 4px 8px; }
   .dashboard-page .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .dashboard-page .stat-card { padding: 12px; gap: 8px; min-width: 0; }
-  .dashboard-page .stat-icon { width: 34px; height: 34px; flex: none; }
-  .dashboard-page .stat-icon svg { width: 18px; height: 18px; }
   .dashboard-page .stat-info { min-width: 0; }
   .dashboard-page .stat-label { font-size: var(--text-xs); }
   .dashboard-page .stat-value { font-size: var(--text-lg); }

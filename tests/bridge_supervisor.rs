@@ -12,12 +12,12 @@
 
 mod common;
 
-use common::locate_venv;
+use common::{locate_venv, wait_until};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use campus_auth::bridge::{BridgeError, BridgeSupervisor};
+use campus_auth::bridge::{BridgeApi, BridgeError, BridgeSupervisor};
 use campus_auth::config::ConfigService;
 use campus_auth::status::StatusManager;
 use serde_json::{Value, json};
@@ -59,6 +59,13 @@ for line in sys.stdin:
         secs = (msg.get("params") or {}).get("secs", 10)
         time.sleep(float(secs))
         emit({"id": mid, "result": {"success": True, "data": {}, "error": None}})
+    elif method == "slow_then_start":
+        # BRG-1b：出队即 emit command_started（模拟真实 Worker 的起算点通知），
+        # 再挂起指定秒数（默认 2s）后回包
+        secs = (msg.get("params") or {}).get("secs", 2)
+        emit({"event": "command_started", "data": {"id": mid}})
+        time.sleep(float(secs))
+        emit({"id": mid, "result": {"success": True, "data": {"echo": method}, "error": None}})
     else:
         emit({"id": mid, "result": {"success": True, "data": {"echo": method}, "error": None}})
 "#;
@@ -227,8 +234,13 @@ async fn supervisor_cancel_返回_cancelled() {
             .await
     });
 
-    // Worker 已预热，token 注册与请求发送均在毫秒级完成；稍等后触发取消。
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // 等请求真正进入 Worker 并完成取消令牌注册与槽位写入：两者的同一临界区
+    // 在「发送成功后」执行（见 execute 路径注释），槽位可见即令牌已注册；
+    // 慢机上固定 sleep 会踩空，轮询到位即触发取消
+    assert!(
+        wait_until(Duration::from_secs(10), || bridge.session_busy()).await,
+        "sleep 请求未在期限内占用会话槽位（取消令牌未注册）"
+    );
     bridge.cancel("c1");
 
     let res = tokio::time::timeout(Duration::from_secs(8), jh)
@@ -275,8 +287,12 @@ async fn supervisor_超时_释放会话槽位() {
         "挂起请求应超时，实际 {r:?}"
     );
 
-    // 等待超时后的 Cancel → 本地 token 唤醒 → guard drop → 槽位释放
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // 等待超时后的 Cancel → 本地 token 唤醒 → guard drop → 槽位释放；
+    // 固定 500ms 在慢机上会踩空，轮询到槽位确已释放再继续
+    assert!(
+        wait_until(Duration::from_secs(15), || !bridge.session_busy()).await,
+        "超时后会话槽位未在期限内释放"
+    );
 
     // 调试类请求应通过（槽位已释放；若滞留则会 WorkerBusy）
     let r2 = bridge
@@ -328,8 +344,12 @@ async fn supervisor_超时宽限_不误杀接管槽位的新会话() {
     });
 
     // 等 A 占位后发送 B：FIFO 接管槽位（Login + browser_task 兼容），
-    // Python 串行队列让 B 排在 A 的 sleep 之后
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Python 串行队列让 B 排在 A 的 sleep 之后；A 的 stdin 发送先于槽位写入
+    // 可见（见 execute 路径注释），槽位可见即 A 已入队，B 必排在其后
+    assert!(
+        wait_until(Duration::from_secs(10), || bridge.session_busy()).await,
+        "A 未在期限内占用会话槽位"
+    );
     let task_b = {
         let bridge_b = bridge.clone();
         tokio::spawn(async move {
@@ -406,14 +426,22 @@ async fn supervisor_调用方中止_取消传播到worker并释放槽位() {
             .await
     });
 
-    // 等请求真正进入 Worker（预热后 token 注册与发送为毫秒级）
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // 等请求真正进入 Worker 并完成取消令牌注册与槽位写入（预热后为毫秒级），
+    // 随即中止调用方触发取消传播
+    assert!(
+        wait_until(Duration::from_secs(10), || bridge.session_busy()).await,
+        "sleep 请求未在期限内占用会话槽位"
+    );
     callee.abort();
 
     // 取消传播窗口：closed() → Cancel → 等 ACK 2s → kill_worker_now 优雅关闭
-    // 等待（约 3s，假 worker sleep 期间不响应 shutdown）→ drain → guard drop
-    // 复位槽位，全程约 5s+；给足余量后验证槽位可用（修复前 Worker 要挂满 12s）
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // 等待（假 worker sleep 期间不响应 shutdown）→ drain → guard drop 复位槽位，
+    // 全程约 5s+。原先固定 sleep(10s) 在慢机会踩空、快机纯浪费——轮询到槽位
+    // 确已复位即提前继续（修复前 Worker 要挂满 12s）
+    assert!(
+        wait_until(Duration::from_secs(15), || !bridge.session_busy()).await,
+        "调用方中止后取消传播未在期限内完成（槽位未复位）"
+    );
     let r = bridge
         .execute_with_timeout("debug_step", Value::Null, Duration::from_secs(40))
         .await;
@@ -463,8 +491,11 @@ async fn supervisor_归属回收_真实在途请求占槽时跳过() {
             .execute_with_timeout("sleep", json!({ "secs": 6, "cancel_id": "task-1" }), long)
             .await
     });
-    // 等请求真正进入 Worker 并完成槽位写入（预热后为毫秒级）
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // 等请求真正进入 Worker 并完成槽位写入（预热后为毫秒级，轮询到确已占槽）
+    assert!(
+        wait_until(Duration::from_secs(10), || bridge.session_busy()).await,
+        "在途请求未在期限内占用会话槽位"
+    );
 
     // 登录会话上一轮 attempt 的 cancel_id：与该槽位持有者不同
     let recycled = bridge
@@ -493,7 +524,10 @@ async fn supervisor_归属回收_真实在途请求占槽时跳过() {
             .execute_with_timeout("sleep", json!({ "secs": 6, "cancel_id": "task-2" }), long)
             .await
     });
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        wait_until(Duration::from_secs(10), || bridge.session_busy()).await,
+        "第二个在途请求未在期限内占用会话槽位"
+    );
     assert!(
         bridge.force_recycle_if_unowned(Some("task-2")).await,
         "槽位持有者应可回收（否则修复退化为「永不回收」，NetworkError 重试失去上下文修复能力）"
@@ -528,8 +562,6 @@ async fn supervisor_归属回收_真实在途请求占槽时跳过() {
 /// 形同虚设。用真实 IPC 调用链固定，而非注入式 mock。
 #[tokio::test]
 async fn supervisor_session_busy_反映真实槽位占用() {
-    use campus_auth::bridge::BridgeApi;
-
     let Some(venv) = locate_venv() else {
         eprintln!("跳过 bridge_supervisor session_busy：未找到本地 Python venv");
         return;
@@ -558,23 +590,96 @@ async fn supervisor_session_busy_反映真实槽位占用() {
             .execute_with_timeout("sleep", json!({ "secs": 5, "cancel_id": "busy-1" }), long)
             .await
     });
-    tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(
-        bridge.session_busy(),
+        wait_until(Duration::from_secs(10), || bridge.session_busy()).await,
         "真实在途请求占用槽位时必须报告忙（否则 OCR 卸载的前置拒绝形同虚设）"
     );
 
     // 请求结束、槽位释放 → 恢复空闲
     let r = join_with_timeout(inflight, 30).await;
     assert!(r.is_ok(), "在途请求应正常完成，实际 {r:?}");
-    // guard drop 与状态复位是异步的，给一个短窗口
-    for _ in 0..20 {
-        if !bridge.session_busy() {
-            break;
+    // guard drop 与状态复位是异步的，轮询等待释放（统一 wait_until 口径）
+    assert!(
+        wait_until(Duration::from_secs(5), || !bridge.session_busy()).await,
+        "请求结束后槽位应释放，不再报告忙"
+    );
+
+    handle.stop().await;
+}
+
+/// C2 / BRG-1b：FIFO 排队命令的超时预算应自「Python 真正开始执行」起算，
+/// 排队时间不再吃掉预算——否则排队命令超时后经 Cancel → 归属校验（发送时
+/// 已 supersede 槽位，必然命中）→ 强杀，连带摧毁 Worker 侧实际正在执行的
+/// 前序长命令。
+///
+/// 时序：A（sleep 2s）占住串行 Worker；0.3s 后 B（slow_then_start：出队即发
+/// command_started，再 sleep 2s 回包）入队，预算仅 3s。
+/// - 旧语义（预算自发送起算）：B 在 t≈3.3s 超时 → Cancel → 强杀整棵进程树；
+/// - 新语义：B 在 t≈2s 出队，command_started 把截止时刻重置到 t≈5s，
+///   B 在 t≈4s 正常回包 → 成功。
+#[tokio::test]
+async fn supervisor_排队命令_起算点后移_不因排队时间超时() {
+    let Some(venv) = locate_venv() else {
+        eprintln!("跳过 bridge_supervisor BRG-1b：未找到本地 Python venv");
+        return;
+    };
+    let Some(tree) = setup_worker_tree(&venv) else {
+        eprintln!("跳过 bridge_supervisor BRG-1b：无法创建 .venv 目录链接");
+        return;
+    };
+
+    let (bridge, handle, _config) = make_supervisor(&tree.base).await;
+
+    // 预热：确保 Worker 已 spawn 并通过健康检查
+    let _ = bridge
+        .execute_with_timeout("browser_task", Value::Null, Duration::from_secs(40))
+        .await;
+
+    // A：占住串行 Worker 2s（不发 command_started 的旧式命令，走旧语义不受影响）
+    let bridge_a = bridge.clone();
+    let task_a = tokio::spawn(async move {
+        bridge_a
+            .execute_with_timeout("sleep", json!({ "secs": 2 }), Duration::from_secs(40))
+            .await
+    });
+
+    // 等 A 真正占槽（stdin 发送先于槽位写入可见）后发送 B：B 排队至 A 结束
+    // （t≈2s）才开始执行；慢机上固定 300ms 会踩空（B 先于 A 占槽被误判时序）
+    assert!(
+        wait_until(Duration::from_secs(10), || bridge.session_busy()).await,
+        "前序命令 A 未在期限内占用会话槽位"
+    );
+    let bridge_b = bridge.clone();
+    let task_b = tokio::spawn(async move {
+        bridge_b
+            .execute_with_timeout(
+                "slow_then_start",
+                json!({ "secs": 2 }),
+                Duration::from_secs(3),
+            )
+            .await
+    });
+
+    // A 正常完成
+    let r_a = join_with_timeout(task_a, 30).await;
+    assert!(r_a.is_ok(), "前序命令应正常完成，实际 {r_a:?}");
+
+    // B：排队 ~2s + 执行 2s = 响应于发送后 ~4s，超过 3s 预算的「发送起算」
+    // 旧判定，但 command_started 已把预算重启——应成功而非 Timeout
+    let r_b = join_with_timeout(task_b, 30).await;
+    match r_b {
+        Ok(resp) => {
+            assert!(resp.result.success, "B 应成功，实际 {resp:?}");
+            assert_eq!(
+                resp.result.data.get("echo").and_then(Value::as_str),
+                Some("slow_then_start")
+            );
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        Err(BridgeError::Timeout) => {
+            panic!("B 不应超时：command_started 后预算应自真正执行起算（旧语义回归）")
+        }
+        other => panic!("期望 B 成功，实际 {other:?}"),
     }
-    assert!(!bridge.session_busy(), "请求结束后槽位应释放，不再报告忙");
 
     handle.stop().await;
 }

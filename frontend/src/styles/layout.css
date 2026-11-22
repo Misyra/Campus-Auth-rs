@@ -9,9 +9,9 @@
   --accent-text: var(--sidebar-accent);
   --error: var(--navigation-error);
   --success: var(--navigation-success);
-  --text-primary: var(--navigation-text, #000000);
-  --text-secondary: var(--navigation-secondary, #333333);
-  --text-muted: var(--navigation-secondary, #555555);
+  --text-primary: var(--navigation-text, #000000); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-secondary: var(--navigation-secondary, #333333); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-muted: var(--navigation-secondary, #555555); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
   --bg-hover: var(--navigation-hover);
   color: var(--text-primary);
   width: 228px;
@@ -97,9 +97,9 @@
 
 .top-bar {
   --accent-text: var(--sidebar-accent);
-  --text-primary: var(--navigation-text, #000000);
-  --text-secondary: var(--navigation-secondary, #333333);
-  --text-muted: var(--navigation-secondary, #555555);
+  --text-primary: var(--navigation-text, #000000); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-secondary: var(--navigation-secondary, #333333); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
+  --text-muted: var(--navigation-secondary, #555555); /* stylelint-disable-line color-no-hex -- 定义层回退色（--navigation-* 缺省兜底），同 base.css 定义层例外 */
   --bg-hover: var(--navigation-hover);
   color: var(--text-primary);
   display: grid;
@@ -107,7 +107,9 @@
   column-gap: 12px;
   align-items: center;
   min-height: 76px;
-  padding: 16px 32px;
+  /* 右缘对齐内容区：content-wrapper 为滚动容器并保留 6px 滚动条槽，
+     顶栏不动滚，故右内边距补上同一槽宽（32 + 6），图标/搜索框与卡片右缘齐平 */
+  padding: 16px 38px 16px 32px;
   background: var(--navigation-bg);
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -132,6 +134,107 @@
   gap: 12px;
   align-items: center;
   grid-column: 3;
+}
+
+/* 顶栏搜索：非设置路由为命令面板入口（点击与 Ctrl/⌘+K 同效）；
+   设置路由下切换为真输入框，直接过滤设置页（与页面搜索合并为同一入口） */
+.topbar-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  min-width: 168px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+
+.topbar-search:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-card-elevated);
+  color: var(--text-primary);
+}
+
+.topbar-search svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.topbar-search-text {
+  font-size: var(--text-md);
+  line-height: 1;
+}
+
+.topbar-search-kbd {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 设置路由下的输入形态：不可点按整块，输入框占满余下宽度 */
+.topbar-search--input {
+  min-width: 240px;
+  cursor: text;
+}
+
+.topbar-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  line-height: 1.2;
+}
+
+.topbar-search-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.topbar-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: none;
+}
+
+.topbar-search-clear:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.topbar-search-clear svg {
+  width: 14px;
+  height: 14px;
+}
+
+@media (max-width: 1100px) {
+  .topbar-search { min-width: 0; }
+  .topbar-search--input { min-width: 180px; }
+  .topbar-search-text,
+  .topbar-search-kbd { display: none; }
 }
 
 .top-title-area {
@@ -170,7 +273,10 @@
 
 .content-wrapper {
   flex: 1;
-  padding: 24px 32px 32px;
+  /* 页面级四周留白的**单一出处**：所有顶层页面共用这一组 padding（窄屏收窄见
+     responsive.css 的 768px 档）。页面文件不得再声明页面级 padding；页面私有
+     的额外 padding 属于页面差异，须注释说明（如 ai-task 的 padding-bottom）。 */
+  padding: var(--space-lg) var(--space-xl) var(--space-xl);
   overflow-y: auto;
   min-height: 0;
   scrollbar-gutter: stable;
@@ -183,23 +289,21 @@
 
 .top-actions > .btn-secondary { background: var(--navigation-hover); }
 
-/* ═══ 页面入场动画（全站唯一出处）═══
-   `.content-wrapper` 是三个 router-view 里最外层那个的落点，故 `> *` 恰好覆盖每一个
-   顶层页面（仪表盘/方案/任务/设置/关于/404）。用结构选择器而不是 `.page-content`：
-   `AppearanceView` / `AiTaskView` 的根节点不带那个类，此前 `ai_task.css` 手抄了一份、
-   外观页干脆没有——同一个转场三种待遇。任何人新增页面都自动获得一致的转场。
-
-   **只有这一条规则。** 任务页 / 设置页内部也曾各挂一份（转 Tab 时被换掉的面板），
-   但这两个页面进入时外壳与内部面板会**同时**播 pageEnter：嵌套的 animation 位移相加、
-   透明度相乘，同一个转场在它们身上明显更"重"（实测 `/tasks` 与 `/settings/*` 各命中
-   两个元素，其余页面只有一个）。嵌套动画只能二选一，留外层——它覆盖全部页面，
-   而内层那份换来的只是"切 Tab 时淡入"，切 Tab 本来就是瞬时换内容。 */
-.content-wrapper > * {
-  animation: pageEnter var(--dur-slow) var(--ease-out);
-}
-
-/* 仪表板页面：填满 content-wrapper，不产生外层滚动 */
-.content-wrapper > .page-content:has(.stats-grid) {
-  height: 100%;
-  overflow: hidden;
+/* ═══ 页面外壳布局契约（单一出处）═══
+   `.page-content` 是顶层页面根容器的统一外壳类：仪表盘 / 方案 / 任务 / 设置 / 关于
+   的根节点都挂在 content-wrapper 的直接子层（404 页与设置内嵌面板除外，见各自文件）。
+   契约内容：
+   - flex 纵向 + gap：页面根的排布方向与块间距只在这里声明；页面文件只声明**差异**
+     （如 settings 的 max-width 居中与 gap:0、dashboard 的 margin 间距模式、
+     appearance 的栅格——它已内嵌进设置页，不再消费本契约）。
+   - 页面级 padding：单一出处是上方 .content-wrapper，页面不重复声明。
+   - 入场动画不在外壳上挂：页面根统一消费 motion.css 的 `.page-in`（新页面照抄一个
+     类名即可）。旧结构选择器入场（`.content-wrapper > *` 的 pageEnter）已退役——
+     它与 `.page-in` 同特异度且后导入，曾压制了 motion.css 的基元口径（6px/--dur-slow
+     vs 4px/--dur-base）。AiTaskView 是 /tasks 的嵌套路由、本就不是直接子层，
+     入场由外层 TasksView 外壳承担，切 Tab 瞬时换内容。 */
+.page-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
 }

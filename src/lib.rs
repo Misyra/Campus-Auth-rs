@@ -14,11 +14,16 @@ pub mod config;
 pub mod container;
 pub mod engine;
 pub mod environment;
+pub mod events;
+/// Android JNI 薄层：整个模块仅在安卓 target 编译，host 构建与测试天然跳过
+#[cfg(target_os = "android")]
+pub mod ffi_android;
 pub mod launcher;
 pub mod logging;
 pub mod login;
 pub mod monitor;
 pub mod network;
+pub mod notification;
 pub mod scheduler;
 pub mod status;
 pub mod tasks;

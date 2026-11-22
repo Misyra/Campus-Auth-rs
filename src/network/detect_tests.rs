@@ -752,3 +752,103 @@ fn test_parse_netsh_ssid_applies_hex_decode() {
         Some("Ciallo～(∠・ω< )⌒★".to_string())
     );
 }
+
+// ============ CachingDetector 缓存测试（A21：失败结果也缓存短 TTL） ============
+
+/// 统计调用次数并可编程返回结果的 mock 检测器
+#[derive(Default)]
+struct CountingDetect {
+    calls: std::sync::atomic::AtomicUsize,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl NetworkDetect for CountingDetect {
+    async fn list_interfaces(&self) -> Result<Vec<InterfaceInfo>, NetworkError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            Err(NetworkError::UnsupportedPlatform)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    async fn default_gateways(&self) -> Result<Vec<Ipv4Addr>, NetworkError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            Err(NetworkError::UnsupportedPlatform)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    async fn current_ssid(&self) -> Result<Option<String>, NetworkError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            Err(NetworkError::UnsupportedPlatform)
+        } else {
+            Ok(Some("campus".to_string()))
+        }
+    }
+}
+
+#[tokio::test]
+async fn caching_detector_caches_success_result() {
+    let mock = std::sync::Arc::new(CountingDetect::default());
+    let detector = CachingDetector::new(mock.clone());
+    let first = detector.current_ssid().await.unwrap();
+    let second = detector.current_ssid().await.unwrap();
+    assert_eq!(first, Some("campus".to_string()));
+    assert_eq!(second, first);
+    assert_eq!(mock.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn caching_detector_caches_failure_result_short_ttl() {
+    let mock = std::sync::Arc::new(CountingDetect {
+        fail: true,
+        ..Default::default()
+    });
+    let detector = CachingDetector::new(mock.clone());
+    let first = detector.list_interfaces().await.unwrap_err().to_string();
+    // 第二次调用应命中失败缓存，不再穿透到 mock
+    let second = detector.list_interfaces().await.unwrap_err().to_string();
+    assert_eq!(mock.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(first, second);
+    assert_eq!(
+        second,
+        NetworkError::UnsupportedPlatform.to_string(),
+        "缓存命中的错误应还原原始文案"
+    );
+}
+
+#[test]
+fn caching_detector_fresh_uses_short_ttl_for_errors() {
+    // 直接驱动 fresh 的 TTL 判定，避免测试真实睡眠 5s：
+    // 失败条目超过 5s 短 TTL 后失效；成功条目 30s 内仍然新鲜
+    let now = std::time::Instant::now();
+    let stale_error = std::sync::Mutex::new(Some(Cached {
+        fetched_at: now - std::time::Duration::from_secs(DETECT_ERROR_CACHE_TTL_SECS + 1),
+        value: Err("stale".to_string()),
+    }));
+    assert!(CachingDetector::fresh::<Vec<InterfaceInfo>>(&stale_error).is_none());
+
+    let fresh_error = std::sync::Mutex::new(Some(Cached {
+        fetched_at: now,
+        value: Err("boom".to_string()),
+    }));
+    assert_eq!(
+        CachingDetector::fresh::<Vec<InterfaceInfo>>(&fresh_error),
+        Some(Err("boom".to_string()))
+    );
+
+    // 成功条目即使已超过失败 TTL，只要未过 30s 仍命中
+    let recent_ok = std::sync::Mutex::new(Some(Cached {
+        fetched_at: now - std::time::Duration::from_secs(DETECT_ERROR_CACHE_TTL_SECS + 1),
+        value: Ok(vec![]),
+    }));
+    assert_eq!(
+        CachingDetector::fresh::<Vec<InterfaceInfo>>(&recent_ok),
+        Some(Ok(vec![]))
+    );
+}

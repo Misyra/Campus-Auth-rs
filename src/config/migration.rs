@@ -1,8 +1,9 @@
 //! 配置 schema 版本迁移 pipeline（v5 → v6 → v7 → v8 → v9 → v10）
 //!
 //! 启动时若 `settings.json` 的 `config_version` 低于当前版本，按 `MIGRATIONS` 顺序
-//! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用覆盖写入，
-//! `settings.json` 的 `config_version` 更新是 commit point。
+//! 执行迁移函数，将旧结构转换为新结构并写回。迁移是幂等的：Profile 文件使用原子覆盖
+//! 写入（tmp + rename，不产生截断文件），`settings.json` 的 `config_version` 更新是
+//! commit point——任一迁移返回 Err 都不会提交新版本号，下次启动重跑迁移。
 //!
 //! v10 起迁移可能**跨文件**（`migrate_v9_to_v10` 把方案里的直连字段搬成
 //! `<base>/tasks/http/<id>.json`），因此每个迁移函数都要能安全重跑：先判断
@@ -17,6 +18,8 @@ use serde_json::Value;
 use crate::config::ConfigError;
 use crate::config::schema::SettingsData;
 use crate::config::service::is_valid_profile_id;
+use crate::utils::io::{atomic_copy_file, atomic_write_bytes};
+use crate::utils::io_human::io_error_at;
 
 /// 单个迁移函数的签名
 ///
@@ -59,6 +62,8 @@ pub fn run_migrations(config_dir: &Path, value: &mut Value) -> Result<u32, Confi
     // 写回迁移后的版本号：仅改返回值会导致落盘的 settings.json 永远停在
     // 迁移前版本，每次启动重跑迁移链并重写盘（CFG-1）；v5→v6 内硬编码的
     // 中间 checkpoint（=6）保留，供迁移中途失败的下次续跑定位。
+    // 本处即版本 commit point：上方任一迁移返回 Err 都到不了这里，盘上版本号
+    // 保持迁移前值，下次启动重跑迁移（如 v10 方案写回失败的注入重试）。
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
             "config_version".to_string(),
@@ -97,7 +102,8 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
     // 1. 拆分 profiles 到独立文件
     if let Some(profiles) = value.get_mut("profiles").and_then(Value::as_object_mut) {
         let profiles_dir = config_dir.join("profiles");
-        std::fs::create_dir_all(&profiles_dir)?;
+        std::fs::create_dir_all(&profiles_dir)
+            .map_err(|e| io_error_at("创建方案目录", &profiles_dir, e))?;
         // R4：被跳过的非法 id 集合——若其中包含 active_profile_id，
         // 迁移结束后需回退 default，避免活跃 Profile 指向不存在的文件
         let mut skipped_invalid_ids: HashSet<String> = HashSet::new();
@@ -125,7 +131,10 @@ fn migrate_v5_to_v6(config_dir: &Path, value: &mut Value) -> Result<(), ConfigEr
             // 写入独立文件
             let path = profiles_dir.join(format!("{id}.json"));
             let json = serde_json::to_string_pretty(profile)?;
-            std::fs::write(&path, json)?;
+            // 原子写回：与 v8→v9 / v9→v10 同口径——迁移中途崩溃不得留下截断文件
+            // （截断的 profile 会被 load_all_profiles 永久跳过，凭据再也找不回来）
+            atomic_write_bytes(&path, json.as_bytes())
+                .map_err(|e| io_error_at("写入迁移方案文件", &path, e))?;
         }
         // 被跳过的 id 若是活跃 Profile：回退 default，防止活跃指向悬空文件
         let active = value
@@ -289,21 +298,81 @@ fn backup_config_dir(config_dir: &Path) -> std::io::Result<PathBuf> {
 /// `remove_dir_all` 会把他人尚未回滚的备份连带误删。冲突时加 `-2`、`-3` …
 /// 序号后缀重试，保证每次迁移都得到独立的新目录。
 fn unique_backup_dir(config_dir: &Path, stamp: &str) -> PathBuf {
-    let mut candidate = config_dir.join(format!("{}{}", crate::config::BACKUP_PREFIX, stamp));
+    unique_backup_dir_with_prefix(config_dir, stamp, crate::config::BACKUP_PREFIX)
+}
+
+/// [`unique_backup_dir`] 的前缀参数化版本
+///
+/// 供按版本命名的方案文件备份复用（`.backup.v8.{ts}` / `.backup.v9.{ts}`），
+/// 冲突加后缀的口径与整目录备份完全一致。
+fn unique_backup_dir_with_prefix(config_dir: &Path, stamp: &str, prefix: &str) -> PathBuf {
+    let mut candidate = config_dir.join(format!("{prefix}{stamp}"));
     let mut n: u32 = 2;
     while candidate.exists() {
-        candidate = config_dir.join(format!("{}{}-{n}", crate::config::BACKUP_PREFIX, stamp));
+        candidate = config_dir.join(format!("{prefix}{stamp}-{n}"));
         n += 1;
     }
     candidate
 }
 
+/// 迁移写回前备份将被改写的方案文件到 `<config_dir>/.backup.v{version}.{ts}/`
+///
+/// 落点与命名口径同 v5→v6 的整目录备份（[`backup_config_dir`]），区别是只拷贝
+/// 将被改写的单个方案文件。`backup_dir` 由调用方跨多次调用复用（同一轮迁移
+/// 共享一个备份目录），首次调用时创建（同秒冲突加 `-2` 后缀，口径同
+/// [`unique_backup_dir`]）。
+///
+/// 备份是 best-effort：失败仅告警，不阻断迁移——写回本身已是原子替换（不产生
+/// 截断文件），备份只提供内容层面的回滚副本。备份必须先于写回执行，且单份
+/// 备份经 [`atomic_copy_file`] 落盘，崩溃不会留下半截的备份原文误导用户回滚。
+fn backup_profile_before_rewrite(
+    config_dir: &Path,
+    version: u32,
+    backup_dir: &mut Option<PathBuf>,
+    profile_path: &Path,
+) {
+    if backup_dir.is_none() {
+        let stamp = Local::now().format("%Y%m%d%H%M%S").to_string();
+        let dir =
+            unique_backup_dir_with_prefix(config_dir, &stamp, &format!(".backup.v{version}."));
+        match std::fs::create_dir_all(&dir) {
+            Ok(()) => *backup_dir = Some(dir),
+            Err(e) => {
+                tracing::warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "创建方案备份目录失败（迁移继续，仅失去本次写回的回滚副本）"
+                );
+                return;
+            }
+        }
+    }
+    let Some(dir) = backup_dir else {
+        return;
+    };
+    let Some(name) = profile_path.file_name() else {
+        return;
+    };
+    let dest = dir.join(name);
+    if let Err(e) = atomic_copy_file(profile_path, &dest) {
+        tracing::warn!(
+            from = %profile_path.display(),
+            to = %dest.display(),
+            error = %e,
+            "备份将被改写的方案文件失败（迁移继续，仅失去该文件的回滚副本）"
+        );
+    }
+}
+
 /// 递归拷贝目录内容（跳过备份目录自身，避免自我嵌套）
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
+    std::fs::create_dir_all(dst).map_err(|e| io_error_at("创建迁移备份目录", dst, e))?;
+    for entry in std::fs::read_dir(src).map_err(|e| io_error_at("读取待备份配置目录", src, e))?
+    {
+        let entry = entry.map_err(|e| io_error_at("读取待备份配置目录", src, e))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| io_error_at("读取待备份配置目录", src, e))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
@@ -320,7 +389,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             }
             copy_dir_recursive(&src_path, &dst_path)?;
         } else if file_type.is_file() {
-            std::fs::copy(&src_path, &dst_path)?;
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| io_error_at("复制配置备份文件", &src_path, e))?;
         }
     }
     Ok(())
@@ -436,8 +506,14 @@ fn migrate_v8_to_v9(config_dir: &Path, _value: &mut Value) -> Result<(), ConfigE
         if let Some(obj) = profile.as_object_mut() {
             obj.insert("active_task".to_string(), Value::String(task_id.clone()));
         }
+        // 写回前先备份原文（best-effort，口径见 backup_profile_before_rewrite）
+        let mut backup_dir: Option<PathBuf> = None;
+        backup_profile_before_rewrite(config_dir, 8, &mut backup_dir, &profile_path);
+        // 原子写回：迁移中途断电/ENOSPC 不得留下截断的方案文件（截断会被
+        // load_all_profiles 永久跳过，凭据再也找不回来）
         let json = serde_json::to_string_pretty(&profile)?;
-        std::fs::write(&profile_path, json)?;
+        atomic_write_bytes(&profile_path, json.as_bytes())
+            .map_err(|e| io_error_at("写回迁移方案文件", &profile_path, e))?;
         tracing::info!(
             profile_id = %active_id,
             task_id = %task_id,
@@ -472,18 +548,26 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
 
     let entries = match std::fs::read_dir(&profiles_dir) {
         Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 方案目录不存在：即零个方案，v10 迁移无事可做（幂等 no-op，
+            // 生产路径 profiles 目录已在 ConfigService 构造期预建）
+            return Ok(());
+        }
         Err(e) => {
-            // 方案目录不可读：不动任何东西，留给下次启动重试（迁移版本号未提交）
-            tracing::warn!(
+            // 方案目录不可读：中止迁移而非跳过——此刻提交版本号会让所有方案的
+            // 内联直连键在下次保存时静默丢弃，必须留待下次启动重试
+            tracing::error!(
                 path = %profiles_dir.display(),
                 error = %e,
-                "v10 迁移跳过：方案目录不可读"
+                "v10 迁移中止：方案目录不可读（版本号不提交，下次启动重试）"
             );
-            return Ok(());
+            return Err(io_error_at("读取方案目录", &profiles_dir, e).into());
         }
     };
 
     let mut created: Vec<String> = Vec::new();
+    // 同一轮迁移共享一个备份目录，首个将被改写的方案文件触发创建（惰性）
+    let mut backup_dir: Option<PathBuf> = None;
     let mut profile_paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -523,37 +607,45 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
         let task_id = match pick_http_task_id(&tasks_dir, &http_dir, profile_id, &profile) {
             Ok(id) => id,
             Err(reason) => {
+                // 中止而非跳过（与「写回失败」同语义，P3-16）：跳过会照常提交
+                // 版本号，该方案的内联直连键在下次保存时被 v10 schema 静默丢弃；
+                // 中断重跑把问题留在可诊断状态——用户腾出/改名同名任务后，
+                // 下次启动迁移即可补上搬运与绑定
                 tracing::error!(
                     profile_id = %profile_id,
                     reason = %reason,
-                    "v10 迁移跳过：无法为该方案分配直连任务 ID，方案里的直连配置保持原样（未删除）"
+                    "v10 迁移中止：无法为该方案分配直连任务 ID（版本号不提交，下次启动重试）"
                 );
-                continue;
+                return Err(ConfigError::MigrationFailed {
+                    from: 9,
+                    to: 10,
+                    reason: format!("方案 {profile_id} 的直连任务 ID 分配失败：{reason}"),
+                });
             }
         };
 
         if !path_has_task(&http_dir, &task_id) {
             let task = build_legacy_http_task(&task_id, &profile);
             if let Err(e) = std::fs::create_dir_all(&http_dir) {
-                tracing::warn!(path = %http_dir.display(), error = %e, "v10 迁移：创建直连任务目录失败");
-                continue;
+                // 传播 Err 而非跳过：跳过会照常提交版本号，该方案的内联直连键在
+                // 下次保存时被 v10 schema 静默丢弃——中断重跑比静默丢失安全
+                tracing::error!(
+                    path = %http_dir.display(),
+                    error = %e,
+                    "v10 迁移中止：创建直连任务目录失败（版本号不提交，下次启动重试）"
+                );
+                return Err(io_error_at("创建直连任务目录", &http_dir, e).into());
             }
+            // 原子写入直连任务：中途断电/ENOSPC 不得留下截断的任务文件
             let task_path = http_dir.join(format!("{task_id}.json"));
-            match serde_json::to_string_pretty(&task) {
-                Ok(json) => {
-                    if let Err(e) = std::fs::write(&task_path, json) {
-                        tracing::warn!(
-                            path = %task_path.display(),
-                            error = %e,
-                            "v10 迁移：写入直连任务失败，保留方案里的原配置"
-                        );
-                        continue;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "v10 迁移：序列化直连任务失败");
-                    continue;
-                }
+            let json = serde_json::to_string_pretty(&task)?;
+            if let Err(e) = atomic_write_bytes(&task_path, json.as_bytes()) {
+                tracing::error!(
+                    path = %task_path.display(),
+                    error = %e,
+                    "v10 迁移中止：写入直连任务失败（版本号不提交，下次启动重试）"
+                );
+                return Err(io_error_at("写入直连任务文件", &task_path, e).into());
             }
             created.push(task_id.clone());
             append_to_order(&tasks_dir, &task_id);
@@ -571,19 +663,19 @@ fn migrate_v9_to_v10(config_dir: &Path, _value: &mut Value) -> Result<(), Config
                 obj.remove(key);
             }
         }
-        match serde_json::to_string_pretty(&profile) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    tracing::warn!(
-                        profile_id = %profile_id,
-                        error = %e,
-                        "v10 迁移：写回方案失败（直连任务已就绪，下次启动会重试绑定）"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(profile_id = %profile_id, error = %e, "v10 迁移：序列化方案失败")
-            }
+        // 写回前先备份原文（best-effort：备份失败仅告警，不阻断迁移）
+        backup_profile_before_rewrite(config_dir, 9, &mut backup_dir, &path);
+        // 原子写回 + 失败传播：写回失败若吞掉告警继续走，版本号照常提交、
+        // 方案内联键注定静默丢弃（原「下次启动重试」的承诺并不成立）——
+        // 改为传播 Err 阻断版本提交，下次启动重跑迁移补上绑定与清理
+        let json = serde_json::to_string_pretty(&profile)?;
+        if let Err(e) = atomic_write_bytes(&path, json.as_bytes()) {
+            tracing::error!(
+                profile_id = %profile_id,
+                error = %e,
+                "v10 迁移中止：写回方案失败（版本号不提交，下次启动重试）"
+            );
+            return Err(io_error_at("写回迁移方案文件", &path, e).into());
         }
     }
 
@@ -755,7 +847,7 @@ fn append_to_order(tasks_dir: &Path, task_id: &str) {
     order.push(Value::String(task_id.to_string()));
     let json = serde_json::json!({ "order": order });
     if let Ok(text) = serde_json::to_string_pretty(&json)
-        && let Err(e) = std::fs::write(&path, text)
+        && let Err(e) = atomic_write_bytes(&path, text.as_bytes())
     {
         tracing::warn!(
             path = %path.display(),
@@ -1501,5 +1593,1995 @@ mod tests {
             read_profile(&config_dir, "default")["active_http_task"],
             "default"
         );
+    }
+
+    /// P3-16：方案 id 与 -2…-20 后缀全部被占用时迁移必须中止返回 Err（版本号
+    /// 不提交、方案内联直连键保持原文），与「写回失败」同语义——此前跳过后
+    /// 照常提交版本号，内联直连配置在下次保存时被 v10 schema 静默丢弃
+    #[test]
+    fn test_migrate_v9_to_v10_exhausted_task_ids_aborts_without_version_commit() {
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        // 占满方案 id 及 -2…-20 全部候选（browser 桶同名任务，模拟用户自建；
+        // http 桶留空使「上次迁移复用」分支不命中）
+        let browser_dir = tmp.path().join("tasks").join("browser");
+        std::fs::create_dir_all(&browser_dir).unwrap();
+        std::fs::write(
+            browser_dir.join("default.json"),
+            r#"{"type":"browser","task_id":"default"}"#,
+        )
+        .unwrap();
+        for n in 2..=20 {
+            std::fs::write(
+                browser_dir.join(format!("default-{n}.json")),
+                format!(r#"{{"type":"browser","task_id":"default-{n}"}}"#),
+            )
+            .unwrap();
+        }
+        let original =
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+
+        let err = run_migrations(&config_dir, &mut v).unwrap_err();
+
+        // 版本号不提交（停 9）、错误中文可诊断（含迁移区间 / 方案 id / 占用原因）
+        assert_eq!(v["config_version"], 9, "中止迁移不得提交新版本号");
+        let message = err.to_string();
+        assert!(message.contains("v9→v10"), "错误须标注迁移区间: {message}");
+        assert!(message.contains("default"), "错误须含方案 id: {message}");
+        assert!(message.contains("占用"), "错误须含占用原因: {message}");
+        // 方案保持原文：内联直连键未删，修复后下次启动可重试
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap(),
+            original
+        );
+
+        // 腾出末位候选后重跑成功：迁移自愈补上搬运与绑定
+        std::fs::remove_file(browser_dir.join("default-20.json")).unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        run_migrations(&config_dir, &mut v).unwrap();
+        assert_eq!(v["config_version"], 10);
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default-20",
+            "腾出的候选应被落位绑定"
+        );
+    }
+
+    // ============ 中断续跑：写回失败传播 + 写回前备份 + 幂等重跑（T0b-1）============
+
+    /// 列出 config_dir 下以指定前缀命名的备份目录（排序保证稳定）
+    fn list_backup_dirs(config_dir: &Path, prefix: &str) -> Vec<std::path::PathBuf> {
+        let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(config_dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with(prefix))
+                    .unwrap_or(false)
+            })
+            .collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// v9→v10 方案写回失败必须传播 Err 阻断版本提交：config_version 停在 9、
+    /// 方案文件保持原文；修复后下次迁移重跑成功（中断轮已写出的任务被复用）
+    #[test]
+    fn test_migrate_v9_to_v10_write_back_failure_blocks_version_commit() {
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let profiles_dir = config_dir.join("profiles");
+        let profile_path = profiles_dir.join("default.json");
+        let original = std::fs::read_to_string(&profile_path).unwrap();
+
+        // 注入写回失败：Unix 让方案目录只读（atomic_write_bytes 建临时文件即失败）；
+        // Windows 让目标文件只读（rename 覆盖只读文件被拒绝）
+        #[cfg(unix)]
+        let dir_perm = std::fs::metadata(&profiles_dir).unwrap().permissions();
+        #[cfg(windows)]
+        let file_perm = std::fs::metadata(&profile_path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut readonly = dir_perm.clone();
+            readonly.set_mode(0o555);
+            std::fs::set_permissions(&profiles_dir, readonly).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut readonly = file_perm.clone();
+            readonly.set_readonly(true);
+            std::fs::set_permissions(&profile_path, readonly).unwrap();
+        }
+
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        let result = run_migrations(&config_dir, &mut v);
+
+        // 立即恢复权限：后续重跑与临时目录清理都需要可写
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut writable = dir_perm.clone();
+            writable.set_mode(0o755);
+            std::fs::set_permissions(&profiles_dir, writable).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut writable = file_perm.clone();
+            // Windows 上 set_readonly(false) 是恢复可写的正确 API；clippy 该 lint
+            // 按 Unix 语义（等效全员可写）跨平台开火，本块仅 Windows 编译，显式豁免
+            #[allow(clippy::permissions_set_readonly_false)]
+            writable.set_readonly(false);
+            std::fs::set_permissions(&profile_path, writable).unwrap();
+        }
+
+        assert!(result.is_err(), "写回失败必须传播 Err 阻断版本提交");
+        assert_eq!(v["config_version"], 9, "版本号不得提交，下次启动重跑迁移");
+        assert_eq!(
+            std::fs::read_to_string(&profile_path).unwrap(),
+            original,
+            "原子写失败不得改动方案文件（无截断、无半截内容）"
+        );
+        // 原子写语义兜住：失败后无 .tmp_ 残留
+        let residue: Vec<String> = std::fs::read_dir(&profiles_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(crate::config::TMP_PREFIX))
+            .collect();
+        assert!(residue.is_empty(), "写回失败不得残留临时文件: {residue:?}");
+
+        // 修复权限后重跑：迁移成功，中断轮已写出的直连任务被复用（不重复建 -2）
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        let version = run_migrations(&config_dir, &mut v).unwrap();
+        assert_eq!(version, crate::config::CURRENT_CONFIG_VERSION);
+        assert_eq!(
+            read_profile(&config_dir, "default")["active_http_task"],
+            "default"
+        );
+        assert!(
+            !tmp.path()
+                .join("tasks")
+                .join("http")
+                .join("default-2.json")
+                .exists(),
+            "重跑应复用中断轮已写出的任务"
+        );
+    }
+
+    /// 写回前备份：`.backup.v8.*` / `.backup.v9.*` 保存改写前原文
+    #[test]
+    fn test_migrate_backs_up_profiles_before_rewrite() {
+        // v9→v10：备份内联直连键尚未搬走的方案原文
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let original =
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap();
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        let backups = list_backup_dirs(&config_dir, ".backup.v9.");
+        assert_eq!(backups.len(), 1, "应产生恰好一个 v9 备份目录");
+        assert_eq!(
+            std::fs::read_to_string(backups[0].join("default.json")).unwrap(),
+            original,
+            "备份必须是改写前原文"
+        );
+        assert!(original.contains("\"http_url\""), "原文应含内联直连键");
+        assert!(!original.contains("active_http_task"), "原文应无新绑定");
+
+        // v8→v9：同口径备份
+        let tmp8 = v8_fixture(Some("mytask"), None);
+        let config_dir8 = tmp8.path().join("config");
+        let original8 =
+            std::fs::read_to_string(config_dir8.join("profiles").join("default.json")).unwrap();
+        let mut v8 = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+        migrate_v8_to_v9(&config_dir8, &mut v8).unwrap();
+
+        let backups8 = list_backup_dirs(&config_dir8, ".backup.v8.");
+        assert_eq!(backups8.len(), 1, "应产生恰好一个 v8 备份目录");
+        assert_eq!(
+            std::fs::read_to_string(backups8[0].join("default.json")).unwrap(),
+            original8,
+            "v8 备份必须是改写前原文"
+        );
+        assert!(!original8.contains("\"active_task\""), "原文应无任务绑定");
+    }
+
+    /// 迁移完成后幂等重跑为 no-op：不改写文件、不产生新备份、不重复建任务
+    #[test]
+    fn test_migrate_rerun_after_success_is_noop() {
+        // v9→v10：首轮已绑定并清掉内联键，重跑不应再改写任何文件
+        let tmp = v9_fixture("default", "http://10.0.0.1/login", None);
+        let config_dir = tmp.path().join("config");
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+        let profile_after =
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap();
+        let task_after =
+            std::fs::read_to_string(tmp.path().join("tasks").join("http").join("default.json"))
+                .unwrap();
+        let backup_count = list_backup_dirs(&config_dir, ".backup.v9.").len();
+
+        let mut v = serde_json::json!({"config_version": 9, "active_profile_id": "default"});
+        migrate_v9_to_v10(&config_dir, &mut v).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir.join("profiles").join("default.json")).unwrap(),
+            profile_after,
+            "重跑不得改写方案文件"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("tasks").join("http").join("default.json"))
+                .unwrap(),
+            task_after,
+            "重跑不得改写已生成的任务"
+        );
+        assert_eq!(
+            list_backup_dirs(&config_dir, ".backup.v9.").len(),
+            backup_count,
+            "重跑未发生改写，不得产生新备份"
+        );
+        assert!(
+            !tmp.path()
+                .join("tasks")
+                .join("http")
+                .join("default-2.json")
+                .exists()
+        );
+
+        // v8→v9：首轮已绑定，重跑不覆盖、不备份
+        let tmp8 = v8_fixture(Some("mytask"), None);
+        let config_dir8 = tmp8.path().join("config");
+        let mut v8 = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+        migrate_v8_to_v9(&config_dir8, &mut v8).unwrap();
+        let profile8_after =
+            std::fs::read_to_string(config_dir8.join("profiles").join("default.json")).unwrap();
+        let backup8_count = list_backup_dirs(&config_dir8, ".backup.v8.").len();
+
+        let mut v8 = serde_json::json!({"config_version": 8, "active_profile_id": "default"});
+        migrate_v8_to_v9(&config_dir8, &mut v8).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(config_dir8.join("profiles").join("default.json")).unwrap(),
+            profile8_after,
+            "重跑不得改写方案文件"
+        );
+        assert_eq!(
+            list_backup_dirs(&config_dir8, ".backup.v8.").len(),
+            backup8_count,
+            "重跑未发生改写，不得产生新备份"
+        );
+    }
+
+    // ============ 属性测试（proptest）：迁移链全输入域不变量（T4-2b） ============
+    //
+    // 范式与 src/login/session.rs / src/bridge/process.rs 的既有属性测试一致：
+    // 512 cases、回归文件自动落 proptest-regressions/config/migration.txt、
+    // 随机失败必可 shrink 复现。
+    //
+    // 生成器覆盖面（合法旧版本配置域）：
+    // - 起始版本 1..=9（权重偏向迁移最密集的 v5 / v9）
+    // - 方案 0..=3 条：合法 id 池（default/dorm/lab，去重防撞）+ start≤5 时偶发
+    //   非法 id（con / we/ird / a b，覆盖 Windows 保留名与路径穿越的「跳过」分支）；
+    //   字段含 v5 旧名（carrier / match_gateway_ip / match_ssid / carrier_custom）、
+    //   新旧键并存的改名冲突（旧值被丢弃）、v9 内联直连的「全套 / 全空 / 仅证书
+    //   策略」三态
+    // - 全局段按起始版本渲染 v5 旧名或 v6+ 现名；已知键可选存在（缺省 / 全键齐）、
+    //   v5 废弃键混入、未知键混入（settings 顶层与 monitor 段内）
+    // - 磁盘夹具：tasks/.order.json active（驱动 v8→v9 绑定）、浏览器任务占名
+    //   （驱动 v9→v10 换 -2 后缀）、用户自建直连任务占名（全套配置让位 -2，
+    //   仅证书策略时内容一致复用）
+    //
+    // 产线口径下「截断 JSON」在 run_migrations 上游即被隔离（service.rs 先按
+    // Value 解析 settings.json，解析失败走 corrupt 隔离备份，不会进入迁移），
+    // 故截断类畸形由下方畸形输入属性以根形状 / 类型错位 / profiles 形状 /
+    // 深嵌套 / 非法版本号形态覆盖。
+
+    use proptest::prelude::*;
+    use serde_json::json;
+
+    /// 属性测试统一口径：512 cases（CI 亲和；随机失败必可 shrink 复现）
+    fn prop_config() -> proptest::test_runner::Config {
+        proptest::test_runner::Config::with_cases(512)
+    }
+
+    /// [`prop_assert_eq!`] 的借用版：serde_json 索引与构造表达式统一按引用比较。
+    /// prop_assert_eq 宏按值绑定参数（`let left = $left;`），而 `Value` 非 Copy，
+    /// 索引表达式（解引用 `Index::index` 的返回）不可按值移出。
+    macro_rules! prop_json_eq {
+        ($left:expr, $right:expr $(,)?) => {
+            prop_assert_eq!(&$left, &$right)
+        };
+        ($left:expr, $right:expr, $fmt:tt $($args:tt)*) => {
+            prop_assert_eq!(&$left, &$right, $fmt $($args)*)
+        };
+    }
+
+    /// v6→v7 迁移的新旧更新源（与 migrate_v6_to_v7 内部常量同值，供断言对照）
+    const PROP_OLD_SOURCE_URL: &str =
+        "https://api.github.com/repos/Misyra/Campus-Auth/releases/latest";
+    const PROP_NEW_SOURCE_URL: &str =
+        "https://api.github.com/repos/Misyra/Campus-Auth-rs/releases/latest";
+
+    /// carrier 字段形态：缺省 / 仅旧名 / 新旧并存（改名遇同名新键时旧值被丢弃）
+    #[derive(Debug, Clone)]
+    enum PropCarrierSeed {
+        Absent,
+        Old(String),
+        Both(String, String),
+    }
+
+    /// v9 内联直连配置形态：未配置（全空键）/ 仅证书策略显式 / 全套
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum PropHttpMode {
+        None,
+        IgnoreOnly,
+        Full,
+    }
+
+    /// v9 内联直连字段种子（迁移按「取值」而非「键存在」判定是否配过）
+    #[derive(Debug, Clone)]
+    struct PropHttpSeed {
+        mode: PropHttpMode,
+        method: String,
+        url: String,
+        headers: String,
+        body: String,
+        success: String,
+        failure: String,
+        crypto: String,
+        ignore: Option<bool>,
+    }
+
+    impl PropHttpSeed {
+        /// 渲染为方案 JSON 的 http_* 键值（键恒全量存在，与 `#[serde(default)]`
+        /// 落盘形态一致——即便没配直连也写着这些键）
+        fn render_map(&self) -> Vec<(&'static str, Value)> {
+            vec![
+                ("http_method", Value::String(self.method.clone())),
+                ("http_url", Value::String(self.url.clone())),
+                ("http_headers", Value::String(self.headers.clone())),
+                ("http_body", Value::String(self.body.clone())),
+                ("http_success_pattern", Value::String(self.success.clone())),
+                ("http_failure_pattern", Value::String(self.failure.clone())),
+                ("http_crypto_script", Value::String(self.crypto.clone())),
+                (
+                    "http_ignore_https_errors",
+                    self.ignore.map(Value::Bool).unwrap_or(Value::Null),
+                ),
+            ]
+        }
+
+        /// 是否会被迁移判定为「配过直连」（与 [`legacy_http_config_present`] 同口径）
+        fn legacy_present(&self) -> bool {
+            match self.mode {
+                PropHttpMode::Full | PropHttpMode::IgnoreOnly => true,
+                PropHttpMode::None => false,
+            }
+        }
+    }
+
+    /// 方案种子（渲染为 start≤5 的内联 v5 形态或 start≥6 的磁盘 v6+ 形态）
+    #[derive(Debug, Clone)]
+    struct PropProfileSeed {
+        name: String,
+        username: String,
+        password: String,
+        carrier: PropCarrierSeed,
+        gateway_ip: Option<String>,
+        wifi_ssid: Option<String>,
+        custom: bool,
+        http: PropHttpSeed,
+    }
+
+    impl PropProfileSeed {
+        /// start≤5：v5 旧名内联形态（拆分前 settings.profiles 字典的值）
+        fn render_inline_v5(&self) -> Value {
+            let mut obj = serde_json::Map::new();
+            obj.insert("name".into(), json!(self.name));
+            obj.insert("username".into(), json!(self.username));
+            obj.insert("password".into(), json!(self.password));
+            match &self.carrier {
+                PropCarrierSeed::Absent => {}
+                PropCarrierSeed::Old(v) => {
+                    obj.insert("carrier".into(), json!(v));
+                }
+                PropCarrierSeed::Both(old, new) => {
+                    obj.insert("carrier".into(), json!(old));
+                    obj.insert("isp".into(), json!(new));
+                }
+            }
+            if let Some(g) = &self.gateway_ip {
+                obj.insert("match_gateway_ip".into(), json!(g));
+            }
+            if let Some(w) = &self.wifi_ssid {
+                obj.insert("match_ssid".into(), json!(w));
+            }
+            if self.custom {
+                obj.insert("carrier_custom".into(), json!("旧版自定义运营商文本"));
+            }
+            for (k, v) in self.http.render_map() {
+                obj.insert(k.into(), v);
+            }
+            Value::Object(obj)
+        }
+
+        /// start≥6：v6+ 磁盘文件形态（新名 + id；改名类迁移早已完成）
+        fn render_file_v6(&self, id: &str) -> Value {
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".into(), json!(id));
+            obj.insert("name".into(), json!(self.name));
+            obj.insert("username".into(), json!(self.username));
+            obj.insert("password".into(), json!(self.password));
+            match &self.carrier {
+                PropCarrierSeed::Absent => {}
+                PropCarrierSeed::Old(v) => {
+                    obj.insert("isp".into(), json!(v));
+                }
+                PropCarrierSeed::Both(_, new) => {
+                    obj.insert("isp".into(), json!(new));
+                }
+            }
+            if let Some(g) = &self.gateway_ip {
+                obj.insert("gateway_ip".into(), json!(g));
+            }
+            if let Some(w) = &self.wifi_ssid {
+                obj.insert("wifi_ssid".into(), json!(w));
+            }
+            for (k, v) in self.http.render_map() {
+                obj.insert(k.into(), v);
+            }
+            Value::Object(obj)
+        }
+    }
+
+    /// monitor 段种子（start≤5 渲染 v5 旧名交由迁移改名/拆分；start≥6 渲染现名恒等保留）
+    #[derive(Debug, Clone)]
+    struct PropMonitorSeed {
+        check_interval: Option<u32>,
+        enable_tcp: Option<bool>,
+        enable_http: Option<bool>,
+        enable_local: Option<bool>,
+        ping_targets: Option<Vec<String>>,
+        test_urls: Option<Vec<String>>,
+        /// url_check_urls 条目：(url 部分, Option<期望响应>)；url 为空串渲染 "|e"
+        /// （迁移按空 URL 整条丢弃）
+        url_items: Option<Vec<(String, Option<String>)>>,
+        deprecated: bool,
+        junk: bool,
+    }
+
+    impl PropMonitorSeed {
+        fn render(&self, start: u32) -> Value {
+            let mut m = serde_json::Map::new();
+            if start <= 5 {
+                if let Some(v) = self.check_interval {
+                    m.insert("check_interval_seconds".into(), json!(v));
+                }
+                if let Some(v) = self.enable_tcp {
+                    m.insert("enable_tcp_check".into(), json!(v));
+                }
+                if let Some(v) = self.enable_http {
+                    m.insert("enable_http_check".into(), json!(v));
+                }
+                if let Some(v) = self.enable_local {
+                    m.insert("enable_local_check".into(), json!(v));
+                }
+                if let Some(v) = &self.ping_targets {
+                    m.insert("ping_targets".into(), json!(v));
+                }
+                if let Some(v) = &self.test_urls {
+                    m.insert("test_urls".into(), json!(v));
+                }
+                if let Some(items) = &self.url_items {
+                    m.insert(
+                        "url_check_urls".into(),
+                        Value::Array(
+                            items
+                                .iter()
+                                .map(|(u, e)| {
+                                    Value::String(match e {
+                                        Some(exp) => format!("{u}|{exp}"),
+                                        None => u.clone(),
+                                    })
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                if self.deprecated {
+                    m.insert("access_log".into(), json!(true));
+                    m.insert("block_proxy".into(), json!(false));
+                    m.insert("network_check_timeout".into(), json!(5));
+                    m.insert("check_auth_url".into(), json!(true));
+                    m.insert("auth_url_targets".into(), json!([]));
+                }
+            } else {
+                // v6+ 现名直渲（url 拆分规则与迁移派生一致）
+                if let Some(v) = self.check_interval {
+                    m.insert("check_interval".into(), json!(v));
+                }
+                if let Some(v) = self.enable_tcp {
+                    m.insert("tcp_enabled".into(), json!(v));
+                }
+                if let Some(v) = self.enable_http {
+                    m.insert("http_enabled".into(), json!(v));
+                }
+                if let Some(v) = &self.ping_targets {
+                    m.insert("tcp_targets".into(), json!(v));
+                }
+                if let Some(v) = &self.test_urls {
+                    m.insert("http_targets".into(), json!(v));
+                }
+                if let Some(items) = &self.url_items {
+                    let mut targets = Vec::new();
+                    let mut expected = serde_json::Map::new();
+                    for (u, e) in items {
+                        let u = u.trim();
+                        if u.is_empty() {
+                            continue;
+                        }
+                        targets.push(Value::String(u.to_owned()));
+                        if let Some(exp) = e {
+                            expected.insert(u.to_owned(), Value::String(exp.trim().to_owned()));
+                        }
+                    }
+                    // 与迁移派生同口径：目标列表非空即启用
+                    let enabled = !targets.is_empty();
+                    m.insert("url_targets".into(), Value::Array(targets));
+                    m.insert("url_expected_responses".into(), Value::Object(expected));
+                    m.insert("url_enabled".into(), json!(enabled));
+                }
+            }
+            if self.junk {
+                m.insert("future_probe".into(), json!(1));
+            }
+            Value::Object(m)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct PropLoggingSeed {
+        retention: Option<u32>,
+        junk: bool,
+    }
+
+    impl PropLoggingSeed {
+        fn render(&self, start: u32) -> Value {
+            let mut m = serde_json::Map::new();
+            m.insert("level".into(), json!("INFO"));
+            m.insert("file_enabled".into(), json!(true));
+            if start <= 5 {
+                if let Some(v) = self.retention {
+                    m.insert("log_retention_days".into(), json!(v));
+                }
+            } else if let Some(v) = self.retention {
+                m.insert("retention_days".into(), json!(v));
+            }
+            if self.junk {
+                m.insert("future_log".into(), json!(true));
+            }
+            Value::Object(m)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct PropAppSeed {
+        port: Option<u16>,
+        auto_open_browser: Option<bool>,
+        deprecated: bool,
+        junk: bool,
+    }
+
+    impl PropAppSeed {
+        fn render(&self, start: u32) -> Value {
+            let mut m = serde_json::Map::new();
+            m.insert("runtime_mode".into(), json!("full"));
+            if start <= 5 {
+                if let Some(v) = self.port {
+                    m.insert("app_port".into(), json!(v));
+                }
+                if let Some(v) = self.auto_open_browser {
+                    m.insert("auto_open_browser".into(), json!(v));
+                }
+                if self.deprecated {
+                    m.insert("shell_path".into(), json!("cmd"));
+                    m.insert("lightweight_tray".into(), json!(false));
+                    m.insert("minimize_to_tray".into(), json!(true));
+                    m.insert("proxy".into(), Value::Null);
+                }
+            } else {
+                if let Some(v) = self.port {
+                    m.insert("port".into(), json!(v));
+                }
+                if let Some(v) = self.auto_open_browser {
+                    m.insert("auto_start_browser".into(), json!(v));
+                }
+            }
+            if self.junk {
+                m.insert("future_app".into(), json!(1));
+            }
+            Value::Object(m)
+        }
+    }
+
+    /// v6→v7 的更新源形态
+    #[derive(Debug, Clone, PartialEq)]
+    enum PropSourceUrl {
+        Old,
+        New,
+        Custom,
+    }
+
+    impl PropSourceUrl {
+        fn render(&self) -> &'static str {
+            match self {
+                PropSourceUrl::Old => PROP_OLD_SOURCE_URL,
+                PropSourceUrl::New => PROP_NEW_SOURCE_URL,
+                PropSourceUrl::Custom => "https://mirror.example.com/releases/latest",
+            }
+        }
+    }
+
+    /// v7→v8 的浏览器渠道形态
+    #[derive(Debug, Clone, PartialEq)]
+    enum PropChannelSeed {
+        Playwright,
+        Chromium,
+        Msedge,
+    }
+
+    impl PropChannelSeed {
+        fn render(&self) -> &'static str {
+            match self {
+                PropChannelSeed::Playwright => "playwright",
+                PropChannelSeed::Chromium => "chromium",
+                PropChannelSeed::Msedge => "msedge",
+            }
+        }
+    }
+
+    /// 一个迁移属性用例：起始版本 + 渲染好的 settings.json + 语义种子与磁盘夹具
+    #[derive(Debug, Clone)]
+    struct PropMigrationCase {
+        start_version: u32,
+        settings: Value,
+        /// 合法 id 的方案种子（断言用，首个即活跃方案）；start≥6 时同序预写磁盘
+        profiles: Vec<(String, PropProfileSeed)>,
+        /// start≤5 内联字典中的非法 id（迁移跳过、不写文件）
+        inline_invalid_ids: Vec<String>,
+        /// start≤5 是否携带 profiles 键（false = 键整体缺省）
+        has_profiles_key: bool,
+        /// settings 顶层是否混入未知键
+        top_junk: bool,
+        monitor: PropMonitorSeed,
+        logging: PropLoggingSeed,
+        app: PropAppSeed,
+        source: PropSourceUrl,
+        channel: PropChannelSeed,
+        /// tasks/.order.json 的 active（Some 时驱动 v8→v9 绑定）
+        order_active: Option<String>,
+        /// 用浏览器任务占住首个方案 id（v9→v10 须让位 -2）
+        browser_conflict: bool,
+        /// 用用户自建直连任务占住首个方案 id（全套配置让位 -2；仅证书策略时复用）
+        http_conflict: bool,
+    }
+
+    /// 合法方案 id 池 + start≤5 专属非法 id 池
+    const PROP_VALID_IDS: [&str; 3] = ["default", "dorm", "lab"];
+    const PROP_INVALID_IDS: [&str; 3] = ["con", "we/ird", "a b"];
+
+    fn prop_arb_profile_seed() -> impl proptest::strategy::Strategy<Value = PropProfileSeed> {
+        (
+            prop_oneof![
+                Just("宿舍".to_owned()),
+                Just("lab".to_owned()),
+                Just(String::new()),
+            ],
+            prop_oneof![Just("20230001".to_owned()), Just("stu_x".to_owned())],
+            prop_oneof![
+                Just("ENC:seed-pwd".to_owned()),
+                Just("plain-pwd".to_owned())
+            ],
+            proptest::option::of(prop_oneof![
+                Just("移动".to_owned()),
+                Just("cmcc".to_owned()),
+                Just(String::new()),
+            ]),
+            any::<bool>(),
+            proptest::option::of(Just("192.168.1.1".to_owned())),
+            proptest::option::of(Just("campus-ssid".to_owned())),
+            any::<bool>(),
+            proptest::option::of(any::<bool>()),
+            0u8..=3,
+            0u8..=2,
+        )
+            .prop_map(
+                |(
+                    name,
+                    username,
+                    password,
+                    carrier_opt,
+                    both,
+                    gateway,
+                    wifi,
+                    custom,
+                    ignore,
+                    method_idx,
+                    mode_idx,
+                )| {
+                    let method = ["POST", "GET", "post", "PUT"][method_idx as usize].to_owned();
+                    let url_pool = [
+                        "http://10.0.0.1/login",
+                        "http://172.16.0.1/sportal",
+                        "https://campus.edu.cn/auth",
+                    ];
+                    let mode = match mode_idx {
+                        0 => PropHttpMode::None,
+                        1 => PropHttpMode::IgnoreOnly,
+                        _ => PropHttpMode::Full,
+                    };
+                    let http = match mode {
+                        // 未配置：键恒存在但全为空值（真实存量形态）
+                        PropHttpMode::None => PropHttpSeed {
+                            mode,
+                            method,
+                            url: String::new(),
+                            headers: String::new(),
+                            body: String::new(),
+                            success: String::new(),
+                            failure: String::new(),
+                            crypto: String::new(),
+                            ignore: None,
+                        },
+                        // 配到一半（只显式选了证书策略）：按取值判定必须搬移
+                        PropHttpMode::IgnoreOnly => PropHttpSeed {
+                            mode,
+                            method,
+                            url: String::new(),
+                            headers: String::new(),
+                            body: String::new(),
+                            success: String::new(),
+                            failure: String::new(),
+                            crypto: String::new(),
+                            ignore: Some(ignore.unwrap_or(true)),
+                        },
+                        PropHttpMode::Full => PropHttpSeed {
+                            mode,
+                            method,
+                            url: url_pool[method_idx as usize % url_pool.len()].to_owned(),
+                            headers: "Content-Type: application/x-www-form-urlencoded".to_owned(),
+                            body: "u={username}&p={password}".to_owned(),
+                            success: "登录成功".to_owned(),
+                            failure: "密码错误".to_owned(),
+                            crypto: "function transform(ctx) { return {}; }".to_owned(),
+                            ignore,
+                        },
+                    };
+                    let carrier = match carrier_opt {
+                        None => PropCarrierSeed::Absent,
+                        Some(v) if both => PropCarrierSeed::Both("旧 carrier 值".to_owned(), v),
+                        Some(v) => PropCarrierSeed::Old(v),
+                    };
+                    PropProfileSeed {
+                        name,
+                        username,
+                        password,
+                        carrier,
+                        gateway_ip: gateway,
+                        wifi_ssid: wifi,
+                        custom,
+                        http,
+                    }
+                },
+            )
+    }
+
+    fn prop_arb_monitor_seed() -> impl proptest::strategy::Strategy<Value = PropMonitorSeed> {
+        (
+            proptest::option::of(20u32..=1200),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(proptest::collection::vec(
+                prop_oneof![Just("10.0.0.53:53".to_owned()), Just("8.8.8.8".to_owned())],
+                0..=2,
+            )),
+            proptest::option::of(proptest::collection::vec(
+                Just("http://probe.example.com".to_owned()),
+                0..=2,
+            )),
+            proptest::option::of(proptest::collection::vec(
+                (
+                    prop_oneof![
+                        Just("http://a.com".to_owned()),
+                        Just("http://b.com/x".to_owned()),
+                        Just(String::new()),
+                    ],
+                    proptest::option::of(prop_oneof![
+                        Just("OK".to_owned()),
+                        Just("成功|备用".to_owned()),
+                    ]),
+                ),
+                0..=3,
+            )),
+            any::<bool>(),
+            any::<bool>(),
+        )
+            .prop_map(
+                |(
+                    check_interval,
+                    enable_tcp,
+                    enable_http,
+                    enable_local,
+                    ping,
+                    test,
+                    urls,
+                    deprecated,
+                    junk,
+                )| {
+                    PropMonitorSeed {
+                        check_interval,
+                        enable_tcp,
+                        enable_http,
+                        enable_local,
+                        ping_targets: ping,
+                        test_urls: test,
+                        url_items: urls,
+                        deprecated,
+                        junk,
+                    }
+                },
+            )
+    }
+
+    fn prop_arb_migration_case() -> impl proptest::strategy::Strategy<Value = PropMigrationCase> {
+        (
+            (
+                prop_oneof![
+                    3 => Just(5u32),
+                    3 => Just(9u32),
+                    1 => Just(1u32),
+                    1 => Just(6u32),
+                    1 => Just(7u32),
+                    1 => Just(8u32),
+                    1 => 2u32..=4,
+                ],
+                proptest::collection::vec((0u8..=2, prop_arb_profile_seed()), 0..=3),
+            ),
+            (
+                (
+                    prop_arb_monitor_seed(),
+                    proptest::option::of(1u32..=90),
+                    any::<bool>(),
+                    proptest::option::of(1u16..=65535),
+                    proptest::option::of(any::<bool>()),
+                    any::<bool>(),
+                    any::<bool>(),
+                ),
+                (
+                    prop_oneof![
+                        Just(PropSourceUrl::Old),
+                        Just(PropSourceUrl::New),
+                        Just(PropSourceUrl::Custom),
+                    ],
+                    prop_oneof![
+                        Just(PropChannelSeed::Playwright),
+                        Just(PropChannelSeed::Chromium),
+                        Just(PropChannelSeed::Msedge),
+                    ],
+                    proptest::option::of(prop_oneof![
+                        Just("t1".to_owned()),
+                        Just("mytask".to_owned()),
+                    ]),
+                    any::<bool>(),
+                    any::<bool>(),
+                    any::<bool>(),
+                    any::<bool>(),
+                ),
+            ),
+        )
+            .prop_map(
+                |(
+                    (start, profile_specs),
+                    (
+                        (
+                            monitor,
+                            retention,
+                            logging_junk,
+                            port,
+                            auto_open,
+                            app_deprecated,
+                            app_junk,
+                        ),
+                        (
+                            source,
+                            channel,
+                            order_active,
+                            browser_conflict,
+                            http_conflict,
+                            has_profiles_key,
+                            top_junk,
+                        ),
+                    ),
+                )| {
+                    // 组装去重后的方案 id + 种子（id 撞名加序号后缀，保证唯一）
+                    let mut profiles: Vec<(String, PropProfileSeed)> = Vec::new();
+                    let mut used = std::collections::HashSet::new();
+                    for (idx, seed) in profile_specs {
+                        let base = PROP_VALID_IDS[idx as usize];
+                        let mut id = base.to_owned();
+                        let mut n = 2;
+                        while !used.insert(id.clone()) {
+                            id = format!("{base}-{n}");
+                            n += 1;
+                        }
+                        profiles.push((id, seed));
+                    }
+                    // start≥6 不写非法 id 文件；start≤5 以内联字典混入非法 id
+                    let inline_invalid_ids = if start <= 5 && profiles.len() < 3 {
+                        vec![PROP_INVALID_IDS[profiles.len() % PROP_INVALID_IDS.len()].to_owned()]
+                    } else {
+                        Vec::new()
+                    };
+                    // 活跃方案恒取首个合法 id（无方案时 default）
+                    let active = profiles
+                        .first()
+                        .map(|(id, _)| id.clone())
+                        .unwrap_or_else(|| "default".to_owned());
+
+                    let mut root = serde_json::Map::new();
+                    root.insert("config_version".into(), json!(start));
+                    root.insert("active_profile_id".into(), json!(active));
+                    root.insert("auto_switch".into(), json!(true));
+                    let mut global = serde_json::Map::new();
+                    global.insert("monitor".into(), monitor.render(start));
+                    let logging = PropLoggingSeed {
+                        retention,
+                        junk: logging_junk,
+                    };
+                    global.insert("logging".into(), logging.render(start));
+                    let app = PropAppSeed {
+                        port,
+                        auto_open_browser: auto_open,
+                        deprecated: app_deprecated,
+                        junk: app_junk,
+                    };
+                    global.insert("app".into(), app.render(start));
+                    global.insert(
+                        "updater".into(),
+                        json!({"release_source_url": source.render(), "auto_check_enabled": true}),
+                    );
+                    global.insert(
+                        "browser".into(),
+                        json!({"browser_channel": channel.render(), "headless": true}),
+                    );
+                    root.insert("global".into(), Value::Object(global));
+                    if start <= 5 && has_profiles_key {
+                        let mut dict = serde_json::Map::new();
+                        for (id, seed) in &profiles {
+                            let rendered = seed.render_inline_v5();
+                            // 生成器漂移防线：渲染产物必须与迁移「配过直连」判定一致
+                            assert_eq!(
+                                legacy_http_config_present(&rendered),
+                                seed.http.legacy_present(),
+                                "种子直连形态与 legacy_http_config_present 口径漂移（生成器缺陷）"
+                            );
+                            dict.insert(id.clone(), rendered);
+                        }
+                        for invalid in &inline_invalid_ids {
+                            dict.insert(
+                                invalid.clone(),
+                                json!({"name": "非法 id 占位", "password": "ENC:x"}),
+                            );
+                        }
+                        root.insert("profiles".into(), Value::Object(dict));
+                    }
+                    if top_junk {
+                        root.insert("legacy_top".into(), json!(true));
+                    }
+
+                    PropMigrationCase {
+                        start_version: start,
+                        settings: Value::Object(root),
+                        profiles,
+                        inline_invalid_ids,
+                        has_profiles_key,
+                        top_junk,
+                        monitor,
+                        logging,
+                        app,
+                        source,
+                        channel,
+                        order_active,
+                        browser_conflict,
+                        http_conflict,
+                    }
+                },
+            )
+    }
+
+    impl PropMigrationCase {
+        /// 预写磁盘夹具：方案文件仅 start≥6 需要（start≤5 由 v5→v6 拆分生成）；
+        /// tasks 夹具按需创建（.order.json / 浏览器任务占名 / 用户直连任务占名）
+        fn setup_disk(&self, config_dir: &Path) {
+            let base = config_dir.parent().unwrap_or(config_dir);
+            if self.start_version >= 6 {
+                let profiles_dir = config_dir.join("profiles");
+                std::fs::create_dir_all(&profiles_dir).unwrap();
+                for (id, seed) in &self.profiles {
+                    let rendered = seed.render_file_v6(id);
+                    // 生成器漂移防线（同内联形态）
+                    assert_eq!(
+                        legacy_http_config_present(&rendered),
+                        seed.http.legacy_present(),
+                        "种子直连形态与 legacy_http_config_present 口径漂移（生成器缺陷）"
+                    );
+                    std::fs::write(
+                        profiles_dir.join(format!("{id}.json")),
+                        rendered.to_string(),
+                    )
+                    .unwrap();
+                }
+            }
+            let conflict_target = self.profiles.first().map(|(id, _)| id.clone());
+            let needs_tasks = self.order_active.is_some()
+                || (self.browser_conflict || self.http_conflict) && conflict_target.is_some();
+            if needs_tasks {
+                std::fs::create_dir_all(base.join("tasks")).unwrap();
+            }
+            if let Some(active) = &self.order_active {
+                std::fs::write(
+                    base.join("tasks").join(".order.json"),
+                    format!(r#"{{"order":["t1"],"active":"{active}"}}"#),
+                )
+                .unwrap();
+            }
+            if let Some(id) = conflict_target {
+                if self.browser_conflict {
+                    std::fs::create_dir_all(base.join("tasks").join("browser")).unwrap();
+                    std::fs::write(
+                        base.join("tasks")
+                            .join("browser")
+                            .join(format!("{id}.json")),
+                        r#"{"type":"browser","task_id":"x","name":"内置浏览器任务"}"#,
+                    )
+                    .unwrap();
+                }
+                if self.http_conflict {
+                    std::fs::create_dir_all(base.join("tasks").join("http")).unwrap();
+                    std::fs::write(
+                        base.join("tasks").join("http").join(format!("{id}.json")),
+                        r#"{"type":"http","task_id":"x","name":"用户自建"}"#,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    /// 列出目录树下残留的 .tmp_ 临时文件名（原子写失败必须无残留）
+    fn prop_tmp_residue(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                out.extend(prop_tmp_residue(&path));
+            } else if name.starts_with(crate::config::TMP_PREFIX) {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// 任务 id 分配预言机：按 [`migrate_v9_to_v10`] 的真实分配口径推演每个
+    /// 「配过直连」方案最终绑定的任务 id——方案文件名排序遍历、预占三桶
+    /// （browser/scripts/http 磁盘夹具）、内容一致复用、-2..-20 递增让位。
+    ///
+    /// 任务 id 与方案 id 分属不同命名空间（tasks/http/ vs profiles/），前序方案
+    /// 的 -2 后缀产物可与后续方案 id 撞名（级联让位），故断言必须按本预言机
+    /// 的分配结果而非「方案 id ± 固定后缀」对照。
+    ///
+    /// 返回：(方案 id → 任务 id、迁移后 http 桶的全部文件名、本轮新建的文件名)。
+    fn prop_alloc_http_task_ids(
+        case: &PropMigrationCase,
+    ) -> (
+        std::collections::HashMap<String, String>,
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) {
+        let first_id = case.profiles.first().map(|(id, _)| id.clone());
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut files: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        // 磁盘夹具预占：浏览器任务占名 / 用户自建直连任务占名
+        if let Some(id) = &first_id {
+            if case.browser_conflict {
+                taken.insert(id.clone());
+            }
+            if case.http_conflict {
+                taken.insert(id.clone());
+                files.insert(
+                    id.clone(),
+                    serde_json::json!({"type":"http","task_id":"x","name":"用户自建"}),
+                );
+            }
+        }
+        let mut alloc = std::collections::HashMap::new();
+        let mut created_files = std::collections::HashSet::new();
+        // 迁移按方案文件**路径**排序遍历（`lab-2.json` < `lab.json`，'-' < '.'），
+        // 前序产物的文件名参与后续方案的让位判定——排序键是文件名而非方案 id
+        let mut ordered: Vec<&(String, PropProfileSeed)> = case.profiles.iter().collect();
+        ordered.sort_by(|a, b| {
+            let fa = format!("{}.json", a.0);
+            let fb = format!("{}.json", b.0);
+            fa.cmp(&fb)
+        });
+        for (id, seed) in ordered {
+            if !seed.http.legacy_present() {
+                continue;
+            }
+            // 内容一致复用：tasks/http/<id>.json 已存在且六字段与方案内联值一致
+            //（含前序方案在本轮写出的产物，口径同 reusable_existing_task）
+            if let Some(existing) = files.get(id) {
+                let same = |task_key: &str, seed_value: &str| {
+                    existing.get(task_key).and_then(Value::as_str).unwrap_or("") == seed_value
+                };
+                if same("url", &seed.http.url)
+                    && same("headers", &seed.http.headers)
+                    && same("body", &seed.http.body)
+                    && same("success_pattern", &seed.http.success)
+                    && same("failure_pattern", &seed.http.failure)
+                    && same("crypto_script", &seed.http.crypto)
+                {
+                    alloc.insert(id.clone(), id.clone());
+                    continue;
+                }
+            }
+            let chosen = if !taken.contains(id) {
+                id.clone()
+            } else {
+                (2u32..=20)
+                    .map(|n| format!("{id}-{n}"))
+                    .find(|c| !taken.contains(c))
+                    .expect("生成器方案数 ≤ 3，不会耗尽 -2..-20 后缀")
+            };
+            taken.insert(chosen.clone());
+            // 记录本轮新建任务的产物内容（供后续方案的内容一致复用判定）
+            let rendered = seed.render_inline_v5();
+            files.insert(chosen.clone(), build_legacy_http_task(&chosen, &rendered));
+            created_files.insert(chosen.clone());
+            alloc.insert(id.clone(), chosen);
+        }
+        let all_files: std::collections::HashSet<String> = files.into_keys().collect();
+        (alloc, all_files, created_files)
+    }
+
+    /// 收集目录树下全部文件内容（相对路径 → 字节），供幂等重跑前后对照
+    fn prop_snapshot_tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let rel = format!("{prefix}{name}");
+                if path.is_dir() {
+                    walk(&path, &format!("{rel}/"), out);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    out.push((rel, bytes));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, "", &mut out);
+        out.sort();
+        out
+    }
+
+    /// Ok 路径的关键字段保全断言（④）：逐版本按迁移函数语义白名单对照
+    fn prop_assert_fields_preserved(
+        case: &PropMigrationCase,
+        config_dir: &Path,
+        out: &Value,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        let start = case.start_version;
+        let base = config_dir.parent().unwrap_or(config_dir);
+
+        // 顶层：profiles 键必须移除；未知顶层键原样保留（去留由 schema 决定）
+        prop_assert!(
+            out.get("profiles").is_none(),
+            "迁移后 settings 不得残留 profiles 键"
+        );
+        prop_assert_eq!(
+            out.get("legacy_top").is_some(),
+            case.top_junk,
+            "未知顶层键必须原样保留"
+        );
+
+        // ---- monitor 段 ----
+        let mon = &out["global"]["monitor"];
+        if start <= 5 {
+            // 改名保全：旧名移除、新名值恒等；缺省键不凭空出现
+            match case.monitor.check_interval {
+                Some(v) => {
+                    prop_json_eq!(
+                        mon["check_interval"],
+                        json!(v),
+                        "check_interval_seconds → check_interval 保全"
+                    );
+                    prop_assert!(mon.get("check_interval_seconds").is_none(), "旧名必须移除");
+                }
+                None => prop_assert!(mon.get("check_interval").is_none(), "缺省键不得凭空出现"),
+            }
+            match case.monitor.enable_tcp {
+                Some(v) => {
+                    prop_json_eq!(
+                        mon["tcp_enabled"],
+                        json!(v),
+                        "enable_tcp_check → tcp_enabled 保全"
+                    );
+                    prop_assert!(mon.get("enable_tcp_check").is_none());
+                }
+                None => prop_assert!(mon.get("tcp_enabled").is_none()),
+            }
+            match case.monitor.enable_http {
+                Some(v) => {
+                    prop_json_eq!(
+                        mon["http_enabled"],
+                        json!(v),
+                        "enable_http_check → http_enabled 保全"
+                    );
+                    prop_assert!(mon.get("enable_http_check").is_none());
+                }
+                None => prop_assert!(mon.get("http_enabled").is_none()),
+            }
+            match case.monitor.enable_local {
+                Some(v) => {
+                    prop_json_eq!(
+                        mon["local_check_enabled"],
+                        json!(v),
+                        "enable_local_check → local_check_enabled 保全"
+                    );
+                    prop_assert!(mon.get("enable_local_check").is_none());
+                }
+                None => prop_assert!(mon.get("local_check_enabled").is_none()),
+            }
+            match &case.monitor.ping_targets {
+                Some(v) => {
+                    prop_json_eq!(
+                        mon["tcp_targets"],
+                        json!(v),
+                        "ping_targets → tcp_targets 保全"
+                    );
+                    prop_assert!(mon.get("ping_targets").is_none());
+                }
+                None => prop_assert!(mon.get("tcp_targets").is_none()),
+            }
+            match &case.monitor.test_urls {
+                Some(v) => {
+                    prop_json_eq!(
+                        mon["http_targets"],
+                        json!(v),
+                        "test_urls → http_targets 保全"
+                    );
+                    prop_assert!(mon.get("test_urls").is_none());
+                }
+                None => prop_assert!(mon.get("http_targets").is_none()),
+            }
+            // v5 url|expected 整串拆分：目标数组、期望映射、非空即启用派生
+            match &case.monitor.url_items {
+                Some(items) => {
+                    let mut targets = Vec::new();
+                    let mut expected = serde_json::Map::new();
+                    for (u, e) in items {
+                        let u = u.trim();
+                        if u.is_empty() {
+                            continue;
+                        }
+                        targets.push(Value::String(u.to_owned()));
+                        if let Some(exp) = e {
+                            expected.insert(u.to_owned(), Value::String(exp.trim().to_owned()));
+                        }
+                    }
+                    prop_json_eq!(
+                        mon["url_targets"],
+                        Value::Array(targets.clone()),
+                        "url_check_urls → url_targets 拆分"
+                    );
+                    prop_json_eq!(
+                        mon["url_expected_responses"],
+                        Value::Object(expected),
+                        "url_check_urls → url_expected_responses 拆分"
+                    );
+                    prop_json_eq!(
+                        mon["url_enabled"],
+                        json!(!targets.is_empty()),
+                        "v5 语义：列表非空即启用"
+                    );
+                }
+                None => {
+                    prop_assert!(mon.get("url_targets").is_none());
+                    prop_assert!(mon.get("url_expected_responses").is_none());
+                    prop_assert!(mon.get("url_enabled").is_none());
+                }
+            }
+            if case.monitor.deprecated {
+                for f in [
+                    "access_log",
+                    "block_proxy",
+                    "network_check_timeout",
+                    "check_auth_url",
+                    "auth_url_targets",
+                ] {
+                    prop_assert!(mon.get(f).is_none(), "废弃字段 {f} 必须删除");
+                }
+            }
+            prop_assert_eq!(
+                mon.get("future_probe").is_some(),
+                case.monitor.junk,
+                "monitor 段未知键原样保留"
+            );
+        } else {
+            // start≥6：迁移链不触碰 monitor，渲染值恒等保留
+            prop_assert_eq!(
+                mon,
+                &case.monitor.render(start),
+                "start≥6 时 monitor 段不得被改动"
+            );
+        }
+
+        // ---- logging / app 段 ----
+        if start <= 5 {
+            let log = &out["global"]["logging"];
+            match case.logging.retention {
+                Some(v) => {
+                    prop_json_eq!(
+                        log["retention_days"],
+                        json!(v),
+                        "log_retention_days → retention_days 保全"
+                    );
+                    prop_assert!(log.get("log_retention_days").is_none());
+                }
+                None => prop_assert!(log.get("retention_days").is_none()),
+            }
+            prop_assert_eq!(log.get("future_log").is_some(), case.logging.junk);
+
+            let ap = &out["global"]["app"];
+            match case.app.port {
+                Some(v) => {
+                    prop_json_eq!(ap["port"], json!(v), "app_port → port 保全");
+                    prop_assert!(ap.get("app_port").is_none());
+                }
+                None => prop_assert!(ap.get("port").is_none()),
+            }
+            match case.app.auto_open_browser {
+                Some(v) => {
+                    prop_json_eq!(
+                        ap["auto_start_browser"],
+                        json!(v),
+                        "auto_open_browser → auto_start_browser 保全"
+                    );
+                    prop_assert!(ap.get("auto_open_browser").is_none());
+                }
+                None => prop_assert!(ap.get("auto_start_browser").is_none()),
+            }
+            if case.app.deprecated {
+                for f in [
+                    "shell_path",
+                    "lightweight_tray",
+                    "minimize_to_tray",
+                    "proxy",
+                ] {
+                    prop_assert!(ap.get(f).is_none(), "废弃字段 {f} 必须删除");
+                }
+            }
+            prop_assert_eq!(ap.get("future_app").is_some(), case.app.junk);
+        } else {
+            prop_assert_eq!(
+                &out["global"]["logging"],
+                &case.logging.render(start),
+                "start≥6 时 logging 段不得被改动"
+            );
+            prop_assert_eq!(
+                &out["global"]["app"],
+                &case.app.render(start),
+                "start≥6 时 app 段不得被改动"
+            );
+        }
+
+        // ---- v6→v7：旧仓库源改写；其余值恒等 ----
+        let expected_url = if start <= 6 && case.source == PropSourceUrl::Old {
+            PROP_NEW_SOURCE_URL
+        } else {
+            case.source.render()
+        };
+        prop_json_eq!(
+            out["global"]["updater"]["release_source_url"],
+            json!(expected_url),
+            "更新源地址保全/改写"
+        );
+
+        // ---- v7→v8：playwright 归一 chromium；其余恒等 ----
+        let expected_channel = if start <= 7 && case.channel == PropChannelSeed::Playwright {
+            "chromium"
+        } else {
+            case.channel.render()
+        };
+        prop_json_eq!(
+            out["global"]["browser"]["browser_channel"],
+            json!(expected_channel),
+            "浏览器渠道保全/归一"
+        );
+
+        // ---- 方案文件：拆分 / 改名 / 绑定 / 直连搬移逐项对照 ----
+        // start≤5 的方案文件由拆分生成（无 profiles 键则无文件）；start≥6 为预写
+        let profiles_on_disk = if start >= 6 {
+            true
+        } else {
+            case.has_profiles_key
+        };
+        if profiles_on_disk {
+            let first_id = case.profiles.first().map(|(id, _)| id.clone());
+            // 任务 id 分配预言机：任务与方案分属不同命名空间，其他方案的合法产物
+            // 可能占用本方案 id（级联让位），「未迁移不得造任务」类断言须豁免
+            let (task_alloc, all_http_files, created_files) = prop_alloc_http_task_ids(case);
+            for (id, seed) in &case.profiles {
+                let path = config_dir.join("profiles").join(format!("{id}.json"));
+                let raw = match std::fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        return Err(proptest::test_runner::TestCaseError::fail(format!(
+                            "方案文件 {id}.json 必须存在（拆分或预写）: {e}\ncase: {case:?}"
+                        )));
+                    }
+                };
+                let p: Value = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(proptest::test_runner::TestCaseError::fail(format!(
+                            "方案文件 {id}.json 必须可解析: {e}\ncase: {case:?}"
+                        )));
+                    }
+                };
+
+                prop_json_eq!(p["id"], json!(id), "id 必须与文件名一致");
+                prop_json_eq!(p["name"], json!(seed.name), "name 保全");
+                prop_json_eq!(p["username"], json!(seed.username), "username 保全");
+                prop_json_eq!(p["password"], json!(seed.password), "password 保全");
+
+                if start <= 5 {
+                    // 改名三键：旧名移除、新名值恒等；新旧并存时保留新键丢弃旧键
+                    match &seed.carrier {
+                        PropCarrierSeed::Absent => {
+                            prop_assert!(p.get("isp").is_none() && p.get("carrier").is_none());
+                        }
+                        PropCarrierSeed::Old(v) => {
+                            prop_json_eq!(p["isp"], json!(v), "carrier → isp 保全");
+                            prop_assert!(p.get("carrier").is_none(), "旧名 carrier 必须移除");
+                        }
+                        PropCarrierSeed::Both(_, new) => {
+                            prop_json_eq!(p["isp"], json!(new), "新旧并存时保留 isp 新值");
+                            prop_assert!(p.get("carrier").is_none());
+                        }
+                    }
+                    match &seed.gateway_ip {
+                        Some(v) => {
+                            prop_json_eq!(
+                                p["gateway_ip"],
+                                json!(v),
+                                "match_gateway_ip → gateway_ip 保全"
+                            );
+                            prop_assert!(p.get("match_gateway_ip").is_none());
+                        }
+                        None => {
+                            prop_assert!(
+                                p.get("gateway_ip").is_none()
+                                    && p.get("match_gateway_ip").is_none()
+                            );
+                        }
+                    }
+                    match &seed.wifi_ssid {
+                        Some(v) => {
+                            prop_json_eq!(p["wifi_ssid"], json!(v), "match_ssid → wifi_ssid 保全");
+                            prop_assert!(p.get("match_ssid").is_none());
+                        }
+                        None => {
+                            prop_assert!(
+                                p.get("wifi_ssid").is_none() && p.get("match_ssid").is_none()
+                            );
+                        }
+                    }
+                    prop_assert!(
+                        p.get("carrier_custom").is_none(),
+                        "废弃字段 carrier_custom 必须删除"
+                    );
+                } else {
+                    // start≥6：文件内容除 v9 迁移写回外不被触碰（改名键恒等保留）
+                    match &seed.carrier {
+                        PropCarrierSeed::Absent => prop_assert!(p.get("isp").is_none()),
+                        PropCarrierSeed::Old(v) | PropCarrierSeed::Both(_, v) => {
+                            prop_json_eq!(p["isp"], json!(v), "start≥6 时 isp 恒等保留");
+                        }
+                    }
+                    match &seed.gateway_ip {
+                        Some(v) => prop_json_eq!(
+                            p["gateway_ip"],
+                            json!(v),
+                            "start≥6 时 gateway_ip 恒等保留"
+                        ),
+                        None => prop_assert!(p.get("gateway_ip").is_none()),
+                    }
+                    match &seed.wifi_ssid {
+                        Some(v) => {
+                            prop_json_eq!(p["wifi_ssid"], json!(v), "start≥6 时 wifi_ssid 恒等保留")
+                        }
+                        None => prop_assert!(p.get("wifi_ssid").is_none()),
+                    }
+                    prop_assert!(
+                        p.get("carrier").is_none()
+                            && p.get("carrier_custom").is_none()
+                            && p.get("match_gateway_ip").is_none()
+                            && p.get("match_ssid").is_none(),
+                        "start≥6 时不得出现 v5 旧名键"
+                    );
+                }
+
+                // v9→v10：内联直连 → 独立任务（绑定 id 由预言机推演）
+                let configured = seed.http.legacy_present();
+                if configured {
+                    let expected_task = match task_alloc.get(id) {
+                        Some(t) => t.clone(),
+                        None => {
+                            return Err(proptest::test_runner::TestCaseError::fail(format!(
+                                "配过直连的方案 {id} 必须在预言机中有任务分配\ncase: {case:?}"
+                            )));
+                        }
+                    };
+                    let task_path = base
+                        .join("tasks")
+                        .join("http")
+                        .join(format!("{expected_task}.json"));
+                    if !task_path.exists() {
+                        return Err(proptest::test_runner::TestCaseError::fail(format!(
+                            "配过直连的方案 {id} 必须产出任务文件 {expected_task}.json\ncase: {case:?}"
+                        )));
+                    }
+                    let task: Value =
+                        serde_json::from_str(&std::fs::read_to_string(&task_path).unwrap())
+                            .unwrap();
+                    if created_files.contains(&expected_task) {
+                        prop_json_eq!(task["type"], json!("http"));
+                        prop_json_eq!(
+                            task["task_id"],
+                            json!(expected_task),
+                            "任务 id 须与文件名一致"
+                        );
+                        let expected_method = if seed.http.method.eq_ignore_ascii_case("POST") {
+                            "POST"
+                        } else {
+                            "GET"
+                        };
+                        prop_json_eq!(
+                            task["method"],
+                            json!(expected_method),
+                            "非 POST 一律归一 GET"
+                        );
+                        prop_json_eq!(task["url"], json!(seed.http.url), "直连地址保全");
+                        prop_json_eq!(task["headers"], json!(seed.http.headers), "请求头保全");
+                        prop_json_eq!(task["body"], json!(seed.http.body), "请求体保全");
+                        prop_json_eq!(
+                            task["success_pattern"],
+                            json!(seed.http.success),
+                            "成功判据保全"
+                        );
+                        prop_json_eq!(
+                            task["failure_pattern"],
+                            json!(seed.http.failure),
+                            "失败判据保全"
+                        );
+                        prop_json_eq!(
+                            task["crypto_script"],
+                            json!(seed.http.crypto),
+                            "凭据变换脚本保全"
+                        );
+                        prop_json_eq!(
+                            task["ignore_https_errors"],
+                            seed.http.ignore.map(Value::Bool).unwrap_or(Value::Null),
+                            "非布尔证书策略迁移为 null（跟随全局）"
+                        );
+                        prop_json_eq!(
+                            task["auth_url"],
+                            json!(""),
+                            "任务 auth_url 刻意留空：方案认证地址仍属方案"
+                        );
+                        let name_src = if seed.name.trim().is_empty() {
+                            expected_task.as_str()
+                        } else {
+                            seed.name.as_str()
+                        };
+                        prop_json_eq!(task["name"], json!(format!("{name_src} 直连")));
+                        // 新任务必须追加进排序表（顺序稳定）
+                        let order_raw =
+                            std::fs::read_to_string(base.join("tasks").join(".order.json"))
+                                .unwrap_or_default();
+                        let order: Value = serde_json::from_str(&order_raw).unwrap_or(Value::Null);
+                        let listed = order["order"].as_array().is_some_and(|a| {
+                            a.iter().any(|v| v.as_str() == Some(expected_task.as_str()))
+                        });
+                        prop_assert!(listed, "迁移新建的任务必须追加进 .order.json 排序表");
+                    } else {
+                        // 复用磁盘夹具的用户自建同名任务：内容一致（全空串）且不得改写
+                        prop_assert_eq!(
+                            task,
+                            serde_json::json!({"type":"http","task_id":"x","name":"用户自建"}),
+                            "内容一致时必须复用用户任务且不改写"
+                        );
+                    }
+                    prop_json_eq!(
+                        p["active_http_task"],
+                        json!(expected_task),
+                        "方案必须绑定迁移产出的直连任务"
+                    );
+                    for key in LEGACY_HTTP_KEYS {
+                        prop_assert!(
+                            p.get(key).is_none(),
+                            "内联键 {key} 必须搬走并清除，否则重跑重复搬移"
+                        );
+                    }
+                } else {
+                    prop_assert!(
+                        p.get("active_http_task").is_none(),
+                        "未配置直连不得凭空绑定"
+                    );
+                    // 未迁移的方案保持原样：内联空键留着无害（v10 schema 忽略，保存时自然消失）
+                    for (k, v) in seed.http.render_map() {
+                        prop_json_eq!(p[k], v, "未配置直连的方案文件不得被改动（{}）", k);
+                    }
+                    // 同名文件属「用户自建任务占名」或其他方案的合法产物（级联让位）时豁免
+                    if !all_http_files.contains(id) {
+                        prop_assert!(
+                            !base
+                                .join("tasks")
+                                .join("http")
+                                .join(format!("{id}.json"))
+                                .exists(),
+                            "没填过直连地址不得凭空造任务"
+                        );
+                    }
+                    prop_assert!(
+                        !base
+                            .join("tasks")
+                            .join("http")
+                            .join(format!("{id}-2.json"))
+                            .exists()
+                            || all_http_files.contains(&format!("{id}-2")),
+                        "未迁移不得产生 -2 后缀任务（除非为其他方案的合法产物）"
+                    );
+                }
+
+                // v8→v9：全局任务绑定到活跃方案（仅 start≤8 执行）
+                if first_id.as_deref() == Some(id.as_str()) {
+                    match (&case.order_active, start) {
+                        (Some(tid), s) if s <= 8 => {
+                            prop_json_eq!(
+                                p["active_task"],
+                                json!(tid),
+                                "原全局启用任务必须绑定到活跃方案"
+                            );
+                        }
+                        (Some(_), 9) => {
+                            prop_assert!(
+                                p.get("active_task").is_none(),
+                                "start=9 时 v8→v9 已跳过，不得凭空绑定"
+                            );
+                        }
+                        _ => prop_assert!(p.get("active_task").is_none(), "无全局选择不得凭空绑定"),
+                    }
+                } else {
+                    prop_assert!(
+                        p.get("active_task").is_none(),
+                        "非活跃方案不得被 v8→v9 触碰"
+                    );
+                }
+            }
+
+            // 非法 id：跳过、不写文件（R4 路径穿越防线）
+            for invalid in &case.inline_invalid_ids {
+                prop_assert!(
+                    !config_dir
+                        .join("profiles")
+                        .join(format!("{invalid}.json"))
+                        .exists(),
+                    "非法 Profile id 不得写出文件"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 构造畸形输入（属性 M2）：以最小 v5 形态为基座，按 (kind, sub) 施加畸变
+    fn prop_build_malformed(start: u32, kind: u8, sub: u8) -> Value {
+        let base = || {
+            serde_json::json!({
+                "config_version": start,
+                "active_profile_id": "default",
+                "global": {
+                    "monitor": {
+                        "check_interval_seconds": 30,
+                        "ping_targets": ["1.1.1.1"],
+                        "url_check_urls": ["http://a|OK"],
+                    },
+                    "logging": { "log_retention_days": 7 },
+                    "app": { "app_port": 50721 },
+                    "pause": { "enabled": true },
+                    "browser": { "browser_channel": "chromium", "headless": true },
+                },
+            })
+        };
+        match kind {
+            0 => {
+                let mut v = base();
+                v["config_version"] = json!("9");
+                v
+            }
+            1 => {
+                let mut v = base();
+                v["config_version"] = json!(-1);
+                v
+            }
+            2 => {
+                let mut v = base();
+                v["config_version"] = json!(1.5);
+                v
+            }
+            3 => {
+                let mut v = base();
+                v["config_version"] = Value::Null;
+                v
+            }
+            4 => {
+                let mut v = base();
+                v["config_version"] = json!(11u32);
+                v
+            }
+            5 => {
+                let mut v = base();
+                v["config_version"] = json!(u64::MAX);
+                v
+            }
+            6 => {
+                let mut v = base();
+                match sub {
+                    0 => v["global"]["monitor"]["check_interval_seconds"] = json!("oops"),
+                    1 => v["global"]["monitor"]["ping_targets"] = json!("not-array"),
+                    2 => v["global"]["logging"]["log_retention_days"] = json!("x"),
+                    3 => v["global"]["app"]["app_port"] = json!("x"),
+                    4 => v["global"]["pause"]["enabled"] = json!(5),
+                    5 => v["global"]["browser"]["headless"] = serde_json::json!({}),
+                    _ => {
+                        v["global"]["monitor"]["url_check_urls"] = serde_json::json!([42, null, {}])
+                    }
+                }
+                v
+            }
+            7 => match sub % 4 {
+                0 => Value::Null,
+                1 => json!([1, 2, 3]),
+                2 => json!("just-a-string"),
+                _ => json!(42),
+            },
+            8 => {
+                let mut v = base();
+                match sub % 3 {
+                    0 => v["profiles"] = json!(5),
+                    1 => v["profiles"] = json!([]),
+                    _ => v["profiles"] = serde_json::json!({"ok": {"name": "ok"}, "bad": 42}),
+                }
+                v
+            }
+            _ => {
+                let mut v = base();
+                let mut nested = json!({"leaf": 1});
+                for _ in 0..u32::from(sub) + 2 {
+                    nested = json!({ "n": nested });
+                }
+                v["deep_unknown"] = nested;
+                v
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(prop_config())]
+
+        /// 【属性 M1】合法旧版本配置经迁移链：
+        /// ① 永不 panic，合法输入必产出 Ok（失败传播口径由属性 M2 与
+        ///    test_migrate_v9_to_v10_write_back_failure_blocks_version_commit 覆盖）；
+        /// ② 幂等：v10 原版本重入为严格 no-op（值与磁盘树均不变）；版本回退
+        ///    v1 的强制整链重入至多补齐首轮被跳过的内容键控改写，两次重入达不动点；
+        /// ③ 版本号单调：终版恒为 CURRENT 且写回 value（CFG-1）；
+        /// ④ 关键字段按各版本迁移语义保全（见 prop_assert_fields_preserved）。
+        /// 附加横切不变量：迁移层永不写 settings.json（哨兵内容不变）、
+        /// 原子写无 .tmp_ 残留、产物可被当前 schema 解析（G4）。
+        #[test]
+        fn prop_migration_chain_roundtrip(case in prop_arb_migration_case()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let base = tmp.path();
+            let config_dir = base.join("config");
+            std::fs::create_dir_all(&config_dir).unwrap();
+            // 迁移层只写方案/任务文件，settings.json 由调用方落盘：哨兵内容全程不变
+            let sentinel = r#"{"sentinel":true}"#;
+            std::fs::write(config_dir.join("settings.json"), sentinel).unwrap();
+            case.setup_disk(&config_dir);
+
+            let mut value = case.settings.clone();
+            let result = run_migrations(&config_dir, &mut value);
+
+            // 横切：settings.json 哨兵不变；原子写不留 .tmp_ 残留
+            prop_assert_eq!(
+                std::fs::read_to_string(config_dir.join("settings.json")).unwrap(),
+                sentinel,
+                "迁移层永不写 settings.json"
+            );
+            prop_assert!(prop_tmp_residue(&config_dir).is_empty(), "config 树不得残留 .tmp_ 临时文件");
+            prop_assert!(prop_tmp_residue(&base.join("tasks")).is_empty(), "tasks 树不得残留 .tmp_ 临时文件");
+
+            // ① 合法输入必成功（Err 仅由磁盘故障/畸形产物触发，生成器已排除）
+            let version = match result {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(proptest::test_runner::TestCaseError::fail(format!(
+                        "合法旧版本配置必须迁移成功，实际 Err: {e}\ncase: {case:?}"
+                    )));
+                }
+            };
+
+            // ③ 版本号单调：链终版本恒为 CURRENT，且写回 value
+            prop_assert_eq!(version, crate::config::CURRENT_CONFIG_VERSION, "start<10 时终版必为 CURRENT");
+            prop_assert_eq!(
+                value.get("config_version").and_then(Value::as_u64),
+                Some(u64::from(crate::config::CURRENT_CONFIG_VERSION)),
+                "config_version 必须写回 value（CFG-1）"
+            );
+            // G4（start≤5 的产物自检）/ 生成器类型合法性（start≥6）共同保证
+            prop_assert!(
+                serde_json::from_value::<SettingsData>(value.clone()).is_ok(),
+                "迁移产物必须可被当前 schema 解析"
+            );
+
+            // ④ 关键字段保全
+            prop_assert_fields_preserved(&case, &config_dir, &value)?;
+
+            // ② 幂等（两层口径）：
+            // a) 产线口径：迁移完成的 v10 配置按原版本重入 → 前置检查放行，
+            //    值与磁盘树严格 no-op；
+            // b) 异常续跑口径：版本强行回退 v1 整链重入 → 内容键控的 v6→v7 /
+            //    v7→v8 语义改写与 start=9 时跳过的 v8→v9 绑定可能补齐（首轮因
+            //    起始版本被跳过的效果），但第二次强制重入必须达不动点；
+            //    磁盘层面对强制重入只保证 settings.json 哨兵与无 .tmp_ 残留
+            //   （v8→v9 补绑定会合法新增方案写回与备份目录）。
+            let mut before = prop_snapshot_tree(&config_dir);
+            before.extend(prop_snapshot_tree(&base.join("tasks")));
+            before.sort();
+
+            let first = value.clone();
+            let rerun = run_migrations(&config_dir, &mut value);
+            prop_assert!(
+                matches!(rerun, Ok(v) if v == crate::config::CURRENT_CONFIG_VERSION),
+                "v10 原版本重入必须被前置检查放行为 CURRENT: {rerun:?}"
+            );
+            prop_assert_eq!(value.clone(), first, "v10 原版本重入必须值不变");
+            let mut after = prop_snapshot_tree(&config_dir);
+            after.extend(prop_snapshot_tree(&base.join("tasks")));
+            after.sort();
+            prop_assert_eq!(after, before, "v10 原版本重入不得改写磁盘（方案/任务/备份均稳定）");
+
+            // 异常续跑：版本回退 v1 强制整链重入，两次重入达不动点
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("config_version".into(), Value::from(1u32));
+            }
+            let rerun2 = run_migrations(&config_dir, &mut value);
+            prop_assert!(rerun2.is_ok(), "强制整链重入不得失败");
+            prop_assert!(
+                serde_json::from_value::<SettingsData>(value.clone()).is_ok(),
+                "强制重入产物必须可被当前 schema 解析"
+            );
+            let second = value.clone();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("config_version".into(), Value::from(1u32));
+            }
+            let rerun3 = run_migrations(&config_dir, &mut value);
+            prop_assert!(rerun3.is_ok(), "第二次强制重入不得失败");
+            prop_assert_eq!(value, second, "强制重入必须达不动点（第二次重入值不变）");
+            let sentinel_after = std::fs::read_to_string(config_dir.join("settings.json")).unwrap();
+            prop_assert_eq!(sentinel_after, sentinel, "强制重入同样不得写 settings.json");
+            prop_assert!(
+                prop_tmp_residue(&config_dir).is_empty() && prop_tmp_residue(&base.join("tasks")).is_empty(),
+                "重入后不得残留 .tmp_ 临时文件"
+            );
+        }
+
+        /// 【属性 M2】畸形输入（类型错位 / 根形状 / profiles 形状 / 深嵌套 /
+        /// 非法版本号形态）：永不 panic，Ok/Err 符合既定口径，settings.json
+        /// 哨兵不变、无 .tmp_ 残留（不产出半配置）。
+        #[test]
+        fn prop_migration_malformed_inputs((start, kind, sub) in (1u32..=9, 0u8..=9, 0u8..=6)) {
+            let tmp = tempfile::tempdir().unwrap();
+            let config_dir = tmp.path().join("config");
+            std::fs::create_dir_all(&config_dir).unwrap();
+            let sentinel = r#"{"sentinel":true}"#;
+            std::fs::write(config_dir.join("settings.json"), sentinel).unwrap();
+
+            let mut value = prop_build_malformed(start, kind, sub);
+            let original = value.clone();
+            let result = run_migrations(&config_dir, &mut value);
+
+            prop_assert_eq!(
+                std::fs::read_to_string(config_dir.join("settings.json")).unwrap(),
+                sentinel,
+                "畸形输入路径下迁移层同样永不写 settings.json"
+            );
+            prop_assert!(prop_tmp_residue(&config_dir).is_empty(), "畸形输入路径不得残留 .tmp_");
+
+            match kind {
+                // 垃圾版本号（字符串/负数/浮点/null）：as_u64 失败按缺省 v1 全链迁移
+                0..=3 => {
+                    prop_assert!(
+                        matches!(result, Ok(v) if v == crate::config::CURRENT_CONFIG_VERSION),
+                        "垃圾版本号按缺省 v1 处理并迁移成功: {result:?}"
+                    );
+                    prop_assert_eq!(
+                        value.get("config_version").and_then(Value::as_u64),
+                        Some(u64::from(crate::config::CURRENT_CONFIG_VERSION)),
+                        "迁移成功后版本号必须写回"
+                    );
+                }
+                // 未来版本（11 / u64::MAX 截断为 u32::MAX）：前置检查放行、值原样保留
+                // （产线由 caller 的 VersionTooHigh 拦截，此处钉住迁移层自身口径）
+                4 | 5 => {
+                    let expected = if kind == 4 { 11 } else { u32::MAX };
+                    prop_assert!(
+                        matches!(result, Ok(v) if v == expected),
+                        "未来版本 {expected} 应原样放行: {result:?}"
+                    );
+                    prop_assert_eq!(value, original, "版本前置检查放行时不得改动 value");
+                }
+                // 类型错位：start≤5 时 G4 产物自检必拒（错位字段均落在 schema 解析路径）
+                6 => {
+                    if start <= 5 && sub < 6 {
+                        prop_assert!(result.is_err(), "start≤5 的已知字段类型错位必须被 G4 自检拒绝: {result:?}");
+                    } else {
+                        // start≥6 无 G4 门（产线由 caller 的 from_value 复检拦截）；
+                        // sub=6 的 url_check_urls 非字符串条目被拆分逻辑跳过、可成功
+                        prop_assert!(result.is_ok() || result.is_err(), "类型错位至多 Err，绝不 panic");
+                    }
+                }
+                // 根形状畸形：G4 无法解析非对象根 → 必 Err（备份保留供回滚）
+                7 => {
+                    prop_assert!(result.is_err(), "非对象根必须返回 Err: {result:?}");
+                }
+                // profiles 形状畸形：拆分跳过或跳过非法条目 → 迁移成功完成
+                8 => {
+                    prop_assert!(
+                        matches!(result, Ok(v) if v == crate::config::CURRENT_CONFIG_VERSION),
+                        "profiles 形状畸形不得中断迁移: {result:?}"
+                    );
+                }
+                // 深嵌套未知键：迁移不递归进入，安全完成
+                9 => {
+                    prop_assert!(
+                        matches!(result, Ok(v) if v == crate::config::CURRENT_CONFIG_VERSION),
+                        "深嵌套未知键不得中断迁移: {result:?}"
+                    );
+                }
+                _ => unreachable!("kind 生成域为 0..=9"),
+            }
+        }
     }
 }

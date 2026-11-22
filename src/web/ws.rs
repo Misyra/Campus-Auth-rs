@@ -4,6 +4,8 @@
 //! 前端发送 `{ "type": "ping" }` 文本消息时回复 `{ "type": "pong" }`。
 //! 新连接建立时立即发送当前状态快照（首帧同步）。
 //! 多标签页共存：所有页面同时订阅同一广播通道，互不顶替。
+//! 推送信封契约已接入 OpenAPI 生成管线（T5-4）：`WsMessage` / `WsLogEntryData`
+//! 注册于 openapi.json，status 载荷复用 monitor 域 `MonitorStatusData` 镜像。
 
 use std::path::Path;
 use std::time::Duration;
@@ -13,26 +15,53 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use base64::Engine;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use super::state::{AppState, LogEntry};
 use crate::status::StatusSnapshot;
+use crate::web::routes::monitor::MonitorStatusData;
 
 /// WebSocket 消息信封：所有推送消息均包装为 `{ "type": "...", "data": ... }`
 ///
-/// 注：调试截图 / 步骤进度由 Bridge 以原始 JSON 形式经 `ws_tx` 通道推送，
-/// 不直接经由此枚举构造。
-#[derive(Serialize)]
+/// 注：调试截图 / 步骤进度等 Bridge 事件由 Worker 以原始 JSON 形式经 `ws_tx`
+/// 通道推送，不直接经由此枚举构造（契约上不属于本信封变体，为动态 JSON）。
+///
+/// 契约注册（T5-4）：`LogEntry` / `StatusSnapshot` 为既有 Serialize 类型，未接入
+/// ToSchema 体系；契约侧经 `value_type` 指向线格式镜像（[`WsLogEntryData`] 与
+/// monitor 域 `MonitorStatusData`），运行时载荷类型不变。
+#[derive(Serialize, ToSchema)]
 #[serde(tag = "type", content = "data")]
-enum WsMessage {
+pub(crate) enum WsMessage {
     /// 日志条目
+    #[schema(value_type = WsLogEntryData)]
     #[serde(rename = "log")]
     Log(LogEntry),
     /// 状态快照
+    #[schema(value_type = MonitorStatusData)]
     #[serde(rename = "status")]
     Status(StatusSnapshot),
-    /// 心跳响应
+    /// 心跳响应（对客户端 `{"type":"ping"}` 的回复，无 data 字段）
     #[serde(rename = "pong")]
     Pong,
+}
+
+/// WS 日志推送载荷（[`crate::logging::LogEntry`] 线格式镜像）
+///
+/// `LogEntry` 是 tracing 管线核心类型，未接入 ToSchema 体系；契约快照按批口径
+/// 在消费面（[`WsMessage`]）定义镜像。字段与源类型一一对应，漂移由
+/// `ws_log_entry_data_mirror_matches_wire_format` 测试钉住。
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct WsLogEntryData {
+    /// 全局单调递增序号（进程生命周期内唯一，前端列表稳定 key 与实时去重依据）
+    pub seq: u64,
+    /// 日志级别（INFO/WARN/ERROR…）
+    pub level: String,
+    /// 日志消息
+    pub message: String,
+    /// ISO8601 时间戳
+    pub timestamp: String,
+    /// 日志来源（归一化后的短模块名：app/auth/task/worker/frontend 等）
+    pub source: String,
 }
 
 /// 前端发来的 WebSocket 文本消息信封
@@ -210,12 +239,27 @@ impl Drop for WsLogsConnGuard {
     }
 }
 
+/// 尝试为一条 /ws/logs 连接占用并发名额
+///
+/// 名额的占用必须在升级回调**内**完成：握手中途断开时回调不会执行（或刚被
+/// poll 一次就 drop），若在升级前 `fetch_add`，这个名额将随守卫一起永不释放
+/// （计数泄漏不可自愈，满 16 后 /ws/logs 永久 503）。满员时回退计数并返回
+/// `None`，由调用方静默放弃。
+fn ws_conn_gate() -> Option<WsLogsConnGuard> {
+    if WS_LOGS_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= WS_LOGS_MAX_CONNECTIONS {
+        WS_LOGS_ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return None;
+    }
+    Some(WsLogsConnGuard)
+}
+
 /// GET /ws/logs → 升级为 WebSocket，持续推送日志与状态
 pub async fn logs_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> axum::response::Response {
-    // 并发上限检查：超限直接拒绝升级（HTTP 响应，前端 WS 连接失败走既有重连/降级路径）
+    // 并发上限快速拒绝（HTTP 响应，前端 WS 连接失败走既有重连/降级路径）；
+    // 这里只做低成本的预检，名额的实际占用在升级回调内的 ws_conn_gate 完成
     if WS_LOGS_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) >= WS_LOGS_MAX_CONNECTIONS {
         tracing::warn!("WebSocket 并发连接数达上限（{WS_LOGS_MAX_CONNECTIONS}），拒绝新连接");
         return (
@@ -224,14 +268,20 @@ pub async fn logs_handler(
         )
             .into_response();
     }
-    WS_LOGS_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let conn_id = WS_CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ws.max_message_size(WS_LOGS_MAX_MESSAGE_SIZE)
         .max_frame_size(WS_LOGS_MAX_MESSAGE_SIZE)
         .read_buffer_size(WS_LOGS_READ_BUFFER_SIZE)
         .write_buffer_size(WS_LOGS_WRITE_BUFFER_SIZE)
         .on_upgrade(move |socket| async move {
-            let _guard = WsLogsConnGuard;
+            // 预检与回调之间存在竞态窗口（快满时多个升级同时放行），这里是
+            // 权威闸门：拒绝即静默断开，前端走既有重连/降级路径
+            let Some(_guard) = ws_conn_gate() else {
+                tracing::warn!(
+                    "WebSocket 并发连接数达上限（{WS_LOGS_MAX_CONNECTIONS}），关闭新连接"
+                );
+                return;
+            };
             handle_logs(socket, state, conn_id).await;
         })
 }
@@ -391,6 +441,105 @@ async fn handle_logs(mut socket: WebSocket, state: AppState, conn_id: u64) {
 #[cfg(test)]
 mod tests {
     use super::debug_screenshot_filename;
+    use super::{WS_LOGS_ACTIVE, WS_LOGS_MAX_CONNECTIONS, WsLogEntryData, WsMessage, ws_conn_gate};
+    use crate::logging::LogEntry;
+    use std::sync::atomic::Ordering;
+
+    /// 信封线格式回归（T5-4）：tag/content 邻接标签的三变体形状钉子，
+    /// 契约派生只加 derive 不改序列化行为——本断言若失败即推送形状变化
+    #[test]
+    fn ws_message_wire_envelope_shape() {
+        // pong：无载荷变体只携带 type 键，无 data 字段
+        assert_eq!(
+            serde_json::to_value(WsMessage::Pong).unwrap(),
+            serde_json::json!({ "type": "pong" })
+        );
+        // log：data 携带完整 LogEntry 对象
+        let entry = LogEntry::new(
+            "INFO".into(),
+            "hello".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "app".into(),
+        );
+        let wire = serde_json::to_value(WsMessage::Log(entry)).unwrap();
+        assert_eq!(wire["type"], "log");
+        assert_eq!(wire["data"]["message"], "hello");
+        assert_eq!(wire["data"]["source"], "app");
+    }
+
+    /// 镜像漂移守卫（T5-4）：`WsLogEntryData` 字段集必须与 `LogEntry` 线格式逐键一致
+    #[test]
+    fn ws_log_entry_data_mirror_matches_wire_format() {
+        let entry = LogEntry::new(
+            "WARN".into(),
+            "msg".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "auth".into(),
+        );
+        let wire_keys: Vec<_> = serde_json::to_value(&entry)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let mirror = WsLogEntryData {
+            seq: 1,
+            level: "WARN".into(),
+            message: "msg".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            source: "auth".into(),
+        };
+        let mirror_keys: Vec<_> = serde_json::to_value(mirror)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(wire_keys, mirror_keys, "镜像字段集与线格式漂移");
+    }
+
+    /// 契约形状（T5-4）：生成的 WsMessage schema 必须覆盖三变体且载荷指向线格式镜像
+    #[test]
+    fn ws_message_schema_covers_all_variants() {
+        let schema = serde_json::to_value(<WsMessage as utoipa::PartialSchema>::schema()).unwrap();
+        eprintln!("WsMessage schema = {schema:#}");
+        let rendered = schema.to_string();
+        for tag in ["log", "status", "pong"] {
+            assert!(rendered.contains(tag), "契约缺失变体 {tag}：{rendered}");
+        }
+    }
+
+    /// 并发名额：拿满 → 拒绝 → 守卫 drop 归还 → 可再取
+    ///
+    /// 回归：计数此前在升级前 `fetch_add`、守卫却在升级回调内才创建，
+    /// 握手中途断开会让名额永久泄漏（不可自愈）。
+    #[test]
+    fn ws_conn_gate_releases_slot_on_drop() {
+        // 全局计数仅本测试触碰；显式归零保证结论与执行顺序无关
+        WS_LOGS_ACTIVE.store(0, Ordering::SeqCst);
+        let mut guards: Vec<_> = (0..WS_LOGS_MAX_CONNECTIONS)
+            .filter_map(|_| ws_conn_gate())
+            .collect();
+        assert_eq!(guards.len(), WS_LOGS_MAX_CONNECTIONS, "空位应全部可取");
+        assert!(ws_conn_gate().is_none(), "满员后必须拒绝");
+        // 满员拒绝路径回退计数，不残留 +1
+        assert_eq!(
+            WS_LOGS_ACTIVE.load(Ordering::SeqCst),
+            WS_LOGS_MAX_CONNECTIONS
+        );
+        drop(guards.remove(0));
+        // 用绑定持有新名额：`ws_conn_gate().is_some()` 的临时值会在语句末 drop、
+        // 立刻归还名额，后续计数断言就失真了
+        let extra = ws_conn_gate();
+        assert!(extra.is_some(), "守卫 drop 后名额必须归还");
+        assert_eq!(
+            WS_LOGS_ACTIVE.load(Ordering::SeqCst),
+            WS_LOGS_MAX_CONNECTIONS
+        );
+        drop(extra);
+    }
 
     #[test]
     fn debug_screenshot_filename_strips_parent_path() {

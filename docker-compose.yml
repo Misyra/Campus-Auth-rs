@@ -4,6 +4,9 @@ services:
     image: ${CAMPUS_AUTH_IMAGE:-ghcr.io/misyra/campus-auth-rs:prerelease}
     container_name: campus-auth
     restart: unless-stopped
+    # 非 root 运行：entrypoint 以 root 启动完成存量卷属主迁移后，经 setpriv 降权为
+    # campus(1000) 运行主进程（详见 docker/README.md「容器运行身份」）；存量卷属主
+    # 全部迁移完成后可加 user: "1000:1000"，让 entrypoint 也不以 root 运行
     # 优雅关闭预算 ≈ 26s（托盘 3s + 调度 5s + 引擎 5s + Bridge 8s + Axum 5s），
     # Docker 默认 10s 后即 SIGKILL，会在 Bridge 等待 Worker 退出前强杀，留下
     # 孤儿 chromium；40s 留足余量。init 负责回收浏览器子进程树的僵尸进程。
@@ -14,7 +17,7 @@ services:
       # 本工具的 token 仅用于本地浏览器会话防护，不是远程访问凭证。
       - "127.0.0.1:50721:50721"
     volumes:
-      # 持久化数据：配置 / Profile / 任务 / 日志 / 环境引导状态
+      # 持久化数据：配置 / Profile / 任务 / 日志 / 环境引导状态 / 加密密钥（HOME=/data/home）
       - campus-auth-data:/data
       # 可选：如需持久化浏览器数据（登录态），已包含在 /data/config/browser-data
     environment:
@@ -23,13 +26,26 @@ services:
       - CAMPUS_AUTH_PORT=50721
       # 数据根目录（容器内固定为 /data，与 VOLUME 对应）
       - CAMPUS_AUTH_BASE_PATH=/data
+      # 默认部署只发布到宿主机回环（见上方 ports: 127.0.0.1:50721:50721）。
+      # 容器内看不到宿主端口映射，无法自行区分「宿主回环」与「局域网」流量，
+      # 故在此显式声明信任边界：免管理密码，界面打开即用。
+      # ⚠ 如果把 ports 改成发布到 0.0.0.0 / 局域网，必须删掉这一行并设置
+      #   CAMPUS_AUTH_MANAGEMENT_PASSWORD，否则同网段任何设备都能直接接管
+      #   （含脚本执行接口）。
+      - CAMPUS_AUTH_ALLOW_UNAUTH_BIND=true
+      # 时区：cron 定时任务与推送免打扰时段按容器本地时区（chrono::Local）判定，
+      # 镜像默认 UTC——不设置时国内定时整体偏 8 小时（「每天 08:00」实际 16:00
+      # 触发）。按所在时区改写，详见 docker/README.md「时区（TZ）」
+      - TZ=Asia/Shanghai
       # 可选：自定义日志级别（debug / info / warn / error）
       # - RUST_LOG=info
       # 可选：GitHub 代理（国内网络加速 uv/playwright 下载）
       # - GITHUB_MIRROR=https://ghproxy.example.com
-    # 健康检查（与 Dockerfile HEALTHCHECK 互补，compose 可覆盖）
+    # 健康检查（与 Dockerfile HEALTHCHECK 互补，compose 可覆盖）。CMD-SHELL 让
+    # 端口在容器运行时按 $CAMPUS_AUTH_PORT 展开（$$ 转义 compose 自身插值），
+    # 与 Dockerfile HEALTHCHECK 同口径——否则改端口后容器恒 unhealthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:50721/api/health"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${CAMPUS_AUTH_PORT:-50721}/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

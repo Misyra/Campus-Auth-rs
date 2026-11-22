@@ -60,6 +60,44 @@ async fn dns_uses_selected_server_without_system_resolver_fallback() {
     );
 }
 
+/// P2-13：`resolve` 两条路径对 IPv6 字面量的方括号形态剥括号后按字面量返回
+///（不剥会被误当域名：Binding 走 dns_query 报「DNS 域名无效」、PreparedEgress
+/// 走系统解析器失败），无括号输入不受影响
+#[tokio::test]
+async fn resolve_strips_ipv6_brackets_for_literal() {
+    // 剥括号辅助：方括号剥一层、其余原样
+    assert_eq!(strip_ipv6_brackets("[2001:db8::1]"), "2001:db8::1");
+    assert_eq!(
+        strip_ipv6_brackets("portal.example.edu"),
+        "portal.example.edu"
+    );
+    assert_eq!(strip_ipv6_brackets("[::1"), "[::1");
+    // Binding 字面量分支：方括号形态不再落进 DNS 查询失败分支
+    let binding = Binding {
+        adapter: None,
+        dns: Vec::new(),
+    };
+    let v6 = SocketAddr::new(
+        IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+        80,
+    );
+    assert_eq!(binding.resolve("[2001:db8::1]", 80).await.unwrap(), [v6]);
+    assert_eq!(binding.resolve("2001:db8::1", 80).await.unwrap(), [v6]);
+    assert_eq!(
+        binding.resolve("127.0.0.1", 443).await.unwrap(),
+        [SocketAddr::from(([127, 0, 0, 1], 443))]
+    );
+    // PreparedEgress 无绑定路径：方括号形态经系统解析器按字面量直返（无 DNS 查询）
+    let route = PreparedEgress::prepare(&NetworkSettings {
+        mode: NetworkMode::Direct,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(route.resolve("[2001:db8::1]", 80).await.unwrap(), [v6]);
+    assert_eq!(route.resolve("127.0.0.1", 443).await.unwrap().len(), 1);
+}
+
 #[test]
 fn invalid_interface_never_produces_an_unbound_socket() {
     let binding = Binding {
@@ -93,7 +131,7 @@ async fn local_proxy_requires_auth_and_forwards_origin_form_without_proxy_secret
     .await
     .unwrap();
     let proxy_addr = (proxy.url.host_str().unwrap(), proxy.url.port().unwrap());
-    let mut unauthorized = TcpStream::connect(proxy_addr).await.unwrap();
+    let mut unauthorized = HeadBufferedReader::new(TcpStream::connect(proxy_addr).await.unwrap());
     unauthorized
         .write_all(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
         .await
@@ -101,7 +139,8 @@ async fn local_proxy_requires_auth_and_forwards_origin_form_without_proxy_secret
     let head = read_http_head(&mut unauthorized).await.unwrap();
     assert!(head.starts_with(b"HTTP/1.1 407"));
     let served = tokio::spawn(async move {
-        let (mut stream, _) = target.accept().await.unwrap();
+        let (stream, _) = target.accept().await.unwrap();
+        let mut stream = HeadBufferedReader::new(stream);
         let head = read_http_head(&mut stream).await.unwrap();
         let text = String::from_utf8(head).unwrap();
         assert!(text.starts_with("GET /portal?step=1 HTTP/1.1\r\n"));
@@ -123,6 +162,77 @@ async fn local_proxy_requires_auth_and_forwards_origin_form_without_proxy_secret
         .unwrap();
     assert_eq!(response.text().await.unwrap(), "ok");
     served.await.unwrap();
+}
+
+/// 门户 accept 后永不回包时，上游响应头等待在超时上限内以 504 收场，
+/// 转发 task 结束并关闭上游连接（信号量许可与半开连接得以释放）。
+///
+/// 有意不用 `start_paused` + `advance`：tokio 暂停时钟的 auto-advance 在
+/// 单线程运行时会无视刚就绪的真实套接字事件直接跳到下一个定时器，令
+/// serve_proxy 内固有的连接/请求头定时器被虚假触发。真实回环往返在微秒
+/// 量级完成，故配合测试常量缩至 500ms 走真实时钟即可确定性覆盖行为。
+#[tokio::test]
+async fn test_proxy_upstream_head_timeout_returns_504() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let proxy = LocalProxy::start(Arc::new(Binding {
+        adapter: None,
+        dns: Vec::new(),
+    }))
+    .await
+    .unwrap();
+    let proxy_addr = (proxy.url.host_str().unwrap(), proxy.url.port().unwrap());
+
+    // 门户 accept 后持有连接、不回包；收到代理转发的请求头说明请求阶段已
+    // 结束、上游连接已建立，之后必然以响应头超时收场。
+    let (forwarded_tx, forwarded_rx) = tokio::sync::oneshot::channel();
+    let silent = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut stream = HeadBufferedReader::new(stream);
+        read_http_head(&mut stream).await.unwrap();
+        let _ = forwarded_tx.send(());
+        // 转发 task 超时退出后会关闭上游连接：以 EOF 收尾证明 task 已结束
+        let mut byte = [0; 1];
+        let eof = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte)).await;
+        assert!(
+            matches!(eof, Ok(Ok(0)) | Ok(Err(_))),
+            "上游连接应在响应头超时后由代理关闭"
+        );
+    });
+
+    let mut client = HeadBufferedReader::new(TcpStream::connect(proxy_addr).await.unwrap());
+    let auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!(
+            "{}:{}",
+            proxy.url.username(),
+            proxy.url.password().unwrap_or("")
+        ))
+    );
+    client
+        .write_all(
+            format!(
+                "GET http://{upstream_addr}/portal HTTP/1.1\r\n\
+                 Host: {upstream_addr}\r\n\
+                 Proxy-Authorization: {auth}\r\n\
+                 \r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    forwarded_rx.await.unwrap();
+
+    let head = tokio::time::timeout(Duration::from_secs(2), read_http_head(&mut client))
+        .await
+        .expect("客户端应在响应头超时上限内收到回包")
+        .unwrap();
+    assert!(
+        head.starts_with(b"HTTP/1.1 504"),
+        "{}",
+        String::from_utf8_lossy(&head)
+    );
+    silent.await.unwrap();
 }
 
 #[tokio::test]
@@ -161,6 +271,39 @@ async fn connect_tunnel_relays_bytes_and_lease_drop_closes_connections() {
 }
 
 #[tokio::test]
+async fn connect_tunnel_preserves_greeting_coalesced_with_connect_response() {
+    // server-first 协议（SSH/SMTP 一类）在隧道建立瞬间即回问候，代理可能把
+    // 「CONNECT 200」与问候字节合并写出——越读进适配层的字节是有效隧道数据，
+    // 必须随流回放而非让 connect 报错（可达目标误判失败，Codex 复审钉住）
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let relay = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut proxy = HeadBufferedReader::new(stream);
+        let head = read_http_head(&mut proxy).await.unwrap();
+        assert!(String::from_utf8_lossy(&head).starts_with("CONNECT "));
+        // 单次写出：响应头与问候合流，钉死越读场景
+        proxy
+            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\nSSH-2.0-OpenSSH_9.9")
+            .await
+            .unwrap();
+        // 持住连接直至客户端侧读毕，避免提前 EOF 干扰
+        let mut tail = [0; 1];
+        let _ = proxy.read(&mut tail).await;
+    });
+    let proxy_url = url::Url::parse(&format!("http://{addr}/")).unwrap();
+    let mut tunnel = connect_http_proxy(&proxy_url, "ssh.example", 22)
+        .await
+        .expect("问候与响应合流时 connect 必须成功");
+    let mut greeting = [0; 19];
+    tunnel.read_exact(&mut greeting).await.unwrap();
+    assert_eq!(&greeting, b"SSH-2.0-OpenSSH_9.9");
+    // 先关客户端侧再等代理任务：tail 读以客户端断开为退出条件
+    drop(tunnel);
+    relay.await.unwrap();
+}
+
+#[tokio::test]
 async fn http_keep_alive_preserves_one_connection_across_token_and_login() {
     let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = target.local_addr().unwrap();
@@ -171,7 +314,8 @@ async fn http_keep_alive_preserves_one_connection_across_token_and_login() {
     .await
     .unwrap();
     let served = tokio::spawn(async move {
-        let (mut stream, _) = target.accept().await.unwrap();
+        let (stream, _) = target.accept().await.unwrap();
+        let mut stream = HeadBufferedReader::new(stream);
         let first = read_http_head(&mut stream).await.unwrap();
         assert!(first.starts_with(b"GET /token HTTP/1.1"));
         stream
@@ -349,7 +493,8 @@ async fn windows_bound_browser_and_dns_smoke() {
     let seen = visits.clone();
     let portal_task = tokio::spawn(async move {
         loop {
-            let (mut stream, peer) = portal.accept().await.unwrap();
+            let (stream, peer) = portal.accept().await.unwrap();
+            let mut stream = HeadBufferedReader::new(stream);
             assert_eq!(peer.ip(), source, "门户连接必须使用同一网卡源地址");
             let _ = read_http_head(&mut stream).await.unwrap();
             seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -425,4 +570,57 @@ asyncio.run(main())
     );
     assert!(queries.load(std::sync::atomic::Ordering::Relaxed) > 0);
     assert!(visits.load(std::sync::atomic::Ordering::Relaxed) > 0);
+}
+
+// ============ read_http_head（A24：整块读取 + 越读暂存替代逐字节 read_u8） ============
+
+/// 建立一对回环 TCP 连接（client 为裸流，server 已包越读适配层）
+async fn loopback_pair() -> (TcpStream, HeadBufferedReader) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    (client, HeadBufferedReader::new(server))
+}
+
+#[tokio::test]
+async fn read_http_head_stops_at_crlf_crlf_and_keeps_body_bytes() {
+    let (mut client, mut server) = loopback_pair().await;
+    // 头与消息体一次性到达：整块读取会越过 \r\n\r\n 预读 BODY，
+    // 适配层必须把越读字节暂存并在后续读取中先于底层流吐出
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nBODY")
+        .await
+        .unwrap();
+    let head = read_http_head(&mut server).await.unwrap();
+    assert_eq!(head, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    // 头之后的字节不被吞掉、不被重复
+    let mut rest = [0u8; 4];
+    server.read_exact(&mut rest).await.unwrap();
+    assert_eq!(&rest, b"BODY");
+}
+
+#[tokio::test]
+async fn read_http_head_rejects_head_at_32kib_limit() {
+    let (mut client, mut server) = loopback_pair().await;
+    let payload = vec![b'a'; 32 * 1024];
+    let reader = tokio::spawn(async move { read_http_head(&mut server).await });
+    client.write_all(&payload).await.unwrap();
+    client.flush().await.unwrap();
+    // 读满 32KB 仍无头终止符即拒绝，不会无限缓冲对端流量
+    let error = reader.await.unwrap().unwrap_err();
+    assert_eq!(error.to_string(), "代理请求头过大");
+}
+
+#[tokio::test]
+async fn read_http_head_reports_eof_when_peer_closes_mid_head() {
+    let (mut client, mut server) = loopback_pair().await;
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: x")
+        .await
+        .unwrap();
+    drop(client);
+    let error = read_http_head(&mut server).await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
 }

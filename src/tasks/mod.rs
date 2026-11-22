@@ -18,6 +18,10 @@ pub use models::*;
 
 use thiserror::Error;
 
+// IO 人话化文案助手已下沉至 `utils::io_human`（T9-1 全域错误文案统一），此处
+// 转出保持 `crate::tasks::io_error_at` 等既有调用点不变。
+pub(crate) use crate::utils::io_human::{io_error, io_error_at};
+
 /// 脚本执行能力抽象（登录脚本渠道注入用）
 ///
 /// 单独成 trait 而非直接注入 `Arc<TaskExecutor>`：登录会话的 `SessionDeps` 守着
@@ -182,7 +186,12 @@ pub enum TaskError {
     #[error("执行超时: {0}s")]
     ExecutionTimeout(u64),
     /// 文件/进程 IO 错误
-    #[error("IO 错误: {0}")]
+    ///
+    /// 载荷是「动作 + 路径 + 失败类别 + 原始错误」的中文文案（由模块级
+    /// `io_error_at` / `io_error` 构造），Display 直接面向用户；原始
+    /// `std::io` 错误文本保留在文案末尾供日志比对，`ErrorKind` 原样保留供
+    /// 程序化分支。
+    #[error("{0}")]
     IoError(#[from] std::io::Error),
     /// 序列化/反序列化错误
     #[error("JSON 错误: {0}")]
